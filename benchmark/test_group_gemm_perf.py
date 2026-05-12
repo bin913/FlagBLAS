@@ -45,14 +45,14 @@ if not hasattr(cublas, "cublasGemmGroupedBatchedEx"):
             n_arr.ctypes.data_as(ctypes.c_void_p),
             k_arr.ctypes.data_as(ctypes.c_void_p),
             ctypes.c_void_p(alpha),
-            a_array,
+            ctypes.c_void_p(a_array),
             ctypes.c_int(a_type),
             lda.ctypes.data_as(ctypes.c_void_p),
-            b_array,
+            ctypes.c_void_p(b_array),
             ctypes.c_int(b_type),
             ldb.ctypes.data_as(ctypes.c_void_p),
             ctypes.c_void_p(beta),
-            c_array,
+            ctypes.c_void_p(c_array),
             ctypes.c_int(c_type),
             ldc.ctypes.data_as(ctypes.c_void_p),
             ctypes.c_int(group_count),
@@ -104,6 +104,7 @@ def _get_m_values():
 CUBLAS_OP_N = 0
 CUDA_R_16F = 2
 CUDA_R_16BF = 14
+CUBLAS_COMPUTE_32F = 0
 CUBLAS_COMPUTE_32F_FAST_16F = 74
 CUBLAS_COMPUTE_32F_FAST_16BF = 75
 
@@ -156,8 +157,7 @@ def cublas_group_gemm_baseline(
     alpha,
     beta,
     handle,
-    alpha_ptr,
-    beta_ptr,
+    **kwargs,
 ):
     """cuBLAS grouped GEMM via ``cublasGemmGroupedBatchedEx``.
 
@@ -171,10 +171,9 @@ def cublas_group_gemm_baseline(
 
     if group_A.dtype == torch.float16:
         cu_dtype = CUDA_R_16F
-        cu_compute = CUBLAS_COMPUTE_32F_FAST_16F
     else:
         cu_dtype = CUDA_R_16BF
-        cu_compute = CUBLAS_COMPUTE_32F_FAST_16BF
+    cu_compute = CUBLAS_COMPUTE_32F
 
     out = torch.empty_like(group_C)
 
@@ -209,6 +208,8 @@ def cublas_group_gemm_baseline(
     ldb_arr = np.array(ldb_list, dtype=np.int32)
     ldc_arr = np.array(ldc_list, dtype=np.int32)
     batch = np.array([1] * e, dtype=np.int32)
+    alpha_arr = np.full(e, alpha, dtype=np.float32)
+    beta_arr = np.full(e, beta, dtype=np.float32)
 
     device = group_A.device
     d_a_ptrs = torch.tensor(a_ptrs, dtype=torch.int64, device=device)
@@ -222,14 +223,14 @@ def cublas_group_gemm_baseline(
         m_arr,
         n_arr,
         k_arr,
-        alpha_ptr,
+        alpha_arr.ctypes.data,
         d_a_ptrs.data_ptr(),
         cu_dtype,
         lda_arr,
         d_b_ptrs.data_ptr(),
         cu_dtype,
         ldb_arr,
-        beta_ptr,
+        beta_arr.ctypes.data,
         d_c_ptrs.data_ptr(),
         cu_dtype,
         ldc_arr,
@@ -349,11 +350,11 @@ CORRECTNESS_CONFIGS = [
 @pytest.mark.group_gemm
 @pytest.mark.parametrize("k_en", CORRECTNESS_CONFIGS)
 def test_correctness_group_gemm_fp16(k_en):
-    """验证 fp16：flag_blas vs CPU float32 参考"""
+    """验证 fp16：cuBLAS == flag_blas == CPU float32 参考"""
     k, e, n = k_en
     device = flag_blas.device
 
-    _setup_cublas_handle()
+    handle = _setup_cublas_handle()
 
     torch.manual_seed(42)
     np.random.seed(42)
@@ -368,23 +369,31 @@ def test_correctness_group_gemm_fp16(k_en):
     group_C = torch.randn(total_M, n, dtype=torch.float16, device=device)
     offs_table = _build_offs_table(k, e, n, m_list)
 
+    out_cublas = cublas_group_gemm_baseline(
+        group_A, group_B, group_C, offs_table,
+        alpha=1.0, beta=0.0, handle=handle,
+    )
+
     out_flag = gems_group_gemm_wrapper(
         group_A, group_B, group_C, offs_table, alpha=1.0, beta=0.0,
     )
 
     cpu_ref = _compute_cpu_reference(group_A, group_B, group_C, offs_table, 1.0, 0.0)
 
+    # cuBLAS vs flag_blas
+    torch.testing.assert_close(out_cublas, out_flag, rtol=1e-2, atol=1e-2)
+    # flag_blas vs CPU reference
     torch.testing.assert_close(out_flag.cpu(), cpu_ref.cpu(), rtol=1e-2, atol=1e-2)
 
 
 @pytest.mark.group_gemm
 @pytest.mark.parametrize("k_en", CORRECTNESS_CONFIGS)
 def test_correctness_group_gemm_bf16(k_en):
-    """验证 bf16：flag_blas vs CPU float32 参考"""
+    """验证 bf16：cuBLAS == flag_blas == CPU float32 参考"""
     k, e, n = k_en
     device = flag_blas.device
 
-    _setup_cublas_handle()
+    handle = _setup_cublas_handle()
 
     torch.manual_seed(42)
     np.random.seed(42)
@@ -399,10 +408,18 @@ def test_correctness_group_gemm_bf16(k_en):
     group_C = torch.randn(total_M, n, dtype=torch.bfloat16, device=device)
     offs_table = _build_offs_table(k, e, n, m_list)
 
+    out_cublas = cublas_group_gemm_baseline(
+        group_A, group_B, group_C, offs_table,
+        alpha=1.0, beta=0.0, handle=handle,
+    )
+
     out_flag = gems_group_gemm_wrapper(
         group_A, group_B, group_C, offs_table, alpha=1.0, beta=0.0,
     )
 
     cpu_ref = _compute_cpu_reference(group_A, group_B, group_C, offs_table, 1.0, 0.0)
 
+    # cuBLAS vs flag_blas
+    torch.testing.assert_close(out_cublas, out_flag, rtol=1e-2, atol=1e-2)
+    # flag_blas vs CPU reference
     torch.testing.assert_close(out_flag.cpu(), cpu_ref.cpu(), rtol=1e-2, atol=1e-2)
