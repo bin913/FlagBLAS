@@ -1,5 +1,4 @@
 import ctypes
-import random
 from typing import Generator
 
 import cupy as cp
@@ -97,7 +96,10 @@ GROUP_GEMM_CONFIGS = [
     # (512, 64, 2048),
 ]
 
-M_MIN, M_MAX = 1, 4096
+def _get_m_values():
+    """M 取值规范：1~32 全部，大于 32 取 2 的次幂，共 43 个值。"""
+    return list(range(1, 33)) + [64, 128, 256, 512, 1024, 2048, 4096]
+
 
 CUBLAS_OP_N = 0
 CUDA_R_16F = 2
@@ -265,9 +267,10 @@ class GroupGemmBenchmark(Benchmark):
         alpha_ptr = alpha_np.ctypes.data
         beta_ptr = beta_np.ctypes.data
 
+        m_values = _get_m_values()
         scale = 1.0
         for k, e, n in GROUP_GEMM_CONFIGS:
-            m_list = [random.randint(M_MIN, M_MAX) for _ in range(e)]
+            m_list = [m_values[i % len(m_values)] for i in range(e)]
             total_M = sum(m_list)
             total_K = e * k
 
@@ -353,10 +356,10 @@ def test_correctness_group_gemm_fp16(k_en):
     _setup_cublas_handle()
 
     torch.manual_seed(42)
-    random.seed(42)
     np.random.seed(42)
 
-    m_list = [random.randint(M_MIN, M_MAX) for _ in range(e)]
+    m_values = _get_m_values()
+    m_list = [m_values[i % len(m_values)] for i in range(e)]
     total_M = sum(m_list)
     total_K = e * k
 
@@ -384,10 +387,10 @@ def test_correctness_group_gemm_bf16(k_en):
     _setup_cublas_handle()
 
     torch.manual_seed(42)
-    random.seed(42)
     np.random.seed(42)
 
-    m_list = [random.randint(M_MIN, M_MAX) for _ in range(e)]
+    m_values = _get_m_values()
+    m_list = [m_values[i % len(m_values)] for i in range(e)]
     total_M = sum(m_list)
     total_K = e * k
 
