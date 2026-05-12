@@ -118,6 +118,34 @@ def _build_offs_table(k, e, n, m_list):
     return offs
 
 
+def _compute_cpu_reference(group_A, group_B, group_C, offs_table, alpha, beta):
+    """CPU float32 参考结果，用于验证 GPU 实现的正确性。"""
+    ref_out = group_C.clone().to(torch.float32)
+    A_f32 = group_A.to(torch.float32)
+    B_f32 = group_B.to(torch.float32)
+    for entry in offs_table:
+        m_g, n_g, k_g, start_M, start_K, start_C = entry
+        A_sub = A_f32[start_M : start_M + m_g, :k_g]
+        B_sub = B_f32[start_K : start_K + k_g, :n_g]
+        res = torch.matmul(A_sub, B_sub)
+        if beta == 0.0:
+            ref_out[start_C : start_C + m_g, :n_g] = alpha * res
+        else:
+            ref_out[start_C : start_C + m_g, :n_g] = (
+                alpha * res + beta * ref_out[start_C : start_C + m_g, :n_g]
+            )
+    return ref_out.to(group_A.dtype)
+
+
+def _setup_cublas_handle():
+    """获取 cuBLAS handle 并配置 host-side pointer mode."""
+    handle = cp.cuda.device.get_cublas_handle()
+    cublas.setPointerMode(handle, cublas.CUBLAS_POINTER_MODE_HOST)
+    cublas.setMathMode(handle, 0)
+    torch.backends.cuda.matmul.allow_tf32 = False
+    return handle
+
+
 def cublas_group_gemm_baseline(
     group_A,
     group_B,
@@ -131,7 +159,7 @@ def cublas_group_gemm_baseline(
 ):
     """cuBLAS grouped GEMM via ``cublasGemmGroupedBatchedEx``.
 
-    PyTorch 使用行优先（row-major），而 cuBLAS 使用列优先（column-major）。
+    PyTorch 使用行优先，而 cuBLAS 使用列优先。
     行优先的 C = A @ B 等价于列优先的 C^T = B^T @ A^T。
     因此调用 cuBLAS 时需要交换 A/B 数据源，并修正对应的切片索引。
     """
@@ -230,10 +258,7 @@ class GroupGemmBenchmark(Benchmark):
         return ["tflops", "gbps"]
 
     def get_input_iter(self, cur_dtype) -> Generator:
-        handle = cp.cuda.device.get_cublas_handle()
-        cublas.setPointerMode(handle, cublas.CUBLAS_POINTER_MODE_HOST)
-        cublas.setMathMode(handle, 0)
-        torch.backends.cuda.matmul.allow_tf32 = False
+        handle = _setup_cublas_handle()
 
         alpha_np = np.array(self.alpha, dtype=np.float32)
         beta_np = np.array(self.beta, dtype=np.float32)
@@ -308,141 +333,73 @@ def test_perf_group_gemm_fp16():
     )
     bench.run()
 
-# @pytest.mark.group_gemm
-# def test_correctness_group_gemm_fp16():
-#     """测试 flag_blas group_gemm 与 cuBLAS baseline 的正确性对比"""
-#     device = torch.device("cuda")
-#     torch.backends.cuda.matmul.allow_tf32 = False
-
-#     import cupy as cp
-#     from cupy_backends.cuda.libs import cublas
-
-#     handle = cp.cuda.device.get_cublas_handle()
-#     cublas.setPointerMode(handle, cublas.CUBLAS_POINTER_MODE_HOST)
-#     cublas.setMathMode(handle, 0)
-
-#     alpha_np = np.array(1.0, dtype=np.float32)
-#     beta_np = np.array(0.0, dtype=np.float32)
-#     alpha_ptr = alpha_np.ctypes.data
-#     beta_ptr = beta_np.ctypes.data
-
-#     # 使用 GROUP_GEMM_CONFIGS 中的配置进行正确性测试
-#     # 为控制测试时间，选取部分有代表性的配置
-#     test_configs = [
-#         (2048, 128, 1536),
-#         (768, 128, 2048),
-#         (2048, 16, 1536),
-#         (768, 16, 2048),
-#         (2048, 512, 256),
-#         (128, 512, 2048),
-#     ]
-
-#     for k, e, n in test_configs:
-#         # 固定随机种子以保证可复现
-#         torch.manual_seed(42)
-#         random.seed(42)
-#         np.random.seed(42)
-
-#         m_list = [random.randint(M_MIN, M_MAX) for _ in range(e)]
-#         total_M = sum(m_list)
-#         total_K = e * k
-
-#         # 构造输入数据
-#         group_A = torch.randn(total_M, k, dtype=torch.float16, device=device)
-#         group_B = torch.randn(total_K, n, dtype=torch.float16, device=device)
-#         group_C = torch.randn(total_M, n, dtype=torch.float16, device=device)
-
-#         offs_table = _build_offs_table(k, e, n, m_list)
-
-#         # cuBLAS baseline 结果
-#         out_cublas = cublas_group_gemm_baseline(
-#             group_A,
-#             group_B,
-#             group_C,
-#             offs_table,
-#             alpha=1.0,
-#             beta=0.0,
-#             handle=handle,
-#             alpha_ptr=alpha_ptr,
-#             beta_ptr=beta_ptr,
-#         )
-
-#         # flag_blas 结果
-#         out_flag = gems_group_gemm_wrapper(
-#             group_A,
-#             group_B,
-#             group_C,
-#             offs_table,
-#             alpha=1.0,
-#             beta=0.0,
-#         )
-
-#         # 比较结果：使用相对容差，因为 fp16 精度有限
-#         torch.testing.assert_close(out_flag, out_cublas, rtol=1e-2, atol=1e-2)
+CORRECTNESS_CONFIGS = [
+    (2048, 128, 1536),
+    (768, 128, 2048),
+    (2048, 16, 1536),
+    (768, 16, 2048),
+    (2048, 512, 256),
+    (128, 512, 2048),
+]
 
 
-# @pytest.mark.group_gemm
-# def test_correctness_group_gemm_bf16():
-    # """测试 flag_blas group_gemm 与 cuBLAS baseline 的正确性对比 (bf16)"""
-    # device = torch.device("cuda")
-    # torch.backends.cuda.matmul.allow_tf32 = False
+@pytest.mark.group_gemm
+@pytest.mark.parametrize("k_en", CORRECTNESS_CONFIGS)
+def test_correctness_group_gemm_fp16(k_en):
+    """验证 fp16：flag_blas vs CPU float32 参考"""
+    k, e, n = k_en
+    device = flag_blas.device
 
-    # import cupy as cp
-    # from cupy_backends.cuda.libs import cublas
+    _setup_cublas_handle()
 
-    # handle = cp.cuda.device.get_cublas_handle()
-    # cublas.setPointerMode(handle, cublas.CUBLAS_POINTER_MODE_HOST)
-    # cublas.setMathMode(handle, 0)
+    torch.manual_seed(42)
+    random.seed(42)
+    np.random.seed(42)
 
-    # alpha_np = np.array(1.0, dtype=np.float32)
-    # beta_np = np.array(0.0, dtype=np.float32)
-    # alpha_ptr = alpha_np.ctypes.data
-    # beta_ptr = beta_np.ctypes.data
+    m_list = [random.randint(M_MIN, M_MAX) for _ in range(e)]
+    total_M = sum(m_list)
+    total_K = e * k
 
-    # test_configs = [
-    #     (2048, 128, 1536),
-    #     (768, 128, 2048),
-    #     (2048, 16, 1536),
-    #     (768, 16, 2048),
-    #     (2048, 512, 256),
-    #     (128, 512, 2048),
-    # ]
+    group_A = torch.randn(total_M, k, dtype=torch.float16, device=device)
+    group_B = torch.randn(total_K, n, dtype=torch.float16, device=device)
+    group_C = torch.randn(total_M, n, dtype=torch.float16, device=device)
+    offs_table = _build_offs_table(k, e, n, m_list)
 
-    # for k, e, n in test_configs:
-    #     torch.manual_seed(42)
-    #     random.seed(42)
-    #     np.random.seed(42)
+    out_flag = gems_group_gemm_wrapper(
+        group_A, group_B, group_C, offs_table, alpha=1.0, beta=0.0,
+    )
 
-    #     m_list = [random.randint(M_MIN, M_MAX) for _ in range(e)]
-    #     total_M = sum(m_list)
-    #     total_K = e * k
+    cpu_ref = _compute_cpu_reference(group_A, group_B, group_C, offs_table, 1.0, 0.0)
 
-    #     group_A = torch.randn(total_M, k, dtype=torch.bfloat16, device=device)
-    #     group_B = torch.randn(total_K, n, dtype=torch.bfloat16, device=device)
-    #     group_C = torch.randn(total_M, n, dtype=torch.bfloat16, device=device)
+    torch.testing.assert_close(out_flag.cpu(), cpu_ref.cpu(), rtol=1e-2, atol=1e-2)
 
-    #     offs_table = _build_offs_table(k, e, n, m_list)
 
-    #     out_cublas = cublas_group_gemm_baseline(
-    #         group_A,
-    #         group_B,
-    #         group_C,
-    #         offs_table,
-    #         alpha=1.0,
-    #         beta=0.0,
-    #         handle=handle,
-    #         alpha_ptr=alpha_ptr,
-    #         beta_ptr=beta_ptr,
-    #     )
+@pytest.mark.group_gemm
+@pytest.mark.parametrize("k_en", CORRECTNESS_CONFIGS)
+def test_correctness_group_gemm_bf16(k_en):
+    """验证 bf16：flag_blas vs CPU float32 参考"""
+    k, e, n = k_en
+    device = flag_blas.device
 
-    #     out_flag = gems_group_gemm_wrapper(
-    #         group_A,
-    #         group_B,
-    #         group_C,
-    #         offs_table,
-    #         alpha=1.0,
-    #         beta=0.0,
-    #     )
+    _setup_cublas_handle()
 
-    #     # bf16 精度比 fp16 稍好，但仍使用宽松容差
-    #     torch.testing.assert_close(out_flag, out_cublas, rtol=1e-2, atol=1e-2)
+    torch.manual_seed(42)
+    random.seed(42)
+    np.random.seed(42)
+
+    m_list = [random.randint(M_MIN, M_MAX) for _ in range(e)]
+    total_M = sum(m_list)
+    total_K = e * k
+
+    group_A = torch.randn(total_M, k, dtype=torch.bfloat16, device=device)
+    group_B = torch.randn(total_K, n, dtype=torch.bfloat16, device=device)
+    group_C = torch.randn(total_M, n, dtype=torch.bfloat16, device=device)
+    offs_table = _build_offs_table(k, e, n, m_list)
+
+    out_flag = gems_group_gemm_wrapper(
+        group_A, group_B, group_C, offs_table, alpha=1.0, beta=0.0,
+    )
+
+    cpu_ref = _compute_cpu_reference(group_A, group_B, group_C, offs_table, 1.0, 0.0)
+
+    torch.testing.assert_close(out_flag.cpu(), cpu_ref.cpu(), rtol=1e-2, atol=1e-2)
