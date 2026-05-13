@@ -1,4 +1,5 @@
 import ctypes
+import random
 from typing import Generator
 
 import cupy as cp
@@ -12,7 +13,7 @@ import flag_blas
 from benchmark.performance_utils import Benchmark
 from flag_blas.utils import shape_utils
 
-# ── monkey-patch: cupy 14.0.1 未绑定 cublasGemmGroupedBatchedEx ──────────────
+
 if not hasattr(cublas, "cublasGemmGroupedBatchedEx"):
     _libcublas = ctypes.CDLL("libcublas.so.12")
 
@@ -237,7 +238,7 @@ class GroupGemmBenchmark(Benchmark):
         m_values = _get_m_values()
         scale = 1.0
         for k, e, n in GROUP_GEMM_CONFIGS:
-            m_list = [m_values[i % len(m_values)] for i in range(e)]
+            m_list = [random.choice(m_values) for _ in range(e)]
             total_M = sum(m_list)
             total_K = e * k
 

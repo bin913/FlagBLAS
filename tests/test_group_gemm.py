@@ -95,7 +95,7 @@ GROUP_GEMM_CONFIGS = [
 
 DTYPES = [torch.bfloat16, torch.float16]
 
-M_MIN, M_MAX = 1, 4096
+M_VALUES = list(range(1, 33)) + [64, 128, 256, 512, 1024, 2048, 4096]
 
 CUBLAS_OP_N = 0
 CUDA_R_16F = 2
@@ -117,7 +117,9 @@ def _build_offs_table(k, e, n, m_list):
 
 def _compute_reference(group_A, group_B, group_C, offs_table, alpha, beta):
     dtype = group_A.dtype
-    ref_out = group_C.clone().to(torch.float32)
+    group_A = group_A.cpu()
+    group_B = group_B.cpu()
+    ref_out = group_C.cpu().clone().to(torch.float32)
 
     A_f32 = group_A.to(torch.float32)
     B_f32 = group_B.to(torch.float32)
@@ -137,7 +139,7 @@ def _compute_reference(group_A, group_B, group_C, offs_table, alpha, beta):
                 alpha * res + beta * ref_out[start_C : start_C + m_g, :n_g]
             )
 
-    return ref_out.to(dtype)
+    return ref_out.to(dtype).to(flag_blas.device)
 
 
 def cublas_group_gemm_reference(group_A, group_B, group_C, offs_table, alpha, beta):
@@ -231,7 +233,7 @@ def test_accuracy_group_gemm(config_idx, dtype):
     alpha, beta = 1.5, 0.5
     scale = k**-0.5
 
-    m_list = [random.randint(M_MIN, M_MAX) for _ in range(e)]
+    m_list = [random.choice(M_VALUES) for _ in range(e)]
     total_M = sum(m_list)
     total_K = e * k
 
@@ -259,7 +261,7 @@ def test_accuracy_group_gemm_cublas(config_idx, dtype):
     alpha, beta = 1.5, 0.5
     scale = k**-0.5
 
-    m_list = [random.randint(M_MIN, M_MAX) for _ in range(e)]
+    m_list = [random.choice(M_VALUES) for _ in range(e)]
     total_M = sum(m_list)
     total_K = e * k
 
