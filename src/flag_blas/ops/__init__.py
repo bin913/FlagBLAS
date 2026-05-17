@@ -70,6 +70,22 @@ from flag_blas.ops.level2.symv import (
     csymv,
     zsymv,
 )
+from flag_blas.ops.level2.trmv import (
+    strmv,
+    dtrmv,
+    ctrmv,
+    ztrmv,
+)
+from flag_blas.ops.level2.tbmv import (
+    stbmv,
+    dtbmv,
+    ctbmv,
+    ztbmv,
+)
+from flag_blas.ops.level2.hemv import (
+    chemv,
+    zhemv,
+)
 from flag_blas.ops.level3.gemm import (
     sgemm,
     hgemm,
@@ -145,6 +161,19 @@ __all__ = [
     "dsymv",
     "csymv",
     "zsymv",
+    # trmv
+    "strmv",
+    "dtrmv",
+    "ctrmv",
+    "ztrmv",
+    # tbmv
+    "stbmv",
+    "dtbmv",
+    "ctbmv",
+    "ztbmv",
+    # hemv
+    "chemv",
+    "zhemv",
     "CUBLAS_DIAG_NON_UNIT",
     "CUBLAS_DIAG_UNIT",
     "CUBLAS_FILL_MODE_LOWER",
