@@ -9,10 +9,10 @@ import torch
 from cupy_backends.cuda.libs import cublas
 
 import flag_blas
+from flag_blas.ops import CUBLAS_OP_N
 
 from benchmark.performance_utils import Benchmark
 from flag_blas.utils import shape_utils
-
 
 if not hasattr(cublas, "cublasGemmGroupedBatchedEx"):
     _libcublas = ctypes.CDLL("libcublas.so.12")
@@ -65,7 +65,7 @@ if not hasattr(cublas, "cublasGemmGroupedBatchedEx"):
     cublas.cublasGemmGroupedBatchedEx = _cublasGemmGroupedBatchedEx_impl
 
 
-GROUP_GEMM_CONFIGS = [
+GROUP_GEMM_SHAPES = [
     (2048, 128, 1536),
     (768, 128, 2048),
     (2048, 128, 768),
@@ -98,14 +98,11 @@ GROUP_GEMM_CONFIGS = [
     (512, 64, 2048),
 ]
 
-CUBLAS_OP_N = 0
+GROUP_GEMM_M_VALUES = list(range(1, 33)) + [64, 128, 256, 512, 1024, 2048, 4096]
+
 CUDA_R_16F = 2
 CUDA_R_16BF = 14
 CUBLAS_COMPUTE_32F = 0
-
-
-def _get_m_values():
-    return list(range(1, 33)) + [64, 128, 256, 512, 1024, 2048, 4096]
 
 
 def _build_offs_table(k, e, n, m_list):
@@ -235,10 +232,9 @@ class GroupGemmBenchmark(Benchmark):
         alpha_ptr = alpha_np.ctypes.data
         beta_ptr = beta_np.ctypes.data
 
-        m_values = _get_m_values()
         scale = 1.0
-        for k, e, n in GROUP_GEMM_CONFIGS:
-            m_list = [random.choice(m_values) for _ in range(e)]
+        for k, e, n in GROUP_GEMM_SHAPES:
+            m_list = [random.choice(GROUP_GEMM_M_VALUES) for _ in range(e)]
             total_M = sum(m_list)
             total_K = e * k
 
@@ -278,6 +274,31 @@ class GroupGemmBenchmark(Benchmark):
         )
         return io_amount * 1e-9 / (latency * 1e-3)
 
+    def validate_results(self, torch_result, gems_result, reduce_dim, tolerance=1e-2):
+        torch_cpu = torch_result.cpu()
+        gems_cpu = gems_result.cpu()
+
+        try:
+            flag_blas.testing.assert_close(
+                gems_cpu,
+                torch_cpu,
+                torch_cpu.dtype,
+                equal_nan=False,
+                reduce_dim=reduce_dim,
+                atol=tolerance,
+            )
+        except AssertionError:
+            max_abs_diff = torch.max(torch.abs(torch_cpu - gems_cpu))
+            max_rel_diff = torch.max(
+                torch.abs((torch_cpu - gems_cpu) / (torch.abs(torch_cpu) + 1e-9))
+            )
+            raise AssertionError(
+                f"Results differ beyond tolerance {tolerance}:\n"
+                f"Max absolute difference: {max_abs_diff}\n"
+                f"Max relative difference: {max_rel_diff}\n"
+                f"Shape: {torch_cpu.shape}"
+            )
+
 
 @pytest.mark.group_gemm
 def test_perf_group_gemm_bf16():
@@ -289,6 +310,11 @@ def test_perf_group_gemm_bf16():
         alpha=1.0,
         beta=0.0,
     )
+    for cur_dtype in bench.dtypes:
+        for A, B, C, offs, kwargs in bench.get_input_iter(cur_dtype):
+            torch_result = cublas_group_gemm_baseline(A, B, C.clone(), offs, **kwargs)
+            gems_result = gems_group_gemm_wrapper(A, B, C.clone(), offs, **kwargs)
+            bench.validate_results(torch_result, gems_result, 1, tolerance=1e-2)
     bench.run()
 
 
@@ -302,4 +328,9 @@ def test_perf_group_gemm_fp16():
         alpha=1.0,
         beta=0.0,
     )
+    for cur_dtype in bench.dtypes:
+        for A, B, C, offs, kwargs in bench.get_input_iter(cur_dtype):
+            torch_result = cublas_group_gemm_baseline(A, B, C.clone(), offs, **kwargs)
+            gems_result = gems_group_gemm_wrapper(A, B, C.clone(), offs, **kwargs)
+            bench.validate_results(torch_result, gems_result, 1, tolerance=1e-2)
     bench.run()

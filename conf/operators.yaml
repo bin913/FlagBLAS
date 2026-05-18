@@ -47,3 +47,15 @@ ops:
       - BLAS
     stages:
       - beta: '0.1'
+  - id: group_gemm
+    description: |
+      Grouped GEMM that computes multiple independent GEMMs with shared
+      inner dimensions in a single kernel call. Supports FP16 and BF16.
+    for:
+      - group_gemm
+    labels:
+      - gemm
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
