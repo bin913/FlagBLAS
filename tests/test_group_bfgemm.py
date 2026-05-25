@@ -1,0 +1,275 @@
+import ctypes
+import random
+
+import cupy as cp
+import numpy as np
+import pytest
+import torch
+from cupy_backends.cuda.libs import cublas
+
+import flag_blas
+from flag_blas.ops import CUBLAS_OP_N
+
+from .conftest import TO_CPU
+from . import accuracy_utils as utils
+
+if not hasattr(cublas, "cublasGemmGroupedBatchedEx"):
+    _libcublas = ctypes.CDLL("libcublas.so.12")
+
+    def _cublasGemmGroupedBatchedEx_impl(
+        handle,
+        transa,
+        transb,
+        m_arr,
+        n_arr,
+        k_arr,
+        alpha,
+        a_array,
+        a_type,
+        lda,
+        b_array,
+        b_type,
+        ldb,
+        beta,
+        c_array,
+        c_type,
+        ldc,
+        group_count,
+        group_size,
+        compute_type,
+    ):
+        return _libcublas.cublasGemmGroupedBatchedEx(
+            ctypes.c_void_p(handle),
+            transa.ctypes.data_as(ctypes.c_void_p),
+            transb.ctypes.data_as(ctypes.c_void_p),
+            m_arr.ctypes.data_as(ctypes.c_void_p),
+            n_arr.ctypes.data_as(ctypes.c_void_p),
+            k_arr.ctypes.data_as(ctypes.c_void_p),
+            ctypes.c_void_p(alpha),
+            ctypes.c_void_p(a_array),
+            ctypes.c_int(a_type),
+            lda.ctypes.data_as(ctypes.c_void_p),
+            ctypes.c_void_p(b_array),
+            ctypes.c_int(b_type),
+            ldb.ctypes.data_as(ctypes.c_void_p),
+            ctypes.c_void_p(beta),
+            ctypes.c_void_p(c_array),
+            ctypes.c_int(c_type),
+            ldc.ctypes.data_as(ctypes.c_void_p),
+            ctypes.c_int(group_count),
+            group_size.ctypes.data_as(ctypes.c_void_p),
+            ctypes.c_int(compute_type),
+        )
+
+    cublas.cublasGemmGroupedBatchedEx = _cublasGemmGroupedBatchedEx_impl
+
+
+CUDA_R_16F = 2
+CUDA_R_16BF = 14
+CUBLAS_COMPUTE_32F = 0
+
+
+def _build_offs_table(k, e, n, m_list):
+    offs = []
+    start_M = 0
+    start_K = 0
+    for g in range(e):
+        mg = m_list[g]
+        offs.append([mg, n, k, start_M, start_K, start_M])
+        start_M += mg
+        start_K += k
+    return offs
+
+
+def cublas_group_gemm_reference(group_A, group_B, group_C, offs_table, alpha, beta):
+    e = len(offs_table)
+    if e == 0:
+        return torch.empty_like(group_C)
+
+    handle = cp.cuda.device.get_cublas_handle()
+    cublas.setPointerMode(handle, cublas.CUBLAS_POINTER_MODE_HOST)
+    cublas.setMathMode(handle, 0)
+    torch.backends.cuda.matmul.allow_tf32 = False
+
+    if group_A.dtype == torch.float16:
+        cu_dtype = CUDA_R_16F
+    else:
+        cu_dtype = CUDA_R_16BF
+
+    out = group_C.clone().contiguous()
+
+    a_ptrs = []
+    b_ptrs = []
+    c_ptrs = []
+    m_arr_list = []
+    n_arr_list = []
+    k_arr_list = []
+    lda_list = []
+    ldb_list = []
+    ldc_list = []
+
+    for entry in offs_table:
+        mg, ng, kg, start_M, start_K, start_C = entry
+        a_ptrs.append(group_B[start_K : start_K + kg, :].data_ptr())
+        b_ptrs.append(group_A[start_M : start_M + mg, :].data_ptr())
+        c_ptrs.append(out[start_C : start_C + mg, :].data_ptr())
+        m_arr_list.append(ng)
+        n_arr_list.append(mg)
+        k_arr_list.append(kg)
+        lda_list.append(ng)
+        ldb_list.append(kg)
+        ldc_list.append(ng)
+
+    transa = np.array([CUBLAS_OP_N] * e, dtype=np.int32)
+    transb = np.array([CUBLAS_OP_N] * e, dtype=np.int32)
+    m_arr = np.array(m_arr_list, dtype=np.int32)
+    n_arr = np.array(n_arr_list, dtype=np.int32)
+    k_arr = np.array(k_arr_list, dtype=np.int32)
+    lda_arr = np.array(lda_list, dtype=np.int32)
+    ldb_arr = np.array(ldb_list, dtype=np.int32)
+    ldc_arr = np.array(ldc_list, dtype=np.int32)
+    batch = np.array([1] * e, dtype=np.int32)
+    alpha_arr = np.full(e, alpha, dtype=np.float32)
+    beta_arr = np.full(e, beta, dtype=np.float32)
+
+    device = group_A.device
+    d_a_ptrs = torch.tensor(a_ptrs, dtype=torch.int64, device=device)
+    d_b_ptrs = torch.tensor(b_ptrs, dtype=torch.int64, device=device)
+    d_c_ptrs = torch.tensor(c_ptrs, dtype=torch.int64, device=device)
+
+    cublas.cublasGemmGroupedBatchedEx(
+        handle,
+        transa,
+        transb,
+        m_arr,
+        n_arr,
+        k_arr,
+        alpha_arr.ctypes.data,
+        d_a_ptrs.data_ptr(),
+        cu_dtype,
+        lda_arr,
+        d_b_ptrs.data_ptr(),
+        cu_dtype,
+        ldb_arr,
+        beta_arr.ctypes.data,
+        d_c_ptrs.data_ptr(),
+        cu_dtype,
+        ldc_arr,
+        e,
+        batch,
+        CUBLAS_COMPUTE_32F,
+    )
+
+    return out
+
+
+@pytest.mark.group_gemm
+@pytest.mark.parametrize("k,e,n", utils.GROUP_GEMM_SHAPES)
+def test_accuracy_group_gemm(k, e, n):
+    device = flag_blas.device
+    alpha, beta = 1.5, 0.5
+    scale = k**-0.5
+
+    m_list = [random.choice(utils.GROUP_GEMM_M_VALUES) for _ in range(e)]
+    total_M = sum(m_list)
+    total_K = e * k
+
+    group_A = (
+        torch.randn(total_M, k, dtype=torch.bfloat16, device=device) * scale
+    ).contiguous()
+    group_B = (
+        torch.randn(total_K, n, dtype=torch.bfloat16, device=device) * scale
+    ).contiguous()
+    group_C = (
+        torch.randn(total_M, n, dtype=torch.bfloat16, device=device) * scale
+    ).contiguous()
+
+    offs_table = _build_offs_table(k, e, n, m_list)
+
+    if TO_CPU:
+        ref_A = group_A.to("cpu").to(torch.float64)
+        ref_B = group_B.to("cpu").to(torch.float64)
+        ref_C = group_C.to("cpu").clone().to(torch.float64)
+        for entry in offs_table:
+            m_g, n_g, k_g, start_M, start_K, start_C = entry
+            A_sub = ref_A[start_M : start_M + m_g, :k_g]
+            B_sub = ref_B[start_K : start_K + k_g, :n_g]
+            res = torch.matmul(A_sub, B_sub)
+            if beta == 0.0:
+                ref_C[start_C : start_C + m_g, :n_g] = alpha * res
+            else:
+                ref_C[start_C : start_C + m_g, :n_g] = (
+                    alpha * res + beta * ref_C[start_C : start_C + m_g, :n_g]
+                )
+        ref = ref_C.to(torch.bfloat16)
+    else:
+        ref = cublas_group_gemm_reference(
+            group_A, group_B, group_C, offs_table, alpha, beta
+        )
+
+    out = flag_blas.group_bfgemm(
+        group_A, group_B, group_C, offs_table, alpha=alpha, beta=beta
+    )
+
+    utils.blas_assert_close(out, ref, torch.bfloat16, reduce_dim=k)
+
+
+@pytest.mark.group_gemm
+def test_group_gemm_alpha_zero():
+    m, k, e, n = 16, 64, 4, 128
+    dtype, device = torch.bfloat16, flag_blas.device
+    A = torch.randn(e * m, k, dtype=dtype, device=device).contiguous()
+    B = torch.randn(e * k, n, dtype=dtype, device=device).contiguous()
+    C = torch.randn(e * m, n, dtype=dtype, device=device).contiguous()
+    C_orig = C.clone()
+    m_list = [m] * e
+    offs_table = _build_offs_table(k, e, n, m_list)
+
+    out = flag_blas.group_bfgemm(A, B, C, offs_table, alpha=0.0, beta=2.0)
+
+    if TO_CPU:
+        utils.blas_assert_close(out, (C_orig * 2.0).to("cpu"), dtype, reduce_dim=k)
+    else:
+        utils.blas_assert_close(out, C_orig * 2.0, dtype, reduce_dim=k)
+
+
+@pytest.mark.group_gemm
+def test_group_gemm_beta_zero():
+    m, k, e, n = 8, 32, 3, 64
+    dtype, device = torch.bfloat16, flag_blas.device
+    A = torch.randn(e * m, k, dtype=dtype, device=device).contiguous()
+    B = torch.randn(e * k, n, dtype=dtype, device=device).contiguous()
+    C_zeros = torch.zeros(e * m, n, dtype=dtype, device=device).contiguous()
+    m_list = [m] * e
+    offs_table = _build_offs_table(k, e, n, m_list)
+
+    ref = cublas_group_gemm_reference(A, B, C_zeros, offs_table, 1.0, 0.0)
+    out = flag_blas.group_bfgemm(A, B, C_zeros, offs_table, alpha=1.0, beta=0.0)
+
+    if TO_CPU:
+        utils.blas_assert_close(out, ref.to("cpu"), dtype, reduce_dim=k)
+    else:
+        utils.blas_assert_close(out, ref, dtype, reduce_dim=k)
+
+
+@pytest.mark.group_gemm
+@pytest.mark.parametrize(
+    "alpha,beta", [(1.0, 0.0), (2.0, 0.0), (2.0, 0.5), (0.0, 1.0), (0.5, 1.5)]
+)
+def test_group_gemm_alpha_beta(alpha, beta):
+    m, k, e, n = 32, 128, 2, 128
+    dtype, device = torch.bfloat16, flag_blas.device
+    scale = k**-0.5
+    A = (torch.randn(e * m, k, dtype=dtype, device=device) * scale).contiguous()
+    B = (torch.randn(e * k, n, dtype=dtype, device=device) * scale).contiguous()
+    C = (torch.randn(e * m, n, dtype=dtype, device=device) * scale).contiguous()
+    m_list = [m] * e
+    offs_table = _build_offs_table(k, e, n, m_list)
+
+    ref = cublas_group_gemm_reference(A, B, C, offs_table, alpha, beta)
+    out = flag_blas.group_bfgemm(A, B, C, offs_table, alpha=alpha, beta=beta)
+
+    if TO_CPU:
+        utils.blas_assert_close(out, ref.to("cpu"), dtype, reduce_dim=k)
+    else:
+        utils.blas_assert_close(out, ref, dtype, reduce_dim=k)

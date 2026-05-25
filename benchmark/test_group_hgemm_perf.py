@@ -98,10 +98,10 @@ GROUP_GEMM_SHAPES = [
     (512, 64, 2048),
 ]
 
+SEED = 42
 GROUP_GEMM_M_VALUES = list(range(1, 33)) + [64, 128, 256, 512, 1024, 2048, 4096]
 
 CUDA_R_16F = 2
-CUDA_R_16BF = 14
 CUBLAS_COMPUTE_32F = 0
 
 
@@ -131,10 +131,7 @@ def cublas_group_gemm_baseline(
     if e == 0:
         return torch.empty_like(group_C)
 
-    if group_A.dtype == torch.float16:
-        cu_dtype = CUDA_R_16F
-    else:
-        cu_dtype = CUDA_R_16BF
+    cu_dtype = CUDA_R_16F
 
     out = torch.empty_like(group_C)
 
@@ -206,7 +203,7 @@ def cublas_group_gemm_baseline(
 def gems_group_gemm_wrapper(
     group_A, group_B, group_C, offs_table, alpha, beta, **kwargs
 ):
-    return flag_blas.group_gemm(
+    return flag_blas.group_hgemm(
         group_A, group_B, group_C, offs_table, alpha=alpha, beta=beta
     )
 
@@ -233,6 +230,7 @@ class GroupGemmBenchmark(Benchmark):
         beta_ptr = beta_np.ctypes.data
 
         scale = 1.0
+        random.seed(SEED)
         for k, e, n in GROUP_GEMM_SHAPES:
             m_list = [random.choice(GROUP_GEMM_M_VALUES) for _ in range(e)]
             total_M = sum(m_list)
@@ -298,24 +296,6 @@ class GroupGemmBenchmark(Benchmark):
                 f"Max relative difference: {max_rel_diff}\n"
                 f"Shape: {torch_cpu.shape}"
             )
-
-
-@pytest.mark.group_gemm
-def test_perf_group_gemm_bf16():
-    bench = GroupGemmBenchmark(
-        op_name="group_gemm",
-        torch_op=cublas_group_gemm_baseline,
-        gems_op=gems_group_gemm_wrapper,
-        dtypes=[torch.bfloat16],
-        alpha=1.0,
-        beta=0.0,
-    )
-    for cur_dtype in bench.dtypes:
-        for A, B, C, offs, kwargs in bench.get_input_iter(cur_dtype):
-            torch_result = cublas_group_gemm_baseline(A, B, C.clone(), offs, **kwargs)
-            gems_result = gems_group_gemm_wrapper(A, B, C.clone(), offs, **kwargs)
-            bench.validate_results(torch_result, gems_result, 1, tolerance=1e-2)
-    bench.run()
 
 
 @pytest.mark.group_gemm

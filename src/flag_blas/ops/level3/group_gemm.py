@@ -4,7 +4,6 @@ import torch
 import triton
 import triton.language as tl
 
-# from flag_gems.utils import libentry, libtuner
 from flag_blas.utils import libentry, libtuner
 
 logger = logging.getLogger(__name__)
@@ -56,30 +55,23 @@ def matmul_tma_set_block_size_hook(nargs):
 
 def get_autotune_config(pre_hook=None):
     return [
-        triton.Config(
-            {"BLOCK_M": 128, "BLOCK_N": 256, "BLOCK_K": 64, "GROUP_M": 8},
-            num_stages=3,
-            num_warps=8,
-            pre_hook=pre_hook,
-        ),
-        triton.Config(
-            {"BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 128, "GROUP_M": 8},
-            num_stages=2,
-            num_warps=4,
-            pre_hook=pre_hook,
-        ),
-        triton.Config(
-            {"BLOCK_M": 256, "BLOCK_N": 128, "BLOCK_K": 128, "GROUP_M": 8},
-            num_stages=3,
-            num_warps=4,
-            pre_hook=pre_hook,
-        ),
-        triton.Config(
-            {"BLOCK_M": 256, "BLOCK_N": 128, "BLOCK_K": 64, "GROUP_M": 8},
-            num_stages=3,
-            num_warps=8,
-            pre_hook=pre_hook,
-        ),
+        # ── 大 M (≥64)：充分利用 SM 算力 ──
+        # triton.Config(
+        #     {"BLOCK_M": 128, "BLOCK_N": 256, "BLOCK_K": 64, "GROUP_M": 8},
+        #     num_stages=3, num_warps=8, pre_hook=pre_hook,
+        # ),
+        # triton.Config(
+        #     {"BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 128, "GROUP_M": 8},
+        #     num_stages=2, num_warps=4, pre_hook=pre_hook,
+        # ),
+        # triton.Config(
+        #     {"BLOCK_M": 256, "BLOCK_N": 128, "BLOCK_K": 128, "GROUP_M": 8},
+        #     num_stages=3, num_warps=4, pre_hook=pre_hook,
+        # ),
+        # triton.Config(
+        #     {"BLOCK_M": 256, "BLOCK_N": 128, "BLOCK_K": 64, "GROUP_M": 8},
+        #     num_stages=3, num_warps=8, pre_hook=pre_hook,
+        # ),
         triton.Config(
             {"BLOCK_M": 64, "BLOCK_N": 256, "BLOCK_K": 32, "GROUP_M": 4},
             num_stages=4,
@@ -87,24 +79,53 @@ def get_autotune_config(pre_hook=None):
             pre_hook=pre_hook,
         ),
         triton.Config(
-            {"BLOCK_M": 128, "BLOCK_N": 64, "BLOCK_K": 32, "GROUP_M": 4},
+            {"BLOCK_M": 64, "BLOCK_N": 256, "BLOCK_K": 64, "GROUP_M": 4},
             num_stages=4,
             num_warps=4,
             pre_hook=pre_hook,
         ),
         triton.Config(
-            {"BLOCK_M": 256, "BLOCK_N": 256, "BLOCK_K": 64, "GROUP_M": 8},
-            num_stages=3,
-            num_warps=8,
+            {"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 128, "GROUP_M": 4},
+            num_stages=4,
+            num_warps=4,
             pre_hook=pre_hook,
         ),
+        triton.Config(
+            {"BLOCK_M": 32, "BLOCK_N": 256, "BLOCK_K": 64, "GROUP_M": 4},
+            num_stages=4,
+            num_warps=4,
+            pre_hook=pre_hook,
+        ),
+        triton.Config(
+            {"BLOCK_M": 32, "BLOCK_N": 128, "BLOCK_K": 64, "GROUP_M": 4},
+            num_stages=4,
+            num_warps=4,
+            pre_hook=pre_hook,
+        ),
+        # triton.Config(
+        #     {"BLOCK_M": 128, "BLOCK_N": 64, "BLOCK_K": 32, "GROUP_M": 4},
+        #     num_stages=4, num_warps=4, pre_hook=pre_hook,
+        # ),
+        # triton.Config(
+        #     {"BLOCK_M": 256, "BLOCK_N": 256, "BLOCK_K": 64, "GROUP_M": 8},
+        #     num_stages=3, num_warps=8, pre_hook=pre_hook,
+        # ),
+        # ── 小 M (1~31)：极小 BLOCK_M，大 GROUP_M 补偿 tile 数 ──
+        # triton.Config(
+        #     {"BLOCK_M": 16, "BLOCK_N": 256, "BLOCK_K": 64, "GROUP_M": 2},
+        #     num_stages=4, num_warps=2, pre_hook=pre_hook,
+        # ),
+        # triton.Config(
+        #     {"BLOCK_M": 16, "BLOCK_N": 128, "BLOCK_K": 64, "GROUP_M": 2},
+        #     num_stages=4, num_warps=2, pre_hook=pre_hook,
+        # ),
     ]
 
 
 @libentry()
 @libtuner(configs=get_autotune_config(), key=["M", "N", "K"])
 @triton.jit
-def grouped_gemm_tma_kernel(
+def grouped_bfgemm_tma_kernel(
     M,
     N,
     K,
@@ -205,7 +226,108 @@ def grouped_gemm_tma_kernel(
 @libentry()
 @libtuner(configs=get_autotune_config(), key=["M", "N", "K"])
 @triton.jit
-def grouped_gemm_kernel(
+def grouped_hgemm_tma_kernel(
+    M,
+    N,
+    K,
+    group_a_ptrs,
+    group_b_ptrs,
+    group_c_ptrs,
+    group_out_ptrs,
+    group_gemm_sizes,
+    g_lds,
+    group_size,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+    alpha: tl.constexpr,
+    beta: tl.constexpr,
+    DTYPE: tl.constexpr,
+):
+    tile_idx = tl.program_id(0)
+    total_grid = tl.num_programs(0)
+    last_problem_end = 0
+    for g in range(group_size):
+        gm = tl.load(group_gemm_sizes + g * 3)
+        gn = tl.load(group_gemm_sizes + g * 3 + 1)
+        gk = tl.load(group_gemm_sizes + g * 3 + 2)
+        num_m_tiles = tl.cdiv(gm, BLOCK_M)
+        num_n_tiles = tl.cdiv(gn, BLOCK_N)
+        num_tiles = num_m_tiles * num_n_tiles
+
+        current_problem_end = last_problem_end + num_tiles
+        if tile_idx >= last_problem_end and tile_idx < current_problem_end:
+            lda = tl.load(g_lds + g * 3)
+            ldb = tl.load(g_lds + g * 3 + 1)
+            ldc = tl.load(g_lds + g * 3 + 2)
+
+            a_ptr = tl.load(group_a_ptrs + g).to(tl.pointer_type(DTYPE))
+            b_ptr = tl.load(group_b_ptrs + g).to(tl.pointer_type(DTYPE))
+            c_ptr = tl.load(group_c_ptrs + g).to(tl.pointer_type(DTYPE))
+            out_ptr = tl.load(group_out_ptrs + g).to(tl.pointer_type(DTYPE))
+
+            a_desc = make_tensor_descriptor_fn(
+                a_ptr,
+                shape=[gm, gk],
+                strides=[lda, 1],
+                block_shape=[BLOCK_M, BLOCK_K],
+            )
+
+            b_desc = make_tensor_descriptor_fn(
+                b_ptr,
+                shape=[gk, gn],
+                strides=[ldb, 1],
+                block_shape=[BLOCK_K, BLOCK_N],
+            )
+
+            c_desc = make_tensor_descriptor_fn(
+                c_ptr,
+                shape=[gm, gn],
+                strides=[ldc, 1],
+                block_shape=[BLOCK_M, BLOCK_N],
+            )
+
+            out_desc = make_tensor_descriptor_fn(
+                out_ptr,
+                shape=[gm, gn],
+                strides=[ldc, 1],
+                block_shape=[BLOCK_M, BLOCK_N],
+            )
+            loop_count = (current_problem_end - tile_idx + total_grid - 1) // total_grid
+            for _ in tl.range(loop_count):
+                tile_idx_in_gemm = tile_idx - last_problem_end
+                tile_m_idx, tile_n_idx = grouped_launch(
+                    tile_idx_in_gemm, gm, gn, BLOCK_M, BLOCK_N, GROUP_M
+                )
+
+                offs_am = tile_m_idx * BLOCK_M
+                offs_bn = tile_n_idx * BLOCK_N
+
+                accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+                for kk in range(0, tl.cdiv(gk, BLOCK_K)):
+                    a = a_desc.load([offs_am, kk * BLOCK_K])
+                    b = b_desc.load([kk * BLOCK_K, offs_bn])
+                    accumulator = tl.dot(a, b, acc=accumulator, allow_tf32=False)
+
+                offs_cm = tile_m_idx * BLOCK_M
+                offs_cn = tile_n_idx * BLOCK_N
+
+                ori_c = c_desc.load([offs_cm, offs_cn])
+                accumulator = ori_c * beta + accumulator * alpha
+
+                c = accumulator.to(c_desc.dtype)
+                out_desc.store([offs_cm, offs_cn], c)
+
+                tile_idx += total_grid
+
+        last_problem_end = current_problem_end
+
+
+@libentry()
+@libtuner(configs=get_autotune_config(), key=["M", "N", "K"])
+@triton.jit
+def grouped_bfgemm_kernel(
     M,
     N,
     K,
@@ -309,6 +431,299 @@ def grouped_gemm_kernel(
                 tile_idx += total_grid
 
         last_problem_end = current_problem_end
+
+
+@libentry()
+@libtuner(configs=get_autotune_config(), key=["M", "N", "K"])
+@triton.jit
+def grouped_hgemm_kernel(
+    M,
+    N,
+    K,
+    group_a_ptrs,
+    group_b_ptrs,
+    group_c_ptrs,
+    group_out_ptrs,
+    group_gemm_sizes,
+    g_lds,
+    group_size,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+    alpha: tl.constexpr,
+    beta: tl.constexpr,
+    DTYPE: tl.constexpr,
+):
+    tile_idx = tl.program_id(0)
+    total_grid = tl.num_programs(0)
+    last_problem_end = 0
+    for g in range(group_size):
+        gm = tl.load(group_gemm_sizes + g * 3)
+        gn = tl.load(group_gemm_sizes + g * 3 + 1)
+        gk = tl.load(group_gemm_sizes + g * 3 + 2)
+        num_m_tiles = tl.cdiv(gm, BLOCK_M)
+        num_n_tiles = tl.cdiv(gn, BLOCK_N)
+        num_tiles = num_m_tiles * num_n_tiles
+        current_problem_end = last_problem_end + num_tiles
+        if tile_idx >= last_problem_end and tile_idx < current_problem_end:
+            lda = tl.load(g_lds + g * 3)
+            ldb = tl.load(g_lds + g * 3 + 1)
+            ldc = tl.load(g_lds + g * 3 + 2)
+
+            a_ptr = tl.load(group_a_ptrs + g).to(tl.pointer_type(DTYPE))
+            b_ptr = tl.load(group_b_ptrs + g).to(tl.pointer_type(DTYPE))
+            c_ptr = tl.load(group_c_ptrs + g).to(tl.pointer_type(DTYPE))
+            out_ptr = tl.load(group_out_ptrs + g).to(tl.pointer_type(DTYPE))
+
+            loop_count = (current_problem_end - tile_idx + total_grid - 1) // total_grid
+            for _ in tl.range(loop_count):
+                tile_idx_in_gemm = tile_idx - last_problem_end
+                tile_m_idx, tile_n_idx = grouped_launch(
+                    tile_idx_in_gemm, gm, gn, BLOCK_M, BLOCK_N, GROUP_M
+                )
+
+                offs_am = tile_m_idx * BLOCK_M
+                offs_bn = tile_n_idx * BLOCK_N
+
+                a_ptrs = tl.make_block_ptr(
+                    base=a_ptr,
+                    shape=(gm, gk),
+                    strides=(lda, 1),
+                    offsets=(offs_am, 0),
+                    block_shape=(BLOCK_M, BLOCK_K),
+                    order=(1, 0),
+                )
+                b_ptrs = tl.make_block_ptr(
+                    base=b_ptr,
+                    shape=(gk, gn),
+                    strides=(ldb, 1),
+                    offsets=(0, offs_bn),
+                    block_shape=(BLOCK_K, BLOCK_N),
+                    order=(1, 0),
+                )
+
+                accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+                for kk in range(0, tl.cdiv(gk, BLOCK_K)):
+                    a = tl.load(a_ptrs, boundary_check=(0, 1))
+                    b = tl.load(b_ptrs, boundary_check=(0, 1))
+                    accumulator = tl.dot(a, b, acc=accumulator, allow_tf32=False)
+                    a_ptrs = tl.advance(a_ptrs, (0, BLOCK_K))
+                    b_ptrs = tl.advance(b_ptrs, (BLOCK_K, 0))
+
+                offs_cm = tile_m_idx * BLOCK_M
+                offs_cn = tile_n_idx * BLOCK_N
+
+                c_ptrs = tl.make_block_ptr(
+                    base=c_ptr,
+                    shape=(gm, gn),
+                    strides=(ldc, 1),
+                    offsets=(offs_cm, offs_cn),
+                    block_shape=(BLOCK_M, BLOCK_N),
+                    order=(1, 0),
+                )
+
+                out_ptrs = tl.make_block_ptr(
+                    base=out_ptr,
+                    shape=(gm, gn),
+                    strides=(ldc, 1),
+                    offsets=(offs_cm, offs_cn),
+                    block_shape=(BLOCK_M, BLOCK_N),
+                    order=(1, 0),
+                )
+                ori_c = tl.load(c_ptrs, boundary_check=(0, 1))
+                accumulator = ori_c * beta + accumulator * alpha
+
+                c = accumulator.to(c_ptrs.dtype.element_ty)
+                tl.store(out_ptrs, c, boundary_check=(0, 1))
+
+                tile_idx += total_grid
+
+        last_problem_end = current_problem_end
+
+
+def group_bfgemm(group_A, group_B, group_C, offs_table, alpha=1, beta=0):
+    group_size = len(offs_table)
+    M, N = group_C.shape
+    K = group_A.shape[1]
+    group_out = torch.empty((M, N), device=group_A.device, dtype=group_A.dtype)
+
+    # 按 mg * ng 升序/降序排列子问题
+    entries = []
+    for i in range(group_size):
+        mg, ng, kg = offs_table[i][0], offs_table[i][1], offs_table[i][2]
+        A_g = group_A[offs_table[i][3]]
+        B_g = group_B[offs_table[i][4]]
+        C_g = group_C[offs_table[i][5]]
+        out_g = group_out[offs_table[i][5]]
+        entries.append(
+            (
+                mg * ng,
+                mg,
+                ng,
+                kg,
+                A_g.data_ptr(),
+                B_g.data_ptr(),
+                C_g.data_ptr(),
+                out_g.data_ptr(),
+            )
+        )
+    entries.sort(key=lambda x: -x[0])  # 升序：小 → 大,降序-
+    A_addrs, B_addrs, C_addrs, out_addrs = [], [], [], []
+    group_sizes, group_lds = [], []
+    for _, mg, ng, kg, a_p, b_p, c_p, o_p in entries:
+        A_addrs.append(a_p)
+        B_addrs.append(b_p)
+        C_addrs.append(c_p)
+        out_addrs.append(o_p)
+        group_sizes += [mg, ng, kg]
+        group_lds += [kg, ng, ng]
+
+    d_a_ptrs = torch.tensor(A_addrs, device=group_A.device)
+    d_b_ptrs = torch.tensor(B_addrs, device=group_A.device)
+    d_c_ptrs = torch.tensor(C_addrs, device=group_A.device)
+    d_output_ptrs = torch.tensor(out_addrs, device=group_A.device)
+    d_g_sizes = torch.tensor(group_sizes, dtype=torch.int32, device=group_A.device)
+    d_g_lds = torch.tensor(group_lds, dtype=torch.int32, device=group_A.device)
+    NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
+    grid = NUM_SMS
+
+    _triton_dtype = {torch.float16: tl.float16, torch.bfloat16: tl.bfloat16}[
+        group_A.dtype
+    ]
+
+    if _support_device_tensor_descriptor and supports_tma():
+
+        def alloc_fn(size, alignment, stream):
+            return torch.empty(size, device=group_A.device, dtype=torch.int8)
+
+        triton.set_allocator(alloc_fn)
+        grouped_bfgemm_tma_kernel[(grid,)](
+            M,
+            N,
+            K,
+            d_a_ptrs,
+            d_b_ptrs,
+            d_c_ptrs,
+            d_output_ptrs,
+            d_g_sizes,
+            d_g_lds,
+            group_size,
+            alpha=alpha,
+            beta=beta,
+            DTYPE=_triton_dtype,
+        )
+    else:
+        grouped_bfgemm_kernel[(grid,)](
+            M,
+            N,
+            K,
+            d_a_ptrs,
+            d_b_ptrs,
+            d_c_ptrs,
+            d_output_ptrs,
+            d_g_sizes,
+            d_g_lds,
+            group_size,
+            alpha=alpha,
+            beta=beta,
+            DTYPE=_triton_dtype,
+        )
+
+    return group_out
+
+
+def group_hgemm(group_A, group_B, group_C, offs_table, alpha=1, beta=0):
+    group_size = len(offs_table)
+    M, N = group_C.shape
+    K = group_A.shape[1]
+    group_out = torch.empty((M, N), device=group_A.device, dtype=group_A.dtype)
+
+    # 按 mg * ng 升序/降序排列子问题
+    entries = []
+    for i in range(group_size):
+        mg, ng, kg = offs_table[i][0], offs_table[i][1], offs_table[i][2]
+        A_g = group_A[offs_table[i][3]]
+        B_g = group_B[offs_table[i][4]]
+        C_g = group_C[offs_table[i][5]]
+        out_g = group_out[offs_table[i][5]]
+        entries.append(
+            (
+                mg * ng,
+                mg,
+                ng,
+                kg,
+                A_g.data_ptr(),
+                B_g.data_ptr(),
+                C_g.data_ptr(),
+                out_g.data_ptr(),
+            )
+        )
+    entries.sort(key=lambda x: -x[0])  # 升序：小 → 大,降序-
+
+    A_addrs, B_addrs, C_addrs, out_addrs = [], [], [], []
+    group_sizes, group_lds = [], []
+    for _, mg, ng, kg, a_p, b_p, c_p, o_p in entries:
+        A_addrs.append(a_p)
+        B_addrs.append(b_p)
+        C_addrs.append(c_p)
+        out_addrs.append(o_p)
+        group_sizes += [mg, ng, kg]
+        group_lds += [kg, ng, ng]
+
+    d_a_ptrs = torch.tensor(A_addrs, device=group_A.device)
+    d_b_ptrs = torch.tensor(B_addrs, device=group_A.device)
+    d_c_ptrs = torch.tensor(C_addrs, device=group_A.device)
+    d_output_ptrs = torch.tensor(out_addrs, device=group_A.device)
+    d_g_sizes = torch.tensor(group_sizes, dtype=torch.int32, device=group_A.device)
+    d_g_lds = torch.tensor(group_lds, dtype=torch.int32, device=group_A.device)
+    NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
+    # grid = max(NUM_SMS, min(NUM_SMS * 4, total_tiles))
+    grid = NUM_SMS
+
+    _triton_dtype = {torch.float16: tl.float16, torch.bfloat16: tl.bfloat16}[
+        group_A.dtype
+    ]
+
+    if _support_device_tensor_descriptor and supports_tma():
+
+        def alloc_fn(size, alignment, stream):
+            return torch.empty(size, device=group_A.device, dtype=torch.int8)
+
+        triton.set_allocator(alloc_fn)
+        grouped_hgemm_tma_kernel[(grid,)](
+            M,
+            N,
+            K,
+            d_a_ptrs,
+            d_b_ptrs,
+            d_c_ptrs,
+            d_output_ptrs,
+            d_g_sizes,
+            d_g_lds,
+            group_size,
+            alpha=alpha,
+            beta=beta,
+            DTYPE=_triton_dtype,
+        )
+    else:
+        grouped_hgemm_kernel[(grid,)](
+            M,
+            N,
+            K,
+            d_a_ptrs,
+            d_b_ptrs,
+            d_c_ptrs,
+            d_output_ptrs,
+            d_g_sizes,
+            d_g_lds,
+            group_size,
+            alpha=alpha,
+            beta=beta,
+            DTYPE=_triton_dtype,
+        )
+
+    return group_out
 
 
 @libentry()
@@ -488,85 +903,6 @@ def grouped_mm_kernel(
 
         last_problem_end = current_problem_end
         group_start = group_end
-
-
-def group_gemm(group_A, group_B, group_C, offs_table, alpha=1, beta=0):
-    A_addrs = []
-    B_addrs = []
-    C_addrs = []
-    group_sizes = []
-    group_lds = []
-    group_size = len(offs_table)
-    M, N = group_C.shape
-    K = group_A.shape[1]
-    group_out = torch.empty((M, N), device=group_A.device, dtype=group_A.dtype)
-    out_addrs = []
-    for i in range(group_size):
-        M_g = offs_table[i][0]
-        N_g = offs_table[i][1]
-        K_g = offs_table[i][2]
-        A_g = group_A[offs_table[i][3]]
-        B_g = group_B[offs_table[i][4]]
-        C_g = group_C[offs_table[i][5]]
-        out_g = group_out[offs_table[i][5]]
-        group_sizes += [M_g, N_g, K_g]
-        group_lds += [K_g, N_g, N_g]
-        A_addrs.append(A_g.data_ptr())
-        B_addrs.append(B_g.data_ptr())
-        C_addrs.append(C_g.data_ptr())
-        out_addrs.append(out_g.data_ptr())
-
-    d_a_ptrs = torch.tensor(A_addrs, device=group_A.device)
-    d_b_ptrs = torch.tensor(B_addrs, device=group_A.device)
-    d_c_ptrs = torch.tensor(C_addrs, device=group_A.device)
-    d_output_ptrs = torch.tensor(out_addrs, device=group_A.device)
-    d_g_sizes = torch.tensor(group_sizes, dtype=torch.int32, device=group_A.device)
-    d_g_lds = torch.tensor(group_lds, dtype=torch.int32, device=group_A.device)
-    NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
-
-    _triton_dtype = {torch.float16: tl.float16, torch.bfloat16: tl.bfloat16}[
-        group_A.dtype
-    ]
-
-    if _support_device_tensor_descriptor and supports_tma():
-
-        def alloc_fn(size, alignment, stream):
-            return torch.empty(size, device=group_A.device, dtype=torch.int8)
-
-        triton.set_allocator(alloc_fn)
-        grouped_gemm_tma_kernel[(NUM_SMS,)](
-            M,
-            N,
-            K,
-            d_a_ptrs,
-            d_b_ptrs,
-            d_c_ptrs,
-            d_output_ptrs,
-            d_g_sizes,
-            d_g_lds,
-            group_size,
-            alpha=alpha,
-            beta=beta,
-            DTYPE=_triton_dtype,
-        )
-    else:
-        grouped_gemm_kernel[(NUM_SMS,)](
-            M,
-            N,
-            K,
-            d_a_ptrs,
-            d_b_ptrs,
-            d_c_ptrs,
-            d_output_ptrs,
-            d_g_sizes,
-            d_g_lds,
-            group_size,
-            alpha=alpha,
-            beta=beta,
-            DTYPE=_triton_dtype,
-        )
-
-    return group_out
 
 
 def group_mm(A: torch.Tensor, B: torch.Tensor, offs: torch.Tensor) -> torch.Tensor:
