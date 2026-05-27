@@ -1,4 +1,5 @@
 import ctypes
+import ctypes.util
 import random
 from typing import Generator
 
@@ -14,55 +15,70 @@ from flag_blas.ops import CUBLAS_OP_N
 from benchmark.performance_utils import Benchmark
 from flag_blas.utils import shape_utils
 
-if not hasattr(cublas, "cublasGemmGroupedBatchedEx"):
-    _libcublas = ctypes.CDLL("libcublas.so.12")
 
-    def _cublasGemmGroupedBatchedEx_impl(
-        handle,
-        transa,
-        transb,
-        m_arr,
-        n_arr,
-        k_arr,
-        alpha,
-        a_array,
-        a_type,
-        lda,
-        b_array,
-        b_type,
-        ldb,
-        beta,
-        c_array,
-        c_type,
-        ldc,
-        group_count,
-        group_size,
-        compute_type,
-    ):
-        return _libcublas.cublasGemmGroupedBatchedEx(
-            ctypes.c_void_p(handle),
-            transa.ctypes.data_as(ctypes.c_void_p),
-            transb.ctypes.data_as(ctypes.c_void_p),
-            m_arr.ctypes.data_as(ctypes.c_void_p),
-            n_arr.ctypes.data_as(ctypes.c_void_p),
-            k_arr.ctypes.data_as(ctypes.c_void_p),
-            ctypes.c_void_p(alpha),
-            ctypes.c_void_p(a_array),
-            ctypes.c_int(a_type),
-            lda.ctypes.data_as(ctypes.c_void_p),
-            ctypes.c_void_p(b_array),
-            ctypes.c_int(b_type),
-            ldb.ctypes.data_as(ctypes.c_void_p),
-            ctypes.c_void_p(beta),
-            ctypes.c_void_p(c_array),
-            ctypes.c_int(c_type),
-            ldc.ctypes.data_as(ctypes.c_void_p),
-            ctypes.c_int(group_count),
-            group_size.ctypes.data_as(ctypes.c_void_p),
-            ctypes.c_int(compute_type),
-        )
+def load_cublas():
+    lib_names = ["libcublas.so", "libcublas.so.12", "libcublas.so.11"]
+    found_path = ctypes.util.find_library("cublas")
+    if found_path:
+        lib_names.insert(0, found_path)
+    for name in lib_names:
+        try:
+            return ctypes.cdll.LoadLibrary(name)
+        except OSError:
+            continue
+    raise RuntimeError("Unable to find libcublas.so on the system.")
 
-    cublas.cublasGemmGroupedBatchedEx = _cublasGemmGroupedBatchedEx_impl
+
+_cublas = load_cublas()
+
+
+def _cublasGemmGroupedBatchedEx(
+    handle,
+    transa,
+    transb,
+    m_arr,
+    n_arr,
+    k_arr,
+    alpha,
+    a_array,
+    a_type,
+    lda,
+    b_array,
+    b_type,
+    ldb,
+    beta,
+    c_array,
+    c_type,
+    ldc,
+    group_count,
+    group_size,
+    compute_type,
+):
+    return _cublas.cublasGemmGroupedBatchedEx(
+        ctypes.c_void_p(handle),
+        transa.ctypes.data_as(ctypes.c_void_p),
+        transb.ctypes.data_as(ctypes.c_void_p),
+        m_arr.ctypes.data_as(ctypes.c_void_p),
+        n_arr.ctypes.data_as(ctypes.c_void_p),
+        k_arr.ctypes.data_as(ctypes.c_void_p),
+        ctypes.c_void_p(alpha),
+        ctypes.c_void_p(a_array),
+        ctypes.c_int(a_type),
+        lda.ctypes.data_as(ctypes.c_void_p),
+        ctypes.c_void_p(b_array),
+        ctypes.c_int(b_type),
+        ldb.ctypes.data_as(ctypes.c_void_p),
+        ctypes.c_void_p(beta),
+        ctypes.c_void_p(c_array),
+        ctypes.c_int(c_type),
+        ldc.ctypes.data_as(ctypes.c_void_p),
+        ctypes.c_int(group_count),
+        group_size.ctypes.data_as(ctypes.c_void_p),
+        ctypes.c_int(compute_type),
+    )
+
+
+cublas.cublasGemmGroupedBatchedEx = _cublasGemmGroupedBatchedEx
 
 
 GROUP_GEMM_SHAPES = [
@@ -105,75 +121,32 @@ CUDA_R_16BF = 14
 CUBLAS_COMPUTE_32F = 0
 
 
-def _build_offs_table(k, e, n, m_list):
-    offs = []
-    start_M = 0
-    start_K = 0
-    for g in range(e):
-        mg = m_list[g]
-        offs.append([mg, n, k, start_M, start_K, start_M])
-        start_M += mg
-        start_K += k
-    return offs
-
-
 def cublas_group_gemm_baseline(
     group_A,
     group_B,
     group_C,
     offs_table,
-    alpha,
-    beta,
+    transa,
+    transb,
+    m_arr,
+    n_arr,
+    k_arr,
+    lda_cublas,
+    ldb_cublas,
+    ldc_cublas,
+    a_cublas,
+    b_cublas,
+    c_cublas,
+    alpha_arr,
+    beta_arr,
+    batch,
+    group_count,
+    cu_dtype,
+    compute_type,
+    out_cublas,
     handle,
     **kwargs,
 ):
-    e = len(offs_table)
-    if e == 0:
-        return torch.empty_like(group_C)
-
-    cu_dtype = CUDA_R_16BF
-
-    out = torch.empty_like(group_C)
-
-    a_ptrs = []
-    b_ptrs = []
-    c_ptrs = []
-    m_arr_list = []
-    n_arr_list = []
-    k_arr_list = []
-    lda_list = []
-    ldb_list = []
-    ldc_list = []
-
-    for entry in offs_table:
-        mg, ng, kg, start_M, start_K, start_C = entry
-        a_ptrs.append(group_B[start_K : start_K + kg, :].data_ptr())
-        b_ptrs.append(group_A[start_M : start_M + mg, :].data_ptr())
-        c_ptrs.append(out[start_C : start_C + mg, :].data_ptr())
-        m_arr_list.append(ng)
-        n_arr_list.append(mg)
-        k_arr_list.append(kg)
-        lda_list.append(ng)
-        ldb_list.append(kg)
-        ldc_list.append(ng)
-
-    transa = np.array([CUBLAS_OP_N] * e, dtype=np.int32)
-    transb = np.array([CUBLAS_OP_N] * e, dtype=np.int32)
-    m_arr = np.array(m_arr_list, dtype=np.int32)
-    n_arr = np.array(n_arr_list, dtype=np.int32)
-    k_arr = np.array(k_arr_list, dtype=np.int32)
-    lda_arr = np.array(lda_list, dtype=np.int32)
-    ldb_arr = np.array(ldb_list, dtype=np.int32)
-    ldc_arr = np.array(ldc_list, dtype=np.int32)
-    batch = np.array([1] * e, dtype=np.int32)
-    alpha_arr = np.full(e, alpha, dtype=np.float32)
-    beta_arr = np.full(e, beta, dtype=np.float32)
-
-    device = group_A.device
-    d_a_ptrs = torch.tensor(a_ptrs, dtype=torch.int64, device=device)
-    d_b_ptrs = torch.tensor(b_ptrs, dtype=torch.int64, device=device)
-    d_c_ptrs = torch.tensor(c_ptrs, dtype=torch.int64, device=device)
-
     cublas.cublasGemmGroupedBatchedEx(
         handle,
         transa,
@@ -182,29 +155,57 @@ def cublas_group_gemm_baseline(
         n_arr,
         k_arr,
         alpha_arr.ctypes.data,
-        d_a_ptrs.data_ptr(),
+        a_cublas.data_ptr(),
         cu_dtype,
-        lda_arr,
-        d_b_ptrs.data_ptr(),
+        lda_cublas,
+        b_cublas.data_ptr(),
         cu_dtype,
-        ldb_arr,
+        ldb_cublas,
         beta_arr.ctypes.data,
-        d_c_ptrs.data_ptr(),
+        c_cublas.data_ptr(),
         cu_dtype,
-        ldc_arr,
-        e,
+        ldc_cublas,
+        group_count,
         batch,
-        CUBLAS_COMPUTE_32F,
+        compute_type,
     )
-
-    return out
+    return out_cublas
 
 
 def gems_group_gemm_wrapper(
-    group_A, group_B, group_C, offs_table, alpha, beta, **kwargs
+    group_A,
+    group_B,
+    group_C,
+    offs_table,
+    a_flag,
+    b_flag,
+    c_flag,
+    out_flag_ptrs,
+    sizes_flag,
+    lds_flag,
+    group_size,
+    M,
+    N,
+    K,
+    out_flag,
+    alpha,
+    beta,
+    **kwargs,
 ):
     return flag_blas.group_bfgemm(
-        group_A, group_B, group_C, offs_table, alpha=alpha, beta=beta
+        out_flag,
+        a_flag,
+        b_flag,
+        c_flag,
+        out_flag_ptrs,
+        sizes_flag,
+        lds_flag,
+        group_size,
+        M,
+        N,
+        K,
+        alpha=alpha,
+        beta=beta,
     )
 
 
@@ -245,9 +246,118 @@ class GroupGemmBenchmark(Benchmark):
             group_C = (
                 torch.randn(total_M, n, dtype=cur_dtype, device=self.device) * scale
             )
-            offs_table = _build_offs_table(k, e, n, m_list)
 
-            yield group_A, group_B, group_C, offs_table, {
+            offs = []
+            start_M = 0
+            start_K = 0
+            for g in range(e):
+                mg = m_list[g]
+                offs.append([mg, n, k, start_M, start_K, start_M])
+                start_M += mg
+                start_K += k
+
+            out_cublas = torch.empty_like(group_C)
+            out_flag = torch.empty_like(group_C)
+
+            cu_a_ptrs = []
+            cu_b_ptrs = []
+            cu_c_ptrs = []
+            cu_m_list = []
+            cu_n_list = []
+            cu_k_list = []
+            cu_lda_list = []
+            cu_ldb_list = []
+            cu_ldc_list = []
+
+            flag_a_ptrs = []
+            flag_b_ptrs = []
+            flag_c_ptrs = []
+            flag_out_ptrs = []
+            flag_sizes = []
+            flag_lds = []
+
+            for entry in offs:
+                mg, ng, kg, start_M_offs, start_K_offs, start_C_offs = entry
+
+                cu_a_ptrs.append(
+                    group_B[start_K_offs : start_K_offs + kg, :].data_ptr()
+                )
+                cu_b_ptrs.append(
+                    group_A[start_M_offs : start_M_offs + mg, :].data_ptr()
+                )
+                cu_c_ptrs.append(
+                    out_cublas[start_C_offs : start_C_offs + mg, :].data_ptr()
+                )
+                cu_m_list.append(ng)
+                cu_n_list.append(mg)
+                cu_k_list.append(kg)
+                cu_lda_list.append(ng)
+                cu_ldb_list.append(kg)
+                cu_ldc_list.append(ng)
+
+                flag_a_ptrs.append(
+                    group_A[start_M_offs : start_M_offs + mg, :].data_ptr()
+                )
+                flag_b_ptrs.append(
+                    group_B[start_K_offs : start_K_offs + kg, :].data_ptr()
+                )
+                flag_c_ptrs.append(
+                    group_C[start_C_offs : start_C_offs + mg, :].data_ptr()
+                )
+                flag_out_ptrs.append(
+                    out_flag[start_C_offs : start_C_offs + mg, :].data_ptr()
+                )
+                flag_sizes += [mg, ng, kg]
+                flag_lds += [kg, ng, ng]
+
+            yield group_A, group_B, group_C, offs, {
+                "transa": np.array([CUBLAS_OP_N] * e, dtype=np.int32),
+                "transb": np.array([CUBLAS_OP_N] * e, dtype=np.int32),
+                "m_arr": np.array(cu_m_list, dtype=np.int32),
+                "n_arr": np.array(cu_n_list, dtype=np.int32),
+                "k_arr": np.array(cu_k_list, dtype=np.int32),
+                "lda_cublas": np.array(cu_lda_list, dtype=np.int32),
+                "ldb_cublas": np.array(cu_ldb_list, dtype=np.int32),
+                "ldc_cublas": np.array(cu_ldc_list, dtype=np.int32),
+                "a_cublas": torch.tensor(
+                    cu_a_ptrs, dtype=torch.int64, device=self.device
+                ),
+                "b_cublas": torch.tensor(
+                    cu_b_ptrs, dtype=torch.int64, device=self.device
+                ),
+                "c_cublas": torch.tensor(
+                    cu_c_ptrs, dtype=torch.int64, device=self.device
+                ),
+                "alpha_arr": np.full(e, self.alpha, dtype=np.float32),
+                "beta_arr": np.full(e, self.beta, dtype=np.float32),
+                "batch": np.array([1] * e, dtype=np.int32),
+                "group_count": e,
+                "cu_dtype": CUDA_R_16BF,
+                "compute_type": CUBLAS_COMPUTE_32F,
+                "out_cublas": out_cublas,
+                "a_flag": torch.tensor(
+                    flag_a_ptrs, dtype=torch.int64, device=self.device
+                ),
+                "b_flag": torch.tensor(
+                    flag_b_ptrs, dtype=torch.int64, device=self.device
+                ),
+                "c_flag": torch.tensor(
+                    flag_c_ptrs, dtype=torch.int64, device=self.device
+                ),
+                "out_flag_ptrs": torch.tensor(
+                    flag_out_ptrs, dtype=torch.int64, device=self.device
+                ),
+                "sizes_flag": torch.tensor(
+                    flag_sizes, dtype=torch.int32, device=self.device
+                ),
+                "lds_flag": torch.tensor(
+                    flag_lds, dtype=torch.int32, device=self.device
+                ),
+                "group_size": e,
+                "M": total_M,
+                "N": n,
+                "K": k,
+                "out_flag": out_flag,
                 "alpha": self.alpha,
                 "beta": self.beta,
                 "handle": handle,

@@ -1,4 +1,5 @@
 import ctypes
+import ctypes.util
 import random
 
 import cupy as cp
@@ -13,55 +14,70 @@ from flag_blas.ops import CUBLAS_OP_N
 from .conftest import TO_CPU
 from . import accuracy_utils as utils
 
-if not hasattr(cublas, "cublasGemmGroupedBatchedEx"):
-    _libcublas = ctypes.CDLL("libcublas.so.12")
 
-    def _cublasGemmGroupedBatchedEx_impl(
-        handle,
-        transa,
-        transb,
-        m_arr,
-        n_arr,
-        k_arr,
-        alpha,
-        a_array,
-        a_type,
-        lda,
-        b_array,
-        b_type,
-        ldb,
-        beta,
-        c_array,
-        c_type,
-        ldc,
-        group_count,
-        group_size,
-        compute_type,
-    ):
-        return _libcublas.cublasGemmGroupedBatchedEx(
-            ctypes.c_void_p(handle),
-            transa.ctypes.data_as(ctypes.c_void_p),
-            transb.ctypes.data_as(ctypes.c_void_p),
-            m_arr.ctypes.data_as(ctypes.c_void_p),
-            n_arr.ctypes.data_as(ctypes.c_void_p),
-            k_arr.ctypes.data_as(ctypes.c_void_p),
-            ctypes.c_void_p(alpha),
-            ctypes.c_void_p(a_array),
-            ctypes.c_int(a_type),
-            lda.ctypes.data_as(ctypes.c_void_p),
-            ctypes.c_void_p(b_array),
-            ctypes.c_int(b_type),
-            ldb.ctypes.data_as(ctypes.c_void_p),
-            ctypes.c_void_p(beta),
-            ctypes.c_void_p(c_array),
-            ctypes.c_int(c_type),
-            ldc.ctypes.data_as(ctypes.c_void_p),
-            ctypes.c_int(group_count),
-            group_size.ctypes.data_as(ctypes.c_void_p),
-            ctypes.c_int(compute_type),
-        )
+def load_cublas():
+    lib_names = ["libcublas.so", "libcublas.so.12", "libcublas.so.11"]
+    found_path = ctypes.util.find_library("cublas")
+    if found_path:
+        lib_names.insert(0, found_path)
+    for name in lib_names:
+        try:
+            return ctypes.cdll.LoadLibrary(name)
+        except OSError:
+            continue
+    raise RuntimeError("Unable to find libcublas.so on the system.")
 
-    cublas.cublasGemmGroupedBatchedEx = _cublasGemmGroupedBatchedEx_impl
+
+_cublas = load_cublas()
+
+
+def _cublasGemmGroupedBatchedEx(
+    handle,
+    transa,
+    transb,
+    m_arr,
+    n_arr,
+    k_arr,
+    alpha,
+    a_array,
+    a_type,
+    lda,
+    b_array,
+    b_type,
+    ldb,
+    beta,
+    c_array,
+    c_type,
+    ldc,
+    group_count,
+    group_size,
+    compute_type,
+):
+    return _cublas.cublasGemmGroupedBatchedEx(
+        ctypes.c_void_p(handle),
+        transa.ctypes.data_as(ctypes.c_void_p),
+        transb.ctypes.data_as(ctypes.c_void_p),
+        m_arr.ctypes.data_as(ctypes.c_void_p),
+        n_arr.ctypes.data_as(ctypes.c_void_p),
+        k_arr.ctypes.data_as(ctypes.c_void_p),
+        ctypes.c_void_p(alpha),
+        ctypes.c_void_p(a_array),
+        ctypes.c_int(a_type),
+        lda.ctypes.data_as(ctypes.c_void_p),
+        ctypes.c_void_p(b_array),
+        ctypes.c_int(b_type),
+        ldb.ctypes.data_as(ctypes.c_void_p),
+        ctypes.c_void_p(beta),
+        ctypes.c_void_p(c_array),
+        ctypes.c_int(c_type),
+        ldc.ctypes.data_as(ctypes.c_void_p),
+        ctypes.c_int(group_count),
+        group_size.ctypes.data_as(ctypes.c_void_p),
+        ctypes.c_int(compute_type),
+    )
+
+
+cublas.cublasGemmGroupedBatchedEx = _cublasGemmGroupedBatchedEx
 
 
 CUDA_R_16F = 2
@@ -79,6 +95,54 @@ def _build_offs_table(k, e, n, m_list):
         start_M += mg
         start_K += k
     return offs
+
+
+def _build_triton_arrays(group_A, group_B, group_C, offs_table):
+    group_size = len(offs_table)
+    M, N = group_C.shape
+    K = group_A.shape[1]
+    group_out = torch.empty((M, N), device=group_A.device, dtype=group_A.dtype)
+
+    A_addrs = []
+    B_addrs = []
+    C_addrs = []
+    out_addrs = []
+    group_sizes = []
+    group_lds = []
+
+    for i in range(group_size):
+        mg, ng, kg = offs_table[i][0], offs_table[i][1], offs_table[i][2]
+        A_g = group_A[offs_table[i][3]]
+        B_g = group_B[offs_table[i][4]]
+        C_g = group_C[offs_table[i][5]]
+        out_g = group_out[offs_table[i][5]]
+        group_sizes += [mg, ng, kg]
+        group_lds += [kg, ng, ng]
+        A_addrs.append(A_g.data_ptr())
+        B_addrs.append(B_g.data_ptr())
+        C_addrs.append(C_g.data_ptr())
+        out_addrs.append(out_g.data_ptr())
+
+    d_a_ptrs = torch.tensor(A_addrs, device=group_A.device)
+    d_b_ptrs = torch.tensor(B_addrs, device=group_A.device)
+    d_c_ptrs = torch.tensor(C_addrs, device=group_A.device)
+    d_output_ptrs = torch.tensor(out_addrs, device=group_A.device)
+    d_g_sizes = torch.tensor(group_sizes, dtype=torch.int32, device=group_A.device)
+    d_g_lds = torch.tensor(group_lds, dtype=torch.int32, device=group_A.device)
+
+    return (
+        group_out,
+        d_a_ptrs,
+        d_b_ptrs,
+        d_c_ptrs,
+        d_output_ptrs,
+        d_g_sizes,
+        d_g_lds,
+        group_size,
+        M,
+        N,
+        K,
+    )
 
 
 def cublas_group_gemm_reference(group_A, group_B, group_C, offs_table, alpha, beta):
@@ -208,7 +272,9 @@ def test_accuracy_group_gemm(k, e, n):
         )
 
     out = flag_blas.group_hgemm(
-        group_A, group_B, group_C, offs_table, alpha=alpha, beta=beta
+        *_build_triton_arrays(group_A, group_B, group_C, offs_table),
+        alpha=alpha,
+        beta=beta,
     )
 
     utils.blas_assert_close(out, ref, torch.float16, reduce_dim=k)
@@ -225,7 +291,9 @@ def test_group_gemm_alpha_zero():
     m_list = [m] * e
     offs_table = _build_offs_table(k, e, n, m_list)
 
-    out = flag_blas.group_hgemm(A, B, C, offs_table, alpha=0.0, beta=2.0)
+    out = flag_blas.group_hgemm(
+        *_build_triton_arrays(A, B, C, offs_table), alpha=0.0, beta=2.0
+    )
 
     if TO_CPU:
         utils.blas_assert_close(out, (C_orig * 2.0).to("cpu"), dtype, reduce_dim=k)
@@ -244,7 +312,9 @@ def test_group_gemm_beta_zero():
     offs_table = _build_offs_table(k, e, n, m_list)
 
     ref = cublas_group_gemm_reference(A, B, C_zeros, offs_table, 1.0, 0.0)
-    out = flag_blas.group_hgemm(A, B, C_zeros, offs_table, alpha=1.0, beta=0.0)
+    out = flag_blas.group_hgemm(
+        *_build_triton_arrays(A, B, C_zeros, offs_table), alpha=1.0, beta=0.0
+    )
 
     if TO_CPU:
         utils.blas_assert_close(out, ref.to("cpu"), dtype, reduce_dim=k)
@@ -267,7 +337,9 @@ def test_group_gemm_alpha_beta(alpha, beta):
     offs_table = _build_offs_table(k, e, n, m_list)
 
     ref = cublas_group_gemm_reference(A, B, C, offs_table, alpha, beta)
-    out = flag_blas.group_hgemm(A, B, C, offs_table, alpha=alpha, beta=beta)
+    out = flag_blas.group_hgemm(
+        *_build_triton_arrays(A, B, C, offs_table), alpha=alpha, beta=beta
+    )
 
     if TO_CPU:
         utils.blas_assert_close(out, ref.to("cpu"), dtype, reduce_dim=k)
