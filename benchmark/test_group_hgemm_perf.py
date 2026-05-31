@@ -114,7 +114,7 @@ GROUP_GEMM_SHAPES = [
     (512, 64, 2048),
 ]
 
-SEED = 42
+SEED = 50
 GROUP_GEMM_M_VALUES = list(range(1, 33)) + [64, 128, 256, 512, 1024, 2048, 4096]
 
 CUDA_R_16F = 2
@@ -128,9 +128,9 @@ def cublas_group_gemm_baseline(
     offs_table,
     transa,
     transb,
-    m_arr,
-    n_arr,
-    k_arr,
+    cu_m_arr,
+    cu_n_arr,
+    cu_k_arr,
     lda_cublas,
     ldb_cublas,
     ldc_cublas,
@@ -151,9 +151,9 @@ def cublas_group_gemm_baseline(
         handle,
         transa,
         transb,
-        m_arr,
-        n_arr,
-        k_arr,
+        cu_m_arr,
+        cu_n_arr,
+        cu_k_arr,
         alpha_arr.ctypes.data,
         a_cublas.data_ptr(),
         cu_dtype,
@@ -177,6 +177,9 @@ def gems_group_gemm_wrapper(
     group_B,
     group_C,
     offs_table,
+    flag_m_arr,
+    flag_n_arr,
+    flag_k_arr,
     a_flag,
     b_flag,
     c_flag,
@@ -194,6 +197,9 @@ def gems_group_gemm_wrapper(
 ):
     return flag_blas.group_hgemm(
         out_flag,
+        flag_m_arr,
+        flag_n_arr,
+        flag_k_arr,
         a_flag,
         b_flag,
         c_flag,
@@ -313,9 +319,9 @@ class GroupGemmBenchmark(Benchmark):
             yield group_A, group_B, group_C, offs, {
                 "transa": np.array([CUBLAS_OP_N] * e, dtype=np.int32),
                 "transb": np.array([CUBLAS_OP_N] * e, dtype=np.int32),
-                "m_arr": np.array(cu_m_list, dtype=np.int32),
-                "n_arr": np.array(cu_n_list, dtype=np.int32),
-                "k_arr": np.array(cu_k_list, dtype=np.int32),
+                "cu_m_arr": np.array(cu_m_list, dtype=np.int32),
+                "cu_n_arr": np.array(cu_n_list, dtype=np.int32),
+                "cu_k_arr": np.array(cu_k_list, dtype=np.int32),
                 "lda_cublas": np.array(cu_lda_list, dtype=np.int32),
                 "ldb_cublas": np.array(cu_ldb_list, dtype=np.int32),
                 "ldc_cublas": np.array(cu_ldc_list, dtype=np.int32),
@@ -335,6 +341,15 @@ class GroupGemmBenchmark(Benchmark):
                 "cu_dtype": CUDA_R_16F,
                 "compute_type": CUBLAS_COMPUTE_32F,
                 "out_cublas": out_cublas,
+                "flag_m_arr": torch.tensor(
+                    cu_n_list, dtype=torch.int32, device=self.device
+                ),
+                "flag_n_arr": torch.tensor(
+                    cu_m_list, dtype=torch.int32, device=self.device
+                ),
+                "flag_k_arr": torch.tensor(
+                    cu_k_list, dtype=torch.int32, device=self.device
+                ),
                 "a_flag": torch.tensor(
                     flag_a_ptrs, dtype=torch.int64, device=self.device
                 ),
@@ -415,8 +430,6 @@ def test_perf_group_gemm_fp16():
         torch_op=cublas_group_gemm_baseline,
         gems_op=gems_group_gemm_wrapper,
         dtypes=[torch.float16],
-        alpha=1.0,
-        beta=0.0,
     )
     for cur_dtype in bench.dtypes:
         for A, B, C, offs, kwargs in bench.get_input_iter(cur_dtype):
