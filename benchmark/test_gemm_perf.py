@@ -8,9 +8,8 @@ import torch
 from cupy_backends.cuda.libs import cublas
 
 import flag_blas
-from flag_blas.ops import CUBLAS_OP_N, CUBLAS_OP_T
-
 from benchmark.performance_utils import Benchmark
+from flag_blas.ops import CUBLAS_OP_N, CUBLAS_OP_T
 from flag_blas.utils import shape_utils
 
 CUDA_R_32F = 0
@@ -18,13 +17,8 @@ CUDA_R_16F = 2
 CUDA_R_16BF = 14
 
 GEMM_SHAPES = [
-    (1024, 1024, 1024),
     (511, 511, 511),
     (1023, 1023, 1023),
-    (2048, 2048, 2048),
-    (4096, 4096, 4096),
-    (8192, 8192, 8192),
-    (16384, 16384, 16384),
     (2048, 12288, 4096),
     (2048, 11008, 4096),
     (2048, 4096, 11008),
@@ -43,30 +37,40 @@ GEMM_SHAPES = [
 
 def model_shapes() -> List[Tuple[int, int, int]]:
     """
-    Generate shapes extracted from real-world LLMs (llama3-8b, qwen2.5-7b).
-    These shapes represent common attention and FFN weight matrix dimensions.
+    Generate shapes with m ranging from 1 to 32 (step 1), then 64, 128, 256, 512, 1024, 2048, 4096.
     """
-    # attn: wqkv, wo; ffn: w13, w2
+    m_values = list(range(1, 33)) + [64, 128, 256, 512, 1024, 2048, 4096]
+
     NK = [
-        # extract from llama3-8b
-        (1024, 4096),
-        (128256, 4096),
-        (14336, 4096),
-        (4096, 14336),
-        (4096, 4096),
-        (6144, 4096),
-        (28672, 4096),
-        # extract from qwen2.5-7b
-        (3584, 3584),
-        (18944, 3584),
-        (3584, 18944),
-        (152064, 3584),
-        (37888, 3584),
-        (512, 3584),
-        (4608, 3584),
+        [6144, 4096],
+        [4096, 4096],
+        [24576, 4096],
+        [4096, 12288],
+        [5120, 5120],
+        [5120, 4096],
+        [25600, 5120],
+        [5120, 12800],
+        [2560, 5120],
+        [5120, 2048],
+        [12800, 5210],
+        [5120, 6400],
+        [5120, 2048],
+        [2048, 4096],
+        [2560, 2048],
+        [2048, 1024],
+        [1152, 4096],
+        [4096, 1024],
+        [4096, 7168],
+        [7168, 2048],
+        [2304, 2048],
+        [1152, 2048],
+        [2048, 1024],
+        [2048, 512],
+        [3072, 2048],
+        [1536, 2048],
     ]
 
-    return [(bs, n, k) for bs, (n, k) in itertools.product([1, 2, 4, 8], NK)]
+    return [(m, n, k) for m, (n, k) in itertools.product(m_values, NK)]
 
 
 def cublas_sgemm(
@@ -531,17 +535,25 @@ class GemmBenchmark(Benchmark):
 
         try:
             flag_blas.testing.assert_close(
-                gems_cpu, torch_cpu, torch_cpu.dtype, equal_nan=False, reduce_dim=reduce_dim, atol=tolerance
+                gems_cpu,
+                torch_cpu,
+                torch_cpu.dtype,
+                equal_nan=False,
+                reduce_dim=reduce_dim,
+                atol=tolerance,
             )
         except AssertionError as e:
             max_abs_diff = torch.max(torch.abs(torch_cpu - gems_cpu))
-            max_rel_diff = torch.max(torch.abs((torch_cpu - gems_cpu) / (torch.abs(torch_cpu) + 1e-9)))
+            max_rel_diff = torch.max(
+                torch.abs((torch_cpu - gems_cpu) / (torch.abs(torch_cpu) + 1e-9))
+            )
             raise AssertionError(
                 f"Results differ beyond tolerance {tolerance}:\n"
                 f"Max absolute difference: {max_abs_diff}\n"
                 f"Max relative difference: {max_rel_diff}\n"
                 f"Shape: {torch_cpu.shape}"
             )
+
 
 @pytest.mark.sgemm
 def test_perf_sgemm_nn():
@@ -553,7 +565,7 @@ def test_perf_sgemm_nn():
         transa=CUBLAS_OP_N,
         transb=CUBLAS_OP_N,
     )
-    bench.set_more_shapes()
+    bench.init_user_config()
     for cur_dtype in bench.dtypes:
         for A, B, C, kwargs in bench.get_input_iter(cur_dtype):
             torch_result = cublas_sgemm(A, B, C.clone(), **kwargs)
@@ -573,7 +585,7 @@ def test_perf_sgemm_tn():
         transa=CUBLAS_OP_T,
         transb=CUBLAS_OP_N,
     )
-    bench.set_more_shapes()
+    bench.init_user_config()
     for cur_dtype in bench.dtypes:
         for A, B, C, kwargs in bench.get_input_iter(cur_dtype):
             torch_result = cublas_sgemm(A, B, C.clone(), **kwargs)
@@ -593,7 +605,7 @@ def test_perf_sgemm_nt():
         transa=CUBLAS_OP_N,
         transb=CUBLAS_OP_T,
     )
-    bench.set_more_shapes()
+    bench.init_user_config()
     for cur_dtype in bench.dtypes:
         for A, B, C, kwargs in bench.get_input_iter(cur_dtype):
             torch_result = cublas_sgemm(A, B, C.clone(), **kwargs)
@@ -613,7 +625,7 @@ def test_perf_sgemm_tt():
         transa=CUBLAS_OP_T,
         transb=CUBLAS_OP_T,
     )
-    bench.set_more_shapes()
+    bench.init_user_config()
     for cur_dtype in bench.dtypes:
         for A, B, C, kwargs in bench.get_input_iter(cur_dtype):
             torch_result = cublas_sgemm(A, B, C.clone(), **kwargs)
@@ -633,7 +645,7 @@ def test_perf_hgemm_nn():
         transa=CUBLAS_OP_N,
         transb=CUBLAS_OP_N,
     )
-    bench.set_more_shapes()
+    bench.init_user_config()
     for cur_dtype in bench.dtypes:
         for A, B, C, kwargs in bench.get_input_iter(cur_dtype):
             torch_result = cublas_hgemm(A, B, C.clone(), **kwargs)
@@ -654,7 +666,7 @@ def test_perf_hgemm_tn():
         transa=CUBLAS_OP_T,
         transb=CUBLAS_OP_N,
     )
-    bench.set_more_shapes()
+    bench.init_user_config()
     for cur_dtype in bench.dtypes:
         for A, B, C, kwargs in bench.get_input_iter(cur_dtype):
             torch_result = cublas_hgemm(A, B, C.clone(), **kwargs)
@@ -674,7 +686,7 @@ def test_perf_hgemm_nt():
         transa=CUBLAS_OP_N,
         transb=CUBLAS_OP_T,
     )
-    bench.set_more_shapes()
+    bench.init_user_config()
     for cur_dtype in bench.dtypes:
         for A, B, C, kwargs in bench.get_input_iter(cur_dtype):
             torch_result = cublas_hgemm(A, B, C.clone(), **kwargs)
@@ -694,7 +706,7 @@ def test_perf_hgemm_tt():
         transa=CUBLAS_OP_T,
         transb=CUBLAS_OP_T,
     )
-    bench.set_more_shapes()
+    bench.init_user_config()
     for cur_dtype in bench.dtypes:
         for A, B, C, kwargs in bench.get_input_iter(cur_dtype):
             torch_result = cublas_hgemm(A, B, C.clone(), **kwargs)
@@ -714,7 +726,7 @@ def test_perf_bfgemm_nn():
         transa=CUBLAS_OP_N,
         transb=CUBLAS_OP_N,
     )
-    bench.set_more_shapes()
+    bench.init_user_config()
     for cur_dtype in bench.dtypes:
         for A, B, C, kwargs in bench.get_input_iter(cur_dtype):
             torch_result = cublas_bfgemm(A, B, C.clone(), **kwargs)
@@ -734,7 +746,7 @@ def test_perf_bfgemm_tn():
         transa=CUBLAS_OP_T,
         transb=CUBLAS_OP_N,
     )
-    bench.set_more_shapes()
+    bench.init_user_config()
     for cur_dtype in bench.dtypes:
         for A, B, C, kwargs in bench.get_input_iter(cur_dtype):
             torch_result = cublas_bfgemm(A, B, C.clone(), **kwargs)
@@ -754,7 +766,7 @@ def test_perf_bfgemm_nt():
         transa=CUBLAS_OP_N,
         transb=CUBLAS_OP_T,
     )
-    bench.set_more_shapes()
+    bench.init_user_config()
     for cur_dtype in bench.dtypes:
         for A, B, C, kwargs in bench.get_input_iter(cur_dtype):
             torch_result = cublas_bfgemm(A, B, C.clone(), **kwargs)
@@ -774,7 +786,7 @@ def test_perf_bfgemm_tt():
         transa=CUBLAS_OP_T,
         transb=CUBLAS_OP_T,
     )
-    bench.set_more_shapes()
+    bench.init_user_config()
     for cur_dtype in bench.dtypes:
         for A, B, C, kwargs in bench.get_input_iter(cur_dtype):
             torch_result = cublas_bfgemm(A, B, C.clone(), **kwargs)
@@ -785,7 +797,6 @@ def test_perf_bfgemm_tt():
 
 
 class Fp8GemmBenchmark(GemmBenchmark):
-
     def __init__(
         self, *args, fp8_dtype=torch.float8_e4m3fn, out_dtype=torch.float16, **kwargs
     ):
@@ -796,7 +807,8 @@ class Fp8GemmBenchmark(GemmBenchmark):
     def set_more_shapes(self):
         # FP8 requires all dimensions divisible by 16
         filtered_model_shapes = [
-            (bs, n, k) for bs, n, k in model_shapes() 
+            (bs, n, k)
+            for bs, n, k in model_shapes()
             if all(d % 16 == 0 for d in (bs, n, k))
         ]
         return FP8_GEMM_SHAPES + filtered_model_shapes

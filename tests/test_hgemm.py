@@ -1,14 +1,16 @@
-import pytest
-import torch
 import cupy as cp
 import numpy as np
+import pytest
+import scipy
+import torch
 from cupy_backends.cuda.libs import cublas
+from scipy.linalg import blas
+
 import flag_blas
 from flag_blas.ops import CUBLAS_OP_N, CUBLAS_OP_T
-import scipy
-from scipy.linalg import blas
-from .conftest import TO_CPU
+
 from . import accuracy_utils as utils
+from .conftest import TO_CPU
 
 CUDA_R_32F = 0
 CUDA_R_16F = 2
@@ -63,21 +65,20 @@ def cublas_hgemm_reference(
 )
 def test_accuracy_hgemm(m, n, k, transa, transb):
     dtype, alpha, beta = torch.float16, 1.5, 0.5
-    scale = k**-0.5
 
     if transa == CUBLAS_OP_N:
-        A_col = (torch.randn(k, m, dtype=dtype, device=flag_blas.device) * scale).t()
+        A_col = (torch.randn(k, m, dtype=dtype, device=flag_blas.device)).t()
         lda_cublas, lda_flag = m, k
     else:
-        A_col = (torch.randn(m, k, dtype=dtype, device=flag_blas.device) * scale).t()
+        A_col = (torch.randn(m, k, dtype=dtype, device=flag_blas.device)).t()
         lda_cublas, lda_flag = k, m
     A_row = A_col.contiguous()
 
     if transb == CUBLAS_OP_N:
-        B_col = (torch.randn(n, k, dtype=dtype, device=flag_blas.device) * scale).t()
+        B_col = (torch.randn(n, k, dtype=dtype, device=flag_blas.device)).t()
         ldb_cublas, ldb_flag = k, n
     else:
-        B_col = (torch.randn(k, n, dtype=dtype, device=flag_blas.device) * scale).t()
+        B_col = (torch.randn(k, n, dtype=dtype, device=flag_blas.device)).t()
         ldb_cublas, ldb_flag = n, k
     B_row = B_col.contiguous()
 
@@ -90,13 +91,13 @@ def test_accuracy_hgemm(m, n, k, transa, transb):
         B_ref = B_row.to("cpu").to(torch.float64)
         C_ref = C_row.to("cpu").to(torch.float64)
         C_ref = blas.dgemm(
-            alpha, 
-            A_ref.numpy(), 
-            B_ref.numpy(), 
-            beta, 
-            c=C_ref.numpy(), 
-            trans_b=transb, 
-            trans_a=transa
+            alpha,
+            A_ref.numpy(),
+            B_ref.numpy(),
+            beta,
+            c=C_ref.numpy(),
+            trans_b=transb,
+            trans_a=transa,
         )
     else:
         cublas_hgemm_reference(
@@ -130,7 +131,7 @@ def test_accuracy_hgemm(m, n, k, transa, transb):
         ldc_flag,
     )
     if TO_CPU:
-        utils.blas_assert_close(C_row, torch.tensor(C_ref), dtype, reduce_dim=k)  
+        utils.blas_assert_close(C_row, torch.tensor(C_ref), dtype, reduce_dim=k)
     else:
         utils.blas_assert_close(C_row, C_col.contiguous(), dtype, reduce_dim=k)
 
@@ -146,7 +147,7 @@ def test_hgemm_alpha_zero():
 
     flag_blas.hgemm(CUBLAS_OP_N, CUBLAS_OP_N, m, n, k, 0.0, A, k, B, n, 2.0, C, n)
 
-    #torch.testing.assert_close(C, C_orig * 2.0)
+    # torch.testing.assert_close(C, C_orig * 2.0)
     if TO_CPU:
         utils.blas_assert_close(C, C_orig.to("cpu") * 2.0, torch.float16, reduce_dim=k)
     else:
@@ -214,12 +215,11 @@ def test_hgemm_alpha_beta(alpha, beta):
     dtype = torch.float16
     device = flag_blas.device
 
-    scale = k**-0.5
-    A_col = (torch.randn(k, m, dtype=dtype, device=device) * scale).t()
+    A_col = (torch.randn(k, m, dtype=dtype, device=device)).t()
     A_row = A_col.contiguous()
-    B_col = (torch.randn(n, k, dtype=dtype, device=device) * scale).t()
+    B_col = (torch.randn(n, k, dtype=dtype, device=device)).t()
     B_row = B_col.contiguous()
-    C_col = (torch.randn(n, m, dtype=dtype, device=device) * scale).t()
+    C_col = (torch.randn(n, m, dtype=dtype, device=device)).t()
     C_row = C_col.contiguous()
 
     cublas_hgemm_reference(
@@ -229,7 +229,8 @@ def test_hgemm_alpha_beta(alpha, beta):
         CUBLAS_OP_N, CUBLAS_OP_N, m, n, k, alpha, A_row, k, B_row, n, beta, C_row, n
     )
     if TO_CPU:
-        utils.blas_assert_close(C_row, C_col.contiguous().to("cpu"), torch.float16, reduce_dim=k)
+        utils.blas_assert_close(
+            C_row, C_col.contiguous().to("cpu"), torch.float16, reduce_dim=k
+        )
     else:
         utils.blas_assert_close(C_row, C_col.contiguous(), torch.float16, reduce_dim=k)
-

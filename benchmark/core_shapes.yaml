@@ -58,6 +58,67 @@ UnaryPointwiseBenchmark:
     - [1024, 1024, 1024]
   shape_desc: "(B), M, N"
 
+
+# BLAS Level 1 vector operation core shapes
+l1_vector_shapes: &l1_vector_shapes
+  shapes:
+    - [64]
+    - [1024]
+    - [2048]
+    - [4096]
+    - [65536]
+  shape_desc: "N"
+
+l1_stride_shapes: &l1_stride_shapes
+  shapes:
+    - [1024]
+    - [5333]
+    - [65536]
+    - [100000]
+    - [1048576]
+  shape_desc: "N"
+
+l1_amax_stride_shapes: &l1_amax_stride_shapes
+  shapes:
+    - [256]
+    - [512]
+    - [1024]
+    - [4096]
+    - [65536]
+  shape_desc: "N"
+
+AbsBenchmark:
+  <<: *l1_vector_shapes
+AmaxBenchmark:
+  <<: *l1_vector_shapes
+AsumBenchmark:
+  <<: *l1_vector_shapes
+AxpyBenchmark:
+  <<: *l1_vector_shapes
+CopyBenchmark:
+  <<: *l1_vector_shapes
+Nrm2Benchmark:
+  <<: *l1_vector_shapes
+RotBenchmark:
+  <<: *l1_vector_shapes
+ScalBenchmark:
+  <<: *l1_vector_shapes
+
+AmaxStrideBenchmark:
+  <<: *l1_amax_stride_shapes
+AsumStrideBenchmark:
+  <<: *l1_stride_shapes
+AxpyStrideBenchmark:
+  <<: *l1_stride_shapes
+CopyStrideBenchmark:
+  <<: *l1_stride_shapes
+Nrm2StrideBenchmark:
+  <<: *l1_stride_shapes
+RotStrideBenchmark:
+  <<: *l1_stride_shapes
+ScalStrideBenchmark:
+  <<: *l1_stride_shapes
+
 # GEMM operations base shapes (M, N, K)
 # These shapes are used for sgemm, hgemm, bfgemm and fp8gemm benchmarks
 GemmBenchmark:
@@ -67,10 +128,38 @@ GemmBenchmark:
     - [512, 512, 512]       # large square matrix
     - [1024, 1024, 1024]    # large square matrix
     - [2048, 2048, 2048]    # extra large square matrix
+    - [4096, 4096, 4096]    # extra large square matrix
+    - [8192, 8192, 8192]    # extra large square matrix
+    - [16384, 16384, 16384] # extra large square matrix
     - [64, 512, 512]        # tall and skinny
+    - [64, 1024, 512]       # tall and skinny
+    - [64, 2048, 1024]      # tall and skinny
+    - [64, 4096, 2048]      # tall and skinny
+    - [128, 4096, 1024]     # tall and skinny
+    - [256, 8192, 2048]     # tall and skinny
+    - [512, 16384, 4096]    # tall and skinny
     - [512, 64, 512]        # short and wide
-    - [1024, 4096, 1024]    # typical transformer attention shape
-    - [4096, 1024, 4096]    # typical transformer FFN shape
+    - [1024, 64, 512]       # short and wide
+    - [2048, 64, 1024]      # short and wide
+    - [4096, 64, 2048]      # short and wide
+    - [4096, 128, 1024]     # short and wide
+    - [8192, 256, 2048]     # short and wide
+    - [16384, 512, 4096]    # short and wide
+    - [511, 511, 511]       # odd dimensions
+    - [1023, 1023, 1023]    # odd dimensions
+    - [2048, 12288, 4096]   # odd dimensions
+    - [2048, 11008, 4096]   # odd dimensions
+    - [2048, 4096, 11008]   # odd dimensions
+    - [4096, 24576, 8192]   # odd dimensions
+    - [4096, 8192, 28672]   # odd dimensions
+    - [8192, 28672, 8192]   # odd dimensions
+    - [16384, 2048, 2048]   # odd dimensions
+    - [2048, 16384, 2048]   # odd dimensions
+    - [2048, 2048, 16384]   # odd dimensions
+    - [32768, 1024, 1024]   # odd dimensions
+    - [4095, 4095, 4095]   # odd dimensions
+    - [8191, 8191, 8191]   # odd dimensions
+    - [4097, 8191, 4095]   # odd dimensions
   shape_desc: "M, N, K"
 
 # the default shapes info

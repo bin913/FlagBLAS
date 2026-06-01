@@ -1,3 +1,4 @@
+import logging
 from typing import Generator
 
 import cupy as cp
@@ -7,9 +8,12 @@ import torch
 from cupy_backends.cuda.libs import cublas
 
 import flag_blas
-
+from benchmark.attri_util import L1_STRIDE_SHAPES, L1_VECTOR_SHAPES
+from benchmark.conftest import Config
 from benchmark.performance_utils import Benchmark
 from flag_blas.utils import shape_utils
+
+logger = logging.getLogger(__name__)
 
 
 def cublas_saxpy(x, y, alpha, incx=1, incy=1, n=None, handle=None, alpha_ptr=None):
@@ -32,28 +36,28 @@ def cublas_zaxpy(x, y, alpha, incx=1, incy=1, n=None, handle=None, alpha_ptr=Non
     return y
 
 
-def gems_saxpy_wrapper(
+def blas_saxpy_wrapper(
     x, y, alpha, incx=1, incy=1, n=None, handle=None, alpha_ptr=None
 ):
     flag_blas.ops.saxpy(n, alpha, x, incx, y, incy)
     return y
 
 
-def gems_daxpy_wrapper(
+def blas_daxpy_wrapper(
     x, y, alpha, incx=1, incy=1, n=None, handle=None, alpha_ptr=None
 ):
     flag_blas.ops.daxpy(n, alpha, x, incx, y, incy)
     return y
 
 
-def gems_caxpy_wrapper(
+def blas_caxpy_wrapper(
     x, y, alpha, incx=1, incy=1, n=None, handle=None, alpha_ptr=None
 ):
     flag_blas.ops.caxpy(n, alpha, x, incx, y, incy)
     return y
 
 
-def gems_zaxpy_wrapper(
+def blas_zaxpy_wrapper(
     x, y, alpha, incx=1, incy=1, n=None, handle=None, alpha_ptr=None
 ):
     flag_blas.ops.zaxpy(n, alpha, x, incx, y, incy)
@@ -61,7 +65,6 @@ def gems_zaxpy_wrapper(
 
 
 class AxpyBenchmark(Benchmark):
-
     def __init__(self, *args, alpha=1e-5, **kwargs):
         super().__init__(*args, **kwargs)
         self.alpha = alpha
@@ -70,22 +73,7 @@ class AxpyBenchmark(Benchmark):
         return ["gbps"]
 
     def set_more_shapes(self):
-        shapes = [
-            (1024,),
-            (5333,),
-            (65536,),
-            (100000,),
-            (1048576,),
-            (3000000,),
-            (4194304,),
-            (10000000,),
-            (16777216,),
-            (33554432,),
-            (50000000,),
-            (67108864,),
-            (134217728,),
-        ]
-        self.shapes = shapes
+        self.shapes = L1_VECTOR_SHAPES
         return None
 
     def get_input_iter(self, cur_dtype) -> Generator:
@@ -122,9 +110,67 @@ class AxpyBenchmark(Benchmark):
         )
         return io_amount * 1e-9 / (latency * 1e-3)
 
+    def validate_results(self, torch_result, blas_result, dtype):
+        tolerance = flag_blas.testing.RESOLUTION[dtype]
+        try:
+            flag_blas.testing.assert_close(
+                blas_result,
+                torch_result,
+                dtype,
+                equal_nan=False,
+                reduce_dim=1,
+                atol=tolerance,
+            )
+        except AssertionError as e:
+            torch_cpu = torch_result.cpu()
+            blas_cpu = blas_result.cpu()
+            max_abs_diff = torch.max(torch.abs(torch_cpu - blas_cpu))
+            max_rel_diff = torch.max(
+                torch.abs((torch_cpu - blas_cpu) / (torch.abs(torch_cpu) + 1e-9))
+            )
+            raise AssertionError(
+                f"Results differ beyond tolerance {tolerance} for dtype {dtype}:\n"
+                f"Max absolute difference: {max_abs_diff}\n"
+                f"Max relative difference: {max_rel_diff}\n"
+                f"Shape: {torch_cpu.shape}"
+            ) from e
 
-class AxpyStrideBenchmark(Benchmark):
+    def run_correctness_check(self):
+        if self.blas_op is None:
+            raise ValueError(f"Missing FlagBLAS op for {self.op_name}")
 
+        self.init_user_config()
+        total_cases = 0
+        logger.info(
+            "[correctness] %s: comparing FlagBLAS against cuBLAS before benchmark...",
+            self.op_name,
+        )
+        for cur_dtype in self.to_bench_dtypes:
+            dtype_cases = 0
+            tolerance = flag_blas.testing.RESOLUTION[cur_dtype]
+            for x, y, kwargs in self.get_input_iter(cur_dtype):
+                y_blas = y.clone()
+                torch_result = self.torch_op(x, y, **kwargs)
+                blas_result = self.blas_op(x, y_blas, **kwargs)
+                self.validate_results(torch_result, blas_result, cur_dtype)
+                dtype_cases += 1
+            total_cases += dtype_cases
+            logger.info(
+                "[correctness] %s: PASSED dtype=%s total_cases=%s tolerance=%s",
+                self.op_name,
+                cur_dtype,
+                dtype_cases,
+                tolerance,
+            )
+        logger.info(
+            "[correctness] %s: all %s cuBLAS comparison cases passed; "
+            "starting performance benchmark.",
+            self.op_name,
+            total_cases,
+        )
+
+
+class AxpyStrideBenchmark(AxpyBenchmark):
     def __init__(self, *args, incx=1, incy=1, alpha=1e-5, **kwargs):
         super().__init__(*args, **kwargs)
         self.incx = incx
@@ -135,16 +181,7 @@ class AxpyStrideBenchmark(Benchmark):
         return ["gbps"]
 
     def set_more_shapes(self):
-        shapes_1d = [
-            (1024,),
-            (5333,),
-            (65536,),
-            (100000,),
-            (1048576,),
-            (3000000,),
-            (4194304,),
-        ]
-        self.shapes = shapes_1d
+        self.shapes = L1_STRIDE_SHAPES
         return None
 
     def get_input_iter(self, cur_dtype) -> Generator:
@@ -177,11 +214,23 @@ class AxpyStrideBenchmark(Benchmark):
                 }
 
     def get_gbps(self, args, latency):
-        inp1, inp2 = args[0], args[1]
+        inp1 = args[0]
         n = (inp1.numel() + self.incx - 1) // self.incx
         element_size = inp1.element_size()
         io_amount = n * element_size + 2 * n * element_size
         return io_amount * 1e-9 / (latency * 1e-3)
+
+
+def run_correctness_then_benchmark(bench):
+    if not Config.query and not Config.skip_correctness:
+        bench.run_correctness_check()
+    elif Config.skip_correctness:
+        logger.info(
+            "[correctness] %s: skipped by --skip_correctness; "
+            "starting performance benchmark.",
+            bench.op_name,
+        )
+    bench.run()
 
 
 @pytest.mark.axpy
@@ -189,10 +238,10 @@ def test_perf_saxpy():
     bench = AxpyBenchmark(
         op_name="saxpy",
         torch_op=cublas_saxpy,
-        gems_op=gems_saxpy_wrapper,
+        blas_op=blas_saxpy_wrapper,
         dtypes=[torch.float32],
     )
-    bench.run()
+    run_correctness_then_benchmark(bench)
 
 
 @pytest.mark.axpy
@@ -202,10 +251,10 @@ def test_perf_daxpy():
     bench = AxpyBenchmark(
         op_name="daxpy",
         torch_op=cublas_daxpy,
-        gems_op=gems_daxpy_wrapper,
+        blas_op=blas_daxpy_wrapper,
         dtypes=[torch.float64],
     )
-    bench.run()
+    run_correctness_then_benchmark(bench)
 
 
 @pytest.mark.axpy
@@ -213,11 +262,11 @@ def test_perf_caxpy():
     bench = AxpyBenchmark(
         op_name="caxpy",
         torch_op=cublas_caxpy,
-        gems_op=gems_caxpy_wrapper,
+        blas_op=blas_caxpy_wrapper,
         dtypes=[torch.complex64],
         alpha=0.01 + 0.01j,
     )
-    bench.run()
+    run_correctness_then_benchmark(bench)
 
 
 @pytest.mark.axpy
@@ -227,11 +276,11 @@ def test_perf_zaxpy():
     bench = AxpyBenchmark(
         op_name="zaxpy",
         torch_op=cublas_zaxpy,
-        gems_op=gems_zaxpy_wrapper,
+        blas_op=blas_zaxpy_wrapper,
         dtypes=[torch.complex128],
         alpha=0.01 + 0.01j,
     )
-    bench.run()
+    run_correctness_then_benchmark(bench)
 
 
 @pytest.mark.axpy
@@ -240,12 +289,12 @@ def test_perf_saxpy_stride(incx, incy):
     bench = AxpyStrideBenchmark(
         op_name=f"saxpy_stride_incx{incx}_incy{incy}",
         torch_op=cublas_saxpy,
-        gems_op=gems_saxpy_wrapper,
+        blas_op=blas_saxpy_wrapper,
         dtypes=[torch.float32],
         incx=incx,
         incy=incy,
     )
-    bench.run()
+    run_correctness_then_benchmark(bench)
 
 
 @pytest.mark.axpy
@@ -256,12 +305,12 @@ def test_perf_daxpy_stride(incx, incy):
     bench = AxpyStrideBenchmark(
         op_name=f"daxpy_stride_incx{incx}_incy{incy}",
         torch_op=cublas_daxpy,
-        gems_op=gems_daxpy_wrapper,
+        blas_op=blas_daxpy_wrapper,
         dtypes=[torch.float64],
         incx=incx,
         incy=incy,
     )
-    bench.run()
+    run_correctness_then_benchmark(bench)
 
 
 @pytest.mark.axpy
@@ -270,13 +319,13 @@ def test_perf_caxpy_stride(incx, incy):
     bench = AxpyStrideBenchmark(
         op_name=f"caxpy_stride_incx{incx}_incy{incy}",
         torch_op=cublas_caxpy,
-        gems_op=gems_caxpy_wrapper,
+        blas_op=blas_caxpy_wrapper,
         dtypes=[torch.complex64],
         incx=incx,
         incy=incy,
         alpha=0.01 + 0.01j,
     )
-    bench.run()
+    run_correctness_then_benchmark(bench)
 
 
 @pytest.mark.axpy
@@ -287,10 +336,10 @@ def test_perf_zaxpy_stride(incx, incy):
     bench = AxpyStrideBenchmark(
         op_name=f"zaxpy_stride_incx{incx}_incy{incy}",
         torch_op=cublas_zaxpy,
-        gems_op=gems_zaxpy_wrapper,
+        blas_op=blas_zaxpy_wrapper,
         dtypes=[torch.complex128],
         incx=incx,
         incy=incy,
         alpha=0.01 + 0.01j,
     )
-    bench.run()
+    run_correctness_then_benchmark(bench)

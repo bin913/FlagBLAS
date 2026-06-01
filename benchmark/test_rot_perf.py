@@ -2,12 +2,13 @@ import ctypes
 import ctypes.util
 from typing import Generator
 
+import cupy as cp
 import pytest
 import torch
-import cupy as cp
 
 import flag_blas
-from benchmark.performance_utils import Benchmark
+from benchmark.attri_util import L1_STRIDE_SHAPES, L1_VECTOR_SHAPES
+from benchmark.performance_utils import Benchmark, run_correctness_then_benchmark
 from flag_blas.utils import shape_utils
 
 
@@ -81,28 +82,27 @@ def cublas_rot_reference(x, y, c, s, incx=1, incy=1, n=None):
     return x, y
 
 
-def gems_srot_wrapper(x, y, c, s, incx=1, incy=1, n=None):
+def blas_srot_wrapper(x, y, c, s, incx=1, incy=1, n=None):
     flag_blas.ops.srot(n, x, incx, y, incy, c, s)
     return x, y
 
 
-def gems_drot_wrapper(x, y, c, s, incx=1, incy=1, n=None):
+def blas_drot_wrapper(x, y, c, s, incx=1, incy=1, n=None):
     flag_blas.ops.drot(n, x, incx, y, incy, c, s)
     return x, y
 
 
-def gems_crot_wrapper(x, y, c, s, incx=1, incy=1, n=None):
+def blas_crot_wrapper(x, y, c, s, incx=1, incy=1, n=None):
     flag_blas.ops.crot(n, x, incx, y, incy, c, s)
     return x, y
 
 
-def gems_zrot_wrapper(x, y, c, s, incx=1, incy=1, n=None):
+def blas_zrot_wrapper(x, y, c, s, incx=1, incy=1, n=None):
     flag_blas.ops.zrot(n, x, incx, y, incy, c, s)
     return x, y
 
 
 class RotBenchmark(Benchmark):
-
     def __init__(self, *args, c=0.8, s=0.6, **kwargs):
         super().__init__(*args, **kwargs)
         self.c = c
@@ -112,22 +112,7 @@ class RotBenchmark(Benchmark):
         return ["gbps"]
 
     def set_more_shapes(self):
-        shapes = [
-            (1024,),
-            (5333,),
-            (65536,),
-            (100000,),
-            (1048576,),
-            (3000000,),
-            (4194304,),
-            (10000000,),
-            (16777216,),
-            (33554432,),
-            (50000000,),
-            (67108864,),
-            (134217728,),
-        ]
-        self.shapes = shapes
+        self.shapes = L1_VECTOR_SHAPES
         return None
 
     def get_input_iter(self, cur_dtype) -> Generator:
@@ -147,7 +132,6 @@ class RotBenchmark(Benchmark):
 
 
 class RotStrideBenchmark(Benchmark):
-
     def __init__(self, *args, incx=1, incy=1, c=0.8, s=0.6, **kwargs):
         super().__init__(*args, **kwargs)
         self.incx = incx
@@ -159,16 +143,7 @@ class RotStrideBenchmark(Benchmark):
         return ["gbps"]
 
     def set_more_shapes(self):
-        shapes_1d = [
-            (1024,),
-            (5333,),
-            (65536,),
-            (100000,),
-            (1048576,),
-            (3000000,),
-            (4194304,),
-        ]
-        self.shapes = shapes_1d
+        self.shapes = L1_STRIDE_SHAPES
         return None
 
     def get_input_iter(self, cur_dtype) -> Generator:
@@ -198,10 +173,10 @@ def test_perf_srot():
     bench = RotBenchmark(
         op_name="srot",
         torch_op=cublas_rot_reference,
-        gems_op=gems_srot_wrapper,
+        blas_op=blas_srot_wrapper,
         dtypes=[torch.float32],
     )
-    bench.run()
+    run_correctness_then_benchmark(bench)
 
 
 @pytest.mark.rot
@@ -211,10 +186,10 @@ def test_perf_drot():
     bench = RotBenchmark(
         op_name="drot",
         torch_op=cublas_rot_reference,
-        gems_op=gems_drot_wrapper,
+        blas_op=blas_drot_wrapper,
         dtypes=[torch.float64],
     )
-    bench.run()
+    run_correctness_then_benchmark(bench)
 
 
 @pytest.mark.rot
@@ -222,12 +197,12 @@ def test_perf_crot():
     bench = RotBenchmark(
         op_name="crot",
         torch_op=cublas_rot_reference,
-        gems_op=gems_crot_wrapper,
+        blas_op=blas_crot_wrapper,
         dtypes=[torch.complex64],
         c=0.8,
         s=0.36 + 0.48j,
     )
-    bench.run()
+    run_correctness_then_benchmark(bench)
 
 
 @pytest.mark.rot
@@ -237,12 +212,12 @@ def test_perf_zrot():
     bench = RotBenchmark(
         op_name="zrot",
         torch_op=cublas_rot_reference,
-        gems_op=gems_zrot_wrapper,
+        blas_op=blas_zrot_wrapper,
         dtypes=[torch.complex128],
         c=0.8,
         s=0.36 + 0.48j,
     )
-    bench.run()
+    run_correctness_then_benchmark(bench)
 
 
 @pytest.mark.rot
@@ -251,12 +226,12 @@ def test_perf_srot_stride(incx, incy):
     bench = RotStrideBenchmark(
         op_name=f"srot_stride_incx{incx}_incy{incy}",
         torch_op=cublas_rot_reference,
-        gems_op=gems_srot_wrapper,
+        blas_op=blas_srot_wrapper,
         dtypes=[torch.float32],
         incx=incx,
         incy=incy,
     )
-    bench.run()
+    run_correctness_then_benchmark(bench)
 
 
 @pytest.mark.rot
@@ -267,12 +242,12 @@ def test_perf_drot_stride(incx, incy):
     bench = RotStrideBenchmark(
         op_name=f"drot_stride_incx{incx}_incy{incy}",
         torch_op=cublas_rot_reference,
-        gems_op=gems_drot_wrapper,
+        blas_op=blas_drot_wrapper,
         dtypes=[torch.float64],
         incx=incx,
         incy=incy,
     )
-    bench.run()
+    run_correctness_then_benchmark(bench)
 
 
 @pytest.mark.rot
@@ -281,14 +256,14 @@ def test_perf_crot_stride(incx, incy):
     bench = RotStrideBenchmark(
         op_name=f"crot_stride_incx{incx}_incy{incy}",
         torch_op=cublas_rot_reference,
-        gems_op=gems_crot_wrapper,
+        blas_op=blas_crot_wrapper,
         dtypes=[torch.complex64],
         incx=incx,
         incy=incy,
         c=0.8,
         s=0.36 + 0.48j,
     )
-    bench.run()
+    run_correctness_then_benchmark(bench)
 
 
 @pytest.mark.rot
@@ -299,11 +274,11 @@ def test_perf_zrot_stride(incx, incy):
     bench = RotStrideBenchmark(
         op_name=f"zrot_stride_incx{incx}_incy{incy}",
         torch_op=cublas_rot_reference,
-        gems_op=gems_zrot_wrapper,
+        blas_op=blas_zrot_wrapper,
         dtypes=[torch.complex128],
         incx=incx,
         incy=incy,
         c=0.8,
         s=0.36 + 0.48j,
     )
-    bench.run()
+    run_correctness_then_benchmark(bench)
