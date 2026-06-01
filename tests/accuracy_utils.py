@@ -285,8 +285,6 @@ GROUP_GEMM_SHAPES = [
     (512, 64, 2048),
 ]
 
-GROUP_GEMM_M_VALUES = list(range(1, 33)) + [64, 128, 256, 512, 1024, 2048, 4096]
-
 
 GEMM_SHAPES = [
     (1024, 1024, 1024),

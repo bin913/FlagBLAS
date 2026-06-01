@@ -3,7 +3,6 @@ import ctypes.util
 import random
 
 import cupy as cp
-import numpy as np
 import pytest
 import torch
 from cupy_backends.cuda.libs import cublas
@@ -55,24 +54,24 @@ def _cublasGemmGroupedBatchedEx(
 ):
     return _cublas.cublasGemmGroupedBatchedEx(
         ctypes.c_void_p(handle),
-        transa.ctypes.data_as(ctypes.c_void_p),
-        transb.ctypes.data_as(ctypes.c_void_p),
-        m_arr.ctypes.data_as(ctypes.c_void_p),
-        n_arr.ctypes.data_as(ctypes.c_void_p),
-        k_arr.ctypes.data_as(ctypes.c_void_p),
+        ctypes.c_void_p(transa.data_ptr()),
+        ctypes.c_void_p(transb.data_ptr()),
+        ctypes.c_void_p(m_arr.data_ptr()),
+        ctypes.c_void_p(n_arr.data_ptr()),
+        ctypes.c_void_p(k_arr.data_ptr()),
         ctypes.c_void_p(alpha),
         ctypes.c_void_p(a_array),
         ctypes.c_int(a_type),
-        lda.ctypes.data_as(ctypes.c_void_p),
+        ctypes.c_void_p(lda.data_ptr()),
         ctypes.c_void_p(b_array),
         ctypes.c_int(b_type),
-        ldb.ctypes.data_as(ctypes.c_void_p),
+        ctypes.c_void_p(ldb.data_ptr()),
         ctypes.c_void_p(beta),
         ctypes.c_void_p(c_array),
         ctypes.c_int(c_type),
-        ldc.ctypes.data_as(ctypes.c_void_p),
+        ctypes.c_void_p(ldc.data_ptr()),
         ctypes.c_int(group_count),
-        group_size.ctypes.data_as(ctypes.c_void_p),
+        ctypes.c_void_p(group_size.data_ptr()),
         ctypes.c_int(compute_type),
     )
 
@@ -184,17 +183,17 @@ def cublas_group_gemm_reference(group_A, group_B, group_C, offs_table, alpha, be
         ldb_list.append(kg)
         ldc_list.append(ng)
 
-    transa = np.array([CUBLAS_OP_N] * e, dtype=np.int32)
-    transb = np.array([CUBLAS_OP_N] * e, dtype=np.int32)
-    m_arr = np.array(m_arr_list, dtype=np.int32)
-    n_arr = np.array(n_arr_list, dtype=np.int32)
-    k_arr = np.array(k_arr_list, dtype=np.int32)
-    lda_arr = np.array(lda_list, dtype=np.int32)
-    ldb_arr = np.array(ldb_list, dtype=np.int32)
-    ldc_arr = np.array(ldc_list, dtype=np.int32)
-    batch = np.array([1] * e, dtype=np.int32)
-    alpha_arr = np.full(e, alpha, dtype=np.float32)
-    beta_arr = np.full(e, beta, dtype=np.float32)
+    transa = torch.tensor([CUBLAS_OP_N] * e, dtype=torch.int32)
+    transb = torch.tensor([CUBLAS_OP_N] * e, dtype=torch.int32)
+    m_arr = torch.tensor(m_arr_list, dtype=torch.int32)
+    n_arr = torch.tensor(n_arr_list, dtype=torch.int32)
+    k_arr = torch.tensor(k_arr_list, dtype=torch.int32)
+    lda_arr = torch.tensor(lda_list, dtype=torch.int32)
+    ldb_arr = torch.tensor(ldb_list, dtype=torch.int32)
+    ldc_arr = torch.tensor(ldc_list, dtype=torch.int32)
+    batch = torch.tensor([1] * e, dtype=torch.int32)
+    alpha_arr = torch.full((e,), alpha, dtype=torch.float32)
+    beta_arr = torch.full((e,), beta, dtype=torch.float32)
 
     device = group_A.device
     d_a_ptrs = torch.tensor(a_ptrs, dtype=torch.int64, device=device)
@@ -208,14 +207,14 @@ def cublas_group_gemm_reference(group_A, group_B, group_C, offs_table, alpha, be
         m_arr,
         n_arr,
         k_arr,
-        alpha_arr.ctypes.data,
+        alpha_arr.data_ptr(),
         d_a_ptrs.data_ptr(),
         cu_dtype,
         lda_arr,
         d_b_ptrs.data_ptr(),
         cu_dtype,
         ldb_arr,
-        beta_arr.ctypes.data,
+        beta_arr.data_ptr(),
         d_c_ptrs.data_ptr(),
         cu_dtype,
         ldc_arr,
@@ -234,7 +233,7 @@ def test_accuracy_group_gemm(k, e, n):
     alpha, beta = 1.5, 0.5
     scale = k**-0.5
 
-    m_list = [random.choice(utils.GROUP_GEMM_M_VALUES) for _ in range(e)]
+    m_list = [random.randint(1, 4096) for _ in range(e)]
     total_M = sum(m_list)
     total_K = e * k
 

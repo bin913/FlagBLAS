@@ -62,6 +62,36 @@ def get_autotune_config(pre_hook=None):
             pre_hook=pre_hook,
         ),
         triton.Config(
+            {"BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 128, "GROUP_M": 8},
+            num_stages=2,
+            num_warps=4,
+            pre_hook=pre_hook,
+        ),
+        triton.Config(
+            {"BLOCK_M": 256, "BLOCK_N": 128, "BLOCK_K": 128, "GROUP_M": 8},
+            num_stages=3,
+            num_warps=4,
+            pre_hook=pre_hook,
+        ),
+        triton.Config(
+            {"BLOCK_M": 256, "BLOCK_N": 128, "BLOCK_K": 64, "GROUP_M": 8},
+            num_stages=3,
+            num_warps=8,
+            pre_hook=pre_hook,
+        ),
+        triton.Config(
+            {"BLOCK_M": 128, "BLOCK_N": 64, "BLOCK_K": 32, "GROUP_M": 4},
+            num_stages=4,
+            num_warps=4,
+            pre_hook=pre_hook,
+        ),
+        triton.Config(
+            {"BLOCK_M": 256, "BLOCK_N": 256, "BLOCK_K": 64, "GROUP_M": 8},
+            num_stages=3,
+            num_warps=8,
+            pre_hook=pre_hook,
+        ),
+        triton.Config(
             {"BLOCK_M": 64, "BLOCK_N": 256, "BLOCK_K": 32, "GROUP_M": 4},
             num_stages=4,
             num_warps=4,
@@ -290,9 +320,6 @@ def grouped_bfgemm_kernel(
 
 def group_bfgemm(
     group_out,
-    flag_m_arr,
-    flag_n_arr,
-    flag_k_arr,
     d_a_ptrs,
     d_b_ptrs,
     d_c_ptrs,
@@ -561,9 +588,6 @@ def grouped_hgemm_kernel(
 
 def group_hgemm(
     group_out,
-    flag_m_arr,
-    flag_n_arr,
-    flag_k_arr,
     d_a_ptrs,
     d_b_ptrs,
     d_c_ptrs,
