@@ -335,6 +335,126 @@ ops:
       - BLAS
     stages:
       - beta: '0.1'
+  - id: sdot
+    description: |
+      Single-precision BLAS Level 1 dot-product reduction.
+      Computes the dot product of strided float32 vectors x and y into a scalar result.
+    for:
+      - sdot
+    labels:
+      - dot
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: ddot
+    description: |
+      Double-precision BLAS Level 1 dot-product reduction.
+      Computes the dot product of strided float64 vectors x and y into a scalar result.
+    for:
+      - ddot
+    labels:
+      - dot
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: cdotu
+    description: |
+      Single-precision complex BLAS Level 1 unconjugated dot-product reduction.
+      Computes the unconjugated dot product of strided complex64 vectors x and y.
+    for:
+      - cdotu
+    labels:
+      - dotu
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: zdotu
+    description: |
+      Double-precision complex BLAS Level 1 unconjugated dot-product reduction.
+      Computes the unconjugated dot product of strided complex128 vectors x and y.
+    for:
+      - zdotu
+    labels:
+      - dotu
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: cdotc
+    description: |
+      Single-precision complex BLAS Level 1 conjugated dot-product reduction.
+      Computes the conjugated dot product of strided complex64 vectors x and y.
+    for:
+      - cdotc
+    labels:
+      - dotc
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: zdotc
+    description: |
+      Double-precision complex BLAS Level 1 conjugated dot-product reduction.
+      Computes the conjugated dot product of strided complex128 vectors x and y.
+    for:
+      - zdotc
+    labels:
+      - dotc
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: sswap
+    description: |
+      Single-precision BLAS Level 1 vector swap.
+      Swaps elements between strided float32 vectors x and y in place.
+    for:
+      - sswap
+    labels:
+      - swap
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: dswap
+    description: |
+      Double-precision BLAS Level 1 vector swap.
+      Swaps elements between strided float64 vectors x and y in place.
+    for:
+      - dswap
+    labels:
+      - swap
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: cswap
+    description: |
+      Single-precision complex BLAS Level 1 vector swap.
+      Swaps elements between strided complex64 vectors x and y in place.
+    for:
+      - cswap
+    labels:
+      - swap
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: zswap
+    description: |
+      Double-precision complex BLAS Level 1 vector swap.
+      Swaps elements between strided complex128 vectors x and y in place.
+    for:
+      - zswap
+    labels:
+      - swap
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
   - id: snrm2
     description: |
       Single-precision BLAS Level 1 Euclidean norm reduction.
