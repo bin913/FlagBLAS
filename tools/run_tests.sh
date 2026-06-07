@@ -17,6 +17,7 @@ echo "Running Pytest unit tests..."
 run_command pytest -s tests/test_scal.py
 run_command pytest -s tests/test_asum.py
 run_command pytest -s tests/test_amax.py
+run_command pytest -s tests/test_amin.py
 run_command pytest -s tests/test_axpy.py
 run_command pytest -s tests/test_rot.py
 run_command pytest -s tests/test_rotg.py
