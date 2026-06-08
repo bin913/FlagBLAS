@@ -1,3 +1,5 @@
+import ctypes
+import ctypes.util
 from typing import Generator
 
 import pytest
@@ -6,65 +8,91 @@ import torch
 import flag_blas
 from benchmark.performance_utils import Benchmark, run_correctness_then_benchmark
 
+CUBLAS_POINTER_MODE_DEVICE = 1
 
-def _real_rotg_reference(a, b, c, s):
-    abs_a = torch.abs(a)
-    abs_b = torch.abs(b)
-    scale = abs_a + abs_b
-    if scale.item() == 0.0:
-        a.zero_()
-        b.zero_()
-        c.fill_(1.0)
-        s.zero_()
-        return a, b, c, s
-    roe = a if abs_a.item() > abs_b.item() else b
-    r = scale * torch.sqrt((a / scale) * (a / scale) + (b / scale) * (b / scale))
-    if roe.item() < 0.0:
-        r = -r
-    c.copy_(a / r)
-    s.copy_(b / r)
-    z = torch.ones_like(b)
-    if abs_a.item() > abs_b.item():
-        z.copy_(s)
-    elif c.item() != 0.0:
-        z.copy_(1.0 / c)
-    a.copy_(r)
-    b.copy_(z)
+
+def load_cublas():
+    lib_names = ["libcublas.so", "libcublas.so.12", "libcublas.so.11"]
+    found_path = ctypes.util.find_library("cublas")
+    if found_path:
+        lib_names.insert(0, found_path)
+
+    for name in lib_names:
+        try:
+            return ctypes.cdll.LoadLibrary(name)
+        except OSError:
+            continue
+    raise RuntimeError("Cannot find libcublas.so in the system")
+
+
+_cublas = load_cublas()
+_cublas.cublasCreate_v2.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
+_cublas.cublasCreate_v2.restype = ctypes.c_int
+_cublas.cublasSetPointerMode_v2.argtypes = [ctypes.c_void_p, ctypes.c_int]
+_cublas.cublasSetPointerMode_v2.restype = ctypes.c_int
+
+for _rotg_name in (
+    "cublasSrotg_v2",
+    "cublasDrotg_v2",
+    "cublasCrotg_v2",
+    "cublasZrotg_v2",
+):
+    _rotg_func = getattr(_cublas, _rotg_name)
+    _rotg_func.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+    ]
+    _rotg_func.restype = ctypes.c_int
+
+
+def create_cublas_handle():
+    handle = ctypes.c_void_p()
+    status = _cublas.cublasCreate_v2(ctypes.byref(handle))
+    if status != 0:
+        raise RuntimeError(f"cuBLAS handle creation failed, error code: {status}")
+    status = _cublas.cublasSetPointerMode_v2(handle, CUBLAS_POINTER_MODE_DEVICE)
+    if status != 0:
+        raise RuntimeError(f"cuBLAS pointer mode setup failed, error code: {status}")
+    return handle
+
+
+def as_cublas_handle(handle):
+    if isinstance(handle, ctypes.c_void_p):
+        return handle
+    return ctypes.c_void_p(handle)
+
+
+def cublas_rotg(a, b, c, s, handle=None):
+    if handle is None:
+        handle = create_cublas_handle()
+
+    if a.dtype == torch.float32:
+        func = _cublas.cublasSrotg_v2
+    elif a.dtype == torch.float64:
+        func = _cublas.cublasDrotg_v2
+    elif a.dtype == torch.complex64:
+        func = _cublas.cublasCrotg_v2
+    elif a.dtype == torch.complex128:
+        func = _cublas.cublasZrotg_v2
+    else:
+        raise TypeError(f"Unsupported dtype for rotg: {a.dtype}")
+
+    status = func(
+        as_cublas_handle(handle),
+        ctypes.c_void_p(a.data_ptr()),
+        ctypes.c_void_p(b.data_ptr()),
+        ctypes.c_void_p(c.data_ptr()),
+        ctypes.c_void_p(s.data_ptr()),
+    )
+    if status != 0:
+        raise RuntimeError(f"cuBLAS rotg execution failed, error code: {status}")
     return a, b, c, s
 
 
-def _complex_rotg_reference(a, b, c, s):
-    abs_a = torch.abs(a)
-    if abs_a.item() == 0.0:
-        c.zero_()
-        s.fill_(1.0 + 0.0j)
-        a.copy_(b)
-        return a, b, c, s
-    abs_b = torch.abs(b)
-    scale = abs_a + abs_b
-    norm = scale * torch.sqrt(torch.abs(a / scale) ** 2 + torch.abs(b / scale) ** 2)
-    alpha = a / abs_a
-    c.copy_(abs_a / norm)
-    s.copy_(alpha * torch.conj(b) / norm)
-    a.copy_(alpha * norm)
-    return a, b, c, s
-
-
-def torch_rotg(a, b, c, s):
-    a = a.clone()
-    b = b.clone()
-    c = c.clone()
-    s = s.clone()
-    if a.dtype.is_complex:
-        return _complex_rotg_reference(a, b, c, s)
-    return _real_rotg_reference(a, b, c, s)
-
-
-def gems_rotg(a, b, c, s):
-    a = a.clone()
-    b = b.clone()
-    c = c.clone()
-    s = s.clone()
+def gems_rotg(a, b, c, s, handle=None):
     if a.dtype == torch.float32:
         flag_blas.ops.srotg(a, b, c, s)
     elif a.dtype == torch.float64:
@@ -79,13 +107,12 @@ def gems_rotg(a, b, c, s):
 
 
 class RotgBenchmark(Benchmark):
-    correctness_reference = "Torch reference"
-
     def set_shapes(self, shape_file_path=None):
         self.shapes = [(1,)]
         self.shape_desc = "scalar"
 
     def get_input_iter(self, cur_dtype) -> Generator:
+        handle = create_cublas_handle()
         cases = (
             [
                 (1.0 + 2.0j, 3.0 + 4.0j),
@@ -119,7 +146,7 @@ class RotgBenchmark(Benchmark):
             )
             c = torch.zeros(1, dtype=real_dtype, device=self.device)
             s = torch.zeros(1, dtype=cur_dtype, device=self.device)
-            yield a, b, c, s, {}
+            yield a, b, c, s, {"handle": handle}
 
 
 @pytest.mark.rotg
@@ -127,8 +154,8 @@ def test_perf_srotg():
     run_correctness_then_benchmark(
         RotgBenchmark(
             "srotg",
-            torch_op=torch_rotg,
-            gems_op=gems_rotg,
+            torch_op=cublas_rotg,
+            blas_op=gems_rotg,
             dtypes=[torch.float32],
         )
     )
@@ -141,8 +168,8 @@ def test_perf_drotg():
     run_correctness_then_benchmark(
         RotgBenchmark(
             "drotg",
-            torch_op=torch_rotg,
-            gems_op=gems_rotg,
+            torch_op=cublas_rotg,
+            blas_op=gems_rotg,
             dtypes=[torch.float64],
         )
     )
@@ -153,8 +180,8 @@ def test_perf_crotg():
     run_correctness_then_benchmark(
         RotgBenchmark(
             "crotg",
-            torch_op=torch_rotg,
-            gems_op=gems_rotg,
+            torch_op=cublas_rotg,
+            blas_op=gems_rotg,
             dtypes=[torch.complex64],
         )
     )
@@ -167,8 +194,8 @@ def test_perf_zrotg():
     run_correctness_then_benchmark(
         RotgBenchmark(
             "zrotg",
-            torch_op=torch_rotg,
-            gems_op=gems_rotg,
+            torch_op=cublas_rotg,
+            blas_op=gems_rotg,
             dtypes=[torch.complex128],
         )
     )

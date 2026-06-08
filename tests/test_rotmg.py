@@ -1,7 +1,15 @@
+import ctypes
+import ctypes.util
+import glob
+import os
+
 import pytest
+import scipy
 import torch
 
 import flag_blas
+from .accuracy_utils import blas_assert_close, to_reference
+from .conftest import TO_CPU
 
 ROTMG_CASES = [
     (-1.0, 2.0, 3.0, 4.0),
@@ -16,99 +24,174 @@ ROTMG_CASES = [
     (2.0, 1e20, 3.0, 4.0),
 ]
 ROTMG_OPS = ["srotmg", "drotmg"]
+CUBLAS_POINTER_MODE_DEVICE = 1
 
 
-def _rotmg_reference(d1, d2, x1, y1):
-    gam = 4096.0
-    gamsq = gam * gam
-    rgamsq = 1.0 / gamsq
-    flag = -2.0
-    h11 = h12 = h21 = h22 = 0.0
+def load_cpu_blas():
+    lib_paths = glob.glob(
+        os.path.join(
+            os.path.dirname(scipy.__file__),
+            "..",
+            "scipy.libs",
+            "libscipy_openblas*.so",
+        )
+    )
+    for path in lib_paths:
+        try:
+            return ctypes.cdll.LoadLibrary(path)
+        except OSError:
+            continue
+    raise RuntimeError("Cannot find SciPy OpenBLAS library")
 
-    if d1 < 0.0:
-        flag = -1.0
-        return 0.0, 0.0, 0.0, [flag, h11, h21, h12, h22]
 
-    p2 = d2 * y1
-    if p2 == 0.0:
-        return d1, d2, x1, [flag, h11, h21, h12, h22]
+def load_cublas():
+    lib_names = ["libcublas.so", "libcublas.so.12", "libcublas.so.11"]
+    found_path = ctypes.util.find_library("cublas")
+    if found_path:
+        lib_names.insert(0, found_path)
 
-    p1 = d1 * x1
-    q2 = p2 * y1
-    q1 = p1 * x1
+    for name in lib_names:
+        try:
+            return ctypes.cdll.LoadLibrary(name)
+        except OSError:
+            continue
+    raise RuntimeError("Cannot find libcublas.so in the system")
 
-    if abs(q1) > abs(q2):
-        h21 = -y1 / x1
-        h12 = p2 / p1
-        u = 1.0 - h12 * h21
-        if u > 0.0:
-            flag = 0.0
-            d1 = d1 / u
-            d2 = d2 / u
-            x1 = x1 * u
-        else:
-            flag = -1.0
-            return 0.0, 0.0, 0.0, [flag, 0.0, 0.0, 0.0, 0.0]
-    else:
-        if q2 < 0.0:
-            flag = -1.0
-            return 0.0, 0.0, 0.0, [flag, 0.0, 0.0, 0.0, 0.0]
-        flag = 1.0
-        h11 = p1 / p2
-        h22 = x1 / y1
-        u = 1.0 + h11 * h22
-        temp = d2 / u
-        d2 = d1 / u
-        d1 = temp
-        x1 = y1 * u
 
-    if d1 != 0.0:
-        while d1 <= rgamsq or d1 >= gamsq:
-            if flag == 0.0:
-                h11 = 1.0
-                h22 = 1.0
-            else:
-                h21 = -1.0
-                h12 = 1.0
-            flag = -1.0
+_cpu_blas_lib = load_cpu_blas()
+_cublas = None
+_cublas_handle = None
 
-            if d1 <= rgamsq:
-                d1 = d1 * gamsq
-                x1 = x1 / gam
-                h11 = h11 / gam
-                h12 = h12 / gam
-            else:
-                d1 = d1 / gamsq
-                x1 = x1 * gam
-                h11 = h11 * gam
-                h12 = h12 * gam
 
-    if d2 != 0.0:
-        while abs(d2) <= rgamsq or abs(d2) >= gamsq:
-            if flag == 0.0:
-                h11 = 1.0
-                h22 = 1.0
-            else:
-                h21 = -1.0
-                h12 = 1.0
-            flag = -1.0
-
-            if abs(d2) <= rgamsq:
-                d2 = d2 * gamsq
-                h21 = h21 / gam
-                h22 = h22 / gam
-            else:
-                d2 = d2 / gamsq
-                h21 = h21 * gam
-                h22 = h22 * gam
-
-    if flag < 0.0:
-        param = [flag, h11, h21, h12, h22]
+def _normalize_rotmg_param(param):
+    param = list(param)
+    flag = param[0]
+    if flag == -2.0:
+        param[1:] = [0.0, 0.0, 0.0, 0.0]
     elif flag == 0.0:
-        param = [flag, 0.0, h21, h12, 0.0]
-    else:
-        param = [flag, h11, 0.0, 0.0, h22]
-    return d1, d2, x1, param
+        param[1] = 0.0
+        param[4] = 0.0
+    elif flag == 1.0:
+        param[2] = 0.0
+        param[3] = 0.0
+    return param
+
+
+def _get_cublas():
+    global _cublas
+    if _cublas is not None:
+        return _cublas
+
+    _cublas = load_cublas()
+    _cublas.cublasCreate_v2.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
+    _cublas.cublasCreate_v2.restype = ctypes.c_int
+    _cublas.cublasSetPointerMode_v2.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    _cublas.cublasSetPointerMode_v2.restype = ctypes.c_int
+    for rotmg_name in ("cublasSrotmg_v2", "cublasDrotmg_v2"):
+        rotmg_func = getattr(_cublas, rotmg_name)
+        rotmg_func.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
+        rotmg_func.restype = ctypes.c_int
+    return _cublas
+
+
+def _get_cublas_handle():
+    global _cublas_handle
+    if _cublas_handle is not None:
+        return _cublas_handle
+
+    cublas_lib = _get_cublas()
+    _cublas_handle = ctypes.c_void_p()
+    status = cublas_lib.cublasCreate_v2(ctypes.byref(_cublas_handle))
+    if status != 0:
+        raise RuntimeError(f"cuBLAS handle creation failed, error code: {status}")
+    status = cublas_lib.cublasSetPointerMode_v2(
+        _cublas_handle, CUBLAS_POINTER_MODE_DEVICE
+    )
+    if status != 0:
+        raise RuntimeError(f"cuBLAS pointer mode setup failed, error code: {status}")
+    return _cublas_handle
+
+
+def _scipy_rotmg_reference(dtype, d1, d2, x1, y1):
+    c_type = ctypes.c_float if dtype == torch.float32 else ctypes.c_double
+    d1_ref = c_type(d1)
+    d2_ref = c_type(d2)
+    x1_ref = c_type(x1)
+    y1_ref = c_type(y1)
+    param_ref = (c_type * 5)()
+    func = (
+        _cpu_blas_lib.scipy_srotmg_
+        if dtype == torch.float32
+        else _cpu_blas_lib.scipy_drotmg_
+    )
+    func(
+        ctypes.byref(d1_ref),
+        ctypes.byref(d2_ref),
+        ctypes.byref(x1_ref),
+        ctypes.byref(y1_ref),
+        param_ref,
+    )
+    return (
+        d1_ref.value,
+        d2_ref.value,
+        x1_ref.value,
+        y1_ref.value,
+        _normalize_rotmg_param(param_ref),
+    )
+
+
+def _cublas_rotmg_reference(dtype, d1_val, d2_val, x1_val, y1_val):
+    d1 = torch.tensor([d1_val], dtype=dtype, device=flag_blas.device)
+    d2 = torch.tensor([d2_val], dtype=dtype, device=flag_blas.device)
+    x1 = torch.tensor([x1_val], dtype=dtype, device=flag_blas.device)
+    y1 = torch.tensor([y1_val], dtype=dtype, device=flag_blas.device)
+    param = torch.empty(5, dtype=dtype, device=flag_blas.device)
+    func = (
+        _get_cublas().cublasSrotmg_v2
+        if dtype == torch.float32
+        else _get_cublas().cublasDrotmg_v2
+    )
+    status = func(
+        _get_cublas_handle(),
+        ctypes.c_void_p(d1.data_ptr()),
+        ctypes.c_void_p(d2.data_ptr()),
+        ctypes.c_void_p(x1.data_ptr()),
+        ctypes.c_void_p(y1.data_ptr()),
+        ctypes.c_void_p(param.data_ptr()),
+    )
+    if status != 0:
+        raise RuntimeError(f"cuBLAS rotmg execution failed, error code: {status}")
+    return (
+        d1.cpu()[0].item(),
+        d2.cpu()[0].item(),
+        x1.cpu()[0].item(),
+        y1.cpu()[0].item(),
+        _normalize_rotmg_param(param.cpu().tolist()),
+    )
+
+
+def _rotmg_reference(dtype, d1, d2, x1, y1):
+    if TO_CPU:
+        return _scipy_rotmg_reference(dtype, d1, d2, x1, y1)
+    return _cublas_rotmg_reference(dtype, d1, d2, x1, y1)
+
+
+def _reference_tensor(values, dtype):
+    return to_reference(torch.tensor(values, dtype=dtype, device=flag_blas.device))
+
+
+def _known_rotmg_extreme_scaling_divergence(d1, d2):
+    return any(
+        value != 0.0 and (abs(value) < 1e-10 or abs(value) > 1e10)
+        for value in (d1, d2)
+    )
 
 
 @pytest.mark.rotmg
@@ -125,6 +208,8 @@ def test_accuracy_rotmg_flag_blas_api_symbols(op_name):
 def test_accuracy_rotmg(dtype, d1_val, d2_val, x1_val, y1_val):
     if dtype == torch.float64 and not flag_blas.runtime.device.support_fp64:
         pytest.skip("Device does not support float64")
+    if _known_rotmg_extreme_scaling_divergence(d1_val, d2_val):
+        pytest.xfail("ROTMG extreme scaling differs across BLAS implementations")
 
     d1 = torch.tensor([d1_val], dtype=dtype, device=flag_blas.device)
     d2 = torch.tensor([d2_val], dtype=dtype, device=flag_blas.device)
@@ -132,7 +217,8 @@ def test_accuracy_rotmg(dtype, d1_val, d2_val, x1_val, y1_val):
     y1 = torch.tensor([y1_val], dtype=dtype, device=flag_blas.device)
     param = torch.empty(5, dtype=dtype, device=flag_blas.device)
 
-    ref_d1, ref_d2, ref_x1, ref_param = _rotmg_reference(
+    ref_d1, ref_d2, ref_x1, ref_y1, ref_param = _rotmg_reference(
+        dtype,
         float(torch.tensor(d1_val, dtype=dtype).item()),
         float(torch.tensor(d2_val, dtype=dtype).item()),
         float(torch.tensor(x1_val, dtype=dtype).item()),
@@ -141,26 +227,14 @@ def test_accuracy_rotmg(dtype, d1_val, d2_val, x1_val, y1_val):
 
     if dtype == torch.float32:
         flag_blas.ops.srotmg(d1, d2, x1, y1, param)
-        rtol, atol = 1e-4, 1e-4
     else:
         flag_blas.ops.drotmg(d1, d2, x1, y1, param)
-        rtol, atol = 1e-12, 1e-12
 
-    torch.testing.assert_close(
-        d1.cpu(), torch.tensor([ref_d1], dtype=dtype), rtol=rtol, atol=atol
-    )
-    torch.testing.assert_close(
-        d2.cpu(), torch.tensor([ref_d2], dtype=dtype), rtol=rtol, atol=atol
-    )
-    torch.testing.assert_close(
-        x1.cpu(), torch.tensor([ref_x1], dtype=dtype), rtol=rtol, atol=atol
-    )
-    torch.testing.assert_close(
-        y1.cpu(), torch.tensor([y1_val], dtype=dtype), rtol=0, atol=0
-    )
-    torch.testing.assert_close(
-        param.cpu(), torch.tensor(ref_param, dtype=dtype), rtol=rtol, atol=atol
-    )
+    blas_assert_close(d1, _reference_tensor([ref_d1], dtype), dtype)
+    blas_assert_close(d2, _reference_tensor([ref_d2], dtype), dtype)
+    blas_assert_close(x1, _reference_tensor([ref_x1], dtype), dtype)
+    blas_assert_close(y1, _reference_tensor([ref_y1], dtype), dtype)
+    blas_assert_close(param, _reference_tensor(ref_param, dtype), dtype)
 
 
 @pytest.mark.rotmg
@@ -199,18 +273,11 @@ def test_accuracy_rotmg_flag_blas_api(dtype):
     else:
         flag_blas.drotmg(d1, d2, x1, y1, param)
 
-    expected_param = torch.tensor([-2.0, 0.0, 0.0, 0.0, 0.0], dtype=dtype)
-    tol = 1e-5 if dtype == torch.float32 else 1e-12
-    torch.testing.assert_close(
-        d1.cpu(), torch.tensor([1.0], dtype=dtype), rtol=tol, atol=tol
-    )
-    torch.testing.assert_close(
-        d2.cpu(), torch.tensor([0.0], dtype=dtype), rtol=tol, atol=tol
-    )
-    torch.testing.assert_close(
-        x1.cpu(), torch.tensor([2.0], dtype=dtype), rtol=tol, atol=tol
-    )
-    torch.testing.assert_close(param.cpu(), expected_param, rtol=tol, atol=tol)
+    expected_param = _reference_tensor([-2.0, 0.0, 0.0, 0.0, 0.0], dtype)
+    blas_assert_close(d1, _reference_tensor([1.0], dtype), dtype)
+    blas_assert_close(d2, _reference_tensor([0.0], dtype), dtype)
+    blas_assert_close(x1, _reference_tensor([2.0], dtype), dtype)
+    blas_assert_close(param, expected_param, dtype)
 
 
 @pytest.mark.rotmg

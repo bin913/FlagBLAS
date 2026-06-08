@@ -51,6 +51,58 @@ def _rotg_real_kernel(a_ptr, b_ptr, c_ptr, s_ptr):
 
 @libentry()
 @triton.jit
+def _drotg_kernel(a_ptr, b_ptr, c_ptr, s_ptr):
+    a = tl.load(a_ptr)
+    b = tl.load(b_ptr)
+
+    abs_a = tl.abs(a)
+    abs_b = tl.abs(b)
+    max_abs = tl.maximum(abs_a, abs_b)
+    zero = a * 0.0
+    one = zero + 1.0
+
+    if max_abs == 0.0:
+        tl.store(a_ptr, zero)
+        tl.store(b_ptr, zero)
+        tl.store(c_ptr, one)
+        tl.store(s_ptr, zero)
+        return
+
+    if abs_a > 0.0 and abs_b <= abs_a * 1.0e-15:
+        s = b / a
+        tl.store(a_ptr, a)
+        tl.store(b_ptr, s)
+        tl.store(c_ptr, one)
+        tl.store(s_ptr, s)
+        return
+
+    roe = tl.where(abs_a > abs_b, a, b)
+    if max_abs > 1.0e-150 and max_abs < 1.0e150:
+        r = tl.sqrt(a * a + b * b)
+    else:
+        scale = abs_a + abs_b
+        a_scaled = a / scale
+        b_scaled = b / scale
+        r = scale * tl.sqrt(a_scaled * a_scaled + b_scaled * b_scaled)
+
+    r = tl.where(roe < 0.0, -r, r)
+    c = a / r
+    s = b / r
+
+    z = one
+    if abs_a > abs_b:
+        z = s
+    elif c != 0.0:
+        z = one / c
+
+    tl.store(a_ptr, r)
+    tl.store(b_ptr, z)
+    tl.store(c_ptr, c)
+    tl.store(s_ptr, s)
+
+
+@libentry()
+@triton.jit
 def _rotg_complex_kernel(a_ptr, b_ptr, c_ptr, s_ptr):
     a_re = tl.load(a_ptr)
     a_im = tl.load(a_ptr + 1)
@@ -130,6 +182,12 @@ def _rotg_real_impl(a, b, c, s):
         _rotg_real_kernel[(1,)](a, b, c, s)
 
 
+def _drotg_impl(a, b, c, s):
+    _validate_rotg_inputs(a, b, c, s)
+    with torch_device_fn.device(a.device):
+        _drotg_kernel[(1,)](a, b, c, s)
+
+
 def _rotg_complex_impl(a, b, c, s):
     _validate_rotg_inputs(a, b, c, s)
     a_real = torch.view_as_real(a).reshape(-1)
@@ -154,7 +212,7 @@ def drotg(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, s: torch.Tensor) ->
     assert b.dtype == torch.float64, "b must be float64"
     assert c.dtype == torch.float64, "c must be float64"
     assert s.dtype == torch.float64, "s must be float64"
-    _rotg_real_impl(a, b, c, s)
+    _drotg_impl(a, b, c, s)
 
 
 def crotg(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, s: torch.Tensor) -> None:

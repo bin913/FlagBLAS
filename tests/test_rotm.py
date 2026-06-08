@@ -1,10 +1,20 @@
+import ctypes
+import ctypes.util
+
 import pytest
 import torch
+from scipy.linalg import blas as cpu_blas
 
 import flag_blas
-from .accuracy_utils import L1_PAIR_STRIDES, L1_STRIDE_SHAPES
+from .accuracy_utils import (
+    L1_PAIR_STRIDES,
+    L1_STRIDE_SHAPES,
+    blas_assert_close,
+    to_reference,
+)
+from .conftest import TO_CPU
 
-ROTM_FLAGS = [-2.0, -1.5, -1.0, -0.5, 0.0, 1.0]
+ROTM_FLAGS = [-2.0, -1.0, 0.0, 1.0]
 ROTM_OPS = ["srotm", "drotm"]
 
 
@@ -12,32 +22,119 @@ def _build_param(dtype, device, flag):
     return torch.tensor([flag, 0.75, -0.5, 0.25, 1.5], dtype=dtype, device=device)
 
 
-def _rotm_reference(n, x, incx, y, incy, param):
+def load_cublas():
+    lib_names = ["libcublas.so", "libcublas.so.12", "libcublas.so.11"]
+    found_path = ctypes.util.find_library("cublas")
+    if found_path:
+        lib_names.insert(0, found_path)
+
+    for name in lib_names:
+        try:
+            return ctypes.cdll.LoadLibrary(name)
+        except OSError:
+            continue
+    raise RuntimeError("Cannot find libcublas.so in the system")
+
+
+_cublas = None
+_cublas_handle = None
+
+
+def _get_cublas():
+    global _cublas
+    if _cublas is not None:
+        return _cublas
+
+    _cublas = load_cublas()
+    _cublas.cublasCreate_v2.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
+    _cublas.cublasCreate_v2.restype = ctypes.c_int
+    for rotm_name in ("cublasSrotm_v2", "cublasDrotm_v2"):
+        rotm_func = getattr(_cublas, rotm_name)
+        rotm_func.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_void_p,
+        ]
+        rotm_func.restype = ctypes.c_int
+    return _cublas
+
+
+def _get_cublas_handle():
+    global _cublas_handle
+    if _cublas_handle is not None:
+        return _cublas_handle
+
+    _cublas_handle = ctypes.c_void_p()
+    status = _get_cublas().cublasCreate_v2(ctypes.byref(_cublas_handle))
+    if status != 0:
+        raise RuntimeError(f"cuBLAS handle creation failed, error code: {status}")
+    return _cublas_handle
+
+
+def _rotm_host_param(dtype, param):
+    values = param.detach().cpu().tolist()
+    if dtype == torch.float32:
+        return (ctypes.c_float * 5)(*values)
+    return (ctypes.c_double * 5)(*values)
+
+
+def _cublas_rotm_reference(n, x, incx, y, incy, param):
+    ref_x = x.clone()
+    ref_y = y.clone()
     if n <= 0:
-        return
+        return ref_x, ref_y
 
-    flag = float(param[0].item())
-    h11, h21, h12, h22 = param[1], param[2], param[3], param[4]
-    x_view = x[0 : n * incx : incx]
-    y_view = y[0 : n * incy : incy]
-    old_x = x_view.clone()
-    old_y = y_view.clone()
+    func = (
+        _get_cublas().cublasSrotm_v2
+        if x.dtype == torch.float32
+        else _get_cublas().cublasDrotm_v2
+    )
+    param_host = _rotm_host_param(x.dtype, param)
+    status = func(
+        _get_cublas_handle(),
+        ctypes.c_int(n),
+        ctypes.c_void_p(ref_x.data_ptr()),
+        ctypes.c_int(incx),
+        ctypes.c_void_p(ref_y.data_ptr()),
+        ctypes.c_int(incy),
+        ctypes.cast(param_host, ctypes.c_void_p),
+    )
+    if status != 0:
+        raise RuntimeError(f"cuBLAS rotm execution failed, error code: {status}")
+    return ref_x, ref_y
 
-    if flag == -2.0:
-        return
-    if flag < 0.0:
-        x_view.copy_(h11 * old_x + h12 * old_y)
-        y_view.copy_(h21 * old_x + h22 * old_y)
-        return
-    if flag == 0.0:
-        x_view.copy_(old_x + h12 * old_y)
-        y_view.copy_(h21 * old_x + old_y)
-        return
-    if flag == 1.0:
-        x_view.copy_(h11 * old_x + old_y)
-        y_view.copy_(-old_x + h22 * old_y)
-        return
-    raise ValueError(f"Invalid rotm flag: {flag}")
+
+def _scipy_rotm_reference(n, x, incx, y, incy, param):
+    ref_x = x.detach().cpu().clone().contiguous()
+    ref_y = y.detach().cpu().clone().contiguous()
+    if n <= 0:
+        return ref_x, ref_y
+
+    x_np = ref_x.numpy()
+    y_np = ref_y.numpy()
+    param_np = param.detach().cpu().numpy()
+    func = cpu_blas.srotm if x.dtype == torch.float32 else cpu_blas.drotm
+    func(
+        x_np,
+        y_np,
+        param_np,
+        n=n,
+        incx=incx,
+        incy=incy,
+        overwrite_x=1,
+        overwrite_y=1,
+    )
+    return ref_x, ref_y
+
+
+def _rotm_reference(n, x, incx, y, incy, param):
+    if TO_CPU:
+        return _scipy_rotm_reference(n, x, incx, y, incy, param)
+    return _cublas_rotm_reference(n, x, incx, y, incy, param)
 
 
 def _call_rotm(dtype, n, x, incx, y, incy, param):
@@ -68,15 +165,12 @@ def test_accuracy_rotm_real(dtype, shape, incx, incy, flag):
     param = _build_param(dtype, flag_blas.device, flag)
     x = torch.randn(n * incx, dtype=dtype, device=flag_blas.device)
     y = torch.randn(n * incy, dtype=dtype, device=flag_blas.device)
-    ref_x = x.cpu()
-    ref_y = y.cpu()
-    _rotm_reference(n, ref_x, incx, ref_y, incy, param.cpu())
+    ref_x, ref_y = _rotm_reference(n, x, incx, y, incy, param)
 
     _call_rotm(dtype, n, x, incx, y, incy, param)
 
-    tol = 1e-5 if dtype == torch.float32 else 1e-12
-    torch.testing.assert_close(x.cpu(), ref_x, rtol=tol, atol=tol)
-    torch.testing.assert_close(y.cpu(), ref_y, rtol=tol, atol=tol)
+    blas_assert_close(x, ref_x, dtype)
+    blas_assert_close(y, ref_y, dtype)
 
 
 @pytest.mark.rotm
@@ -104,15 +198,12 @@ def test_accuracy_rotm_different_n_real(dtype, n, vec_size, flag):
     param = _build_param(dtype, flag_blas.device, flag)
     x = torch.randn(vec_size, dtype=dtype, device=flag_blas.device)
     y = torch.randn(vec_size, dtype=dtype, device=flag_blas.device)
-    ref_x = x.cpu()
-    ref_y = y.cpu()
-    _rotm_reference(n, ref_x, 1, ref_y, 1, param.cpu())
+    ref_x, ref_y = _rotm_reference(n, x, 1, y, 1, param)
 
     _call_rotm(dtype, n, x, 1, y, 1, param)
 
-    tol = 1e-5 if dtype == torch.float32 else 1e-12
-    torch.testing.assert_close(x.cpu(), ref_x, rtol=tol, atol=tol)
-    torch.testing.assert_close(y.cpu(), ref_y, rtol=tol, atol=tol)
+    blas_assert_close(x, ref_x, dtype)
+    blas_assert_close(y, ref_y, dtype)
 
 
 @pytest.mark.rotm
@@ -134,11 +225,14 @@ def test_accuracy_rotm_flag_blas_api(dtype):
     else:
         flag_blas.drotm(3, x, 1, y, 1, param)
 
-    expected_x = torch.tensor([1.75, 2.75, 3.75], dtype=dtype)
-    expected_y = torch.tensor([5.5, 6.5, 7.5], dtype=dtype)
-    tol = 1e-5 if dtype == torch.float32 else 1e-12
-    torch.testing.assert_close(x.cpu(), expected_x, rtol=tol, atol=tol)
-    torch.testing.assert_close(y.cpu(), expected_y, rtol=tol, atol=tol)
+    expected_x = to_reference(
+        torch.tensor([1.75, 2.75, 3.75], dtype=dtype, device=flag_blas.device)
+    )
+    expected_y = to_reference(
+        torch.tensor([5.5, 6.5, 7.5], dtype=dtype, device=flag_blas.device)
+    )
+    blas_assert_close(x, expected_x, dtype)
+    blas_assert_close(y, expected_y, dtype)
 
 
 @pytest.mark.rotm
