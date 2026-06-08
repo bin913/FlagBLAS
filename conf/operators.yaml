@@ -335,6 +335,126 @@ ops:
       - BLAS
     stages:
       - beta: '0.1'
+  - id: sdot
+    description: |
+      Single-precision BLAS Level 1 dot-product reduction.
+      Computes the dot product of strided float32 vectors x and y into a scalar result.
+    for:
+      - sdot
+    labels:
+      - dot
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: ddot
+    description: |
+      Double-precision BLAS Level 1 dot-product reduction.
+      Computes the dot product of strided float64 vectors x and y into a scalar result.
+    for:
+      - ddot
+    labels:
+      - dot
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: cdotu
+    description: |
+      Single-precision complex BLAS Level 1 unconjugated dot-product reduction.
+      Computes the unconjugated dot product of strided complex64 vectors x and y.
+    for:
+      - cdotu
+    labels:
+      - dotu
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: zdotu
+    description: |
+      Double-precision complex BLAS Level 1 unconjugated dot-product reduction.
+      Computes the unconjugated dot product of strided complex128 vectors x and y.
+    for:
+      - zdotu
+    labels:
+      - dotu
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: cdotc
+    description: |
+      Single-precision complex BLAS Level 1 conjugated dot-product reduction.
+      Computes the conjugated dot product of strided complex64 vectors x and y.
+    for:
+      - cdotc
+    labels:
+      - dotc
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: zdotc
+    description: |
+      Double-precision complex BLAS Level 1 conjugated dot-product reduction.
+      Computes the conjugated dot product of strided complex128 vectors x and y.
+    for:
+      - zdotc
+    labels:
+      - dotc
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: sswap
+    description: |
+      Single-precision BLAS Level 1 vector swap.
+      Swaps elements between strided float32 vectors x and y in place.
+    for:
+      - sswap
+    labels:
+      - swap
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: dswap
+    description: |
+      Double-precision BLAS Level 1 vector swap.
+      Swaps elements between strided float64 vectors x and y in place.
+    for:
+      - dswap
+    labels:
+      - swap
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: cswap
+    description: |
+      Single-precision complex BLAS Level 1 vector swap.
+      Swaps elements between strided complex64 vectors x and y in place.
+    for:
+      - cswap
+    labels:
+      - swap
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: zswap
+    description: |
+      Double-precision complex BLAS Level 1 vector swap.
+      Swaps elements between strided complex128 vectors x and y in place.
+    for:
+      - zswap
+    labels:
+      - swap
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
   - id: snrm2
     description: |
       Single-precision BLAS Level 1 Euclidean norm reduction.
@@ -427,6 +547,102 @@ ops:
       - zrot
     labels:
       - rot
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: srotg
+    description: |
+      Single-precision BLAS Level 1 Givens rotation parameter generation.
+      Updates scalar float32 inputs a and b and writes float32 c and s.
+    for:
+      - srotg
+    labels:
+      - rotg
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: drotg
+    description: |
+      Double-precision BLAS Level 1 Givens rotation parameter generation.
+      Updates scalar float64 inputs a and b and writes float64 c and s.
+    for:
+      - drotg
+    labels:
+      - rotg
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: crotg
+    description: |
+      Single-precision complex BLAS Level 1 Givens rotation parameter generation.
+      Updates scalar complex64 input a and writes real float32 c plus complex64 s.
+    for:
+      - crotg
+    labels:
+      - rotg
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: zrotg
+    description: |
+      Double-precision complex BLAS Level 1 Givens rotation parameter generation.
+      Updates scalar complex128 input a and writes real float64 c plus complex128 s.
+    for:
+      - zrotg
+    labels:
+      - rotg
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: srotm
+    description: |
+      Single-precision BLAS Level 1 modified Givens rotation.
+      Applies param-controlled modified rotation to strided float32 vectors x and y.
+    for:
+      - srotm
+    labels:
+      - rotm
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: drotm
+    description: |
+      Double-precision BLAS Level 1 modified Givens rotation.
+      Applies param-controlled modified rotation to strided float64 vectors x and y.
+    for:
+      - drotm
+    labels:
+      - rotm
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: srotmg
+    description: |
+      Single-precision BLAS Level 1 modified Givens rotation parameter generation.
+      Updates scalar float32 d1, d2, x1 and writes the length-5 float32 param vector.
+    for:
+      - srotmg
+    labels:
+      - rotmg
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: drotmg
+    description: |
+      Double-precision BLAS Level 1 modified Givens rotation parameter generation.
+      Updates scalar float64 d1, d2, x1 and writes the length-5 float64 param vector.
+    for:
+      - drotmg
+    labels:
+      - rotmg
     kind:
       - BLAS
     stages:
