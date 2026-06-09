@@ -863,3 +863,75 @@ ops:
       - BLAS
     stages:
       - beta: '0.1'
+  - id: chpmv
+    description: |
+      Single-precision complex BLAS Level 2 Hermitian packed matrix-vector multiplication.
+      Computes y = alpha * A * x + beta * y for a complex64 Hermitian matrix A in BLAS packed storage.
+    for:
+      - chpmv
+    labels:
+      - hpmv
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: zhpmv
+    description: |
+      Double-precision complex BLAS Level 2 Hermitian packed matrix-vector multiplication.
+      Computes y = alpha * A * x + beta * y for a complex128 Hermitian matrix A in BLAS packed storage.
+    for:
+      - zhpmv
+    labels:
+      - hpmv
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: strsv
+    description: |
+      Single-precision BLAS Level 2 triangular solve.
+      Solves op(A) * x = b in place for a float32 triangular matrix A.
+    for:
+      - strsv
+    labels:
+      - trsv
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: dtrsv
+    description: |
+      Double-precision BLAS Level 2 triangular solve.
+      Solves op(A) * x = b in place for a float64 triangular matrix A.
+    for:
+      - dtrsv
+    labels:
+      - trsv
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: ctrsv
+    description: |
+      Single-precision complex BLAS Level 2 triangular solve.
+      Solves op(A) * x = b in place for a complex64 triangular matrix A.
+    for:
+      - ctrsv
+    labels:
+      - trsv
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: ztrsv
+    description: |
+      Double-precision complex BLAS Level 2 triangular solve.
+      Solves op(A) * x = b in place for a complex128 triangular matrix A.
+    for:
+      - ztrsv
+    labels:
+      - trsv
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
