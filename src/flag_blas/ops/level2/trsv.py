@@ -34,6 +34,31 @@ _DTRSV_FUSE_MAX_N = 8192
 _DTRSV_ROWLOAD_MAX_N = 4096
 _ZTRSV_ROWLOAD_MAX_N = 8192
 
+_TRSV_FLAG_POOL = {}
+_TRSV_FLAG_SLOTS = 256
+
+
+def _trsv_flags(device):
+    try:
+        if torch_device_fn.is_current_stream_capturing():
+            return torch.full((1,), -1, dtype=torch.int32, device=device)
+    except AttributeError:
+        pass
+    key = (device, torch_device_fn.current_stream(device).cuda_stream)
+    ent = _TRSV_FLAG_POOL.get(key)
+    if ent is None:
+        pool = torch.empty(_TRSV_FLAG_SLOTS * 4, dtype=torch.int32, device=device)
+        views = [pool[i * 4 : i * 4 + 1] for i in range(_TRSV_FLAG_SLOTS)]
+        ent = [pool, views, _TRSV_FLAG_SLOTS]
+        _TRSV_FLAG_POOL[key] = ent
+    pool, views, idx = ent
+    if idx >= _TRSV_FLAG_SLOTS:
+        pool.fill_(-1)
+        idx = 0
+    ent[2] = idx + 1
+    return views[idx]
+
+
 _DTRSV_FUSED_FORCE = None
 
 
@@ -52,7 +77,7 @@ def _ztrsv_fused_cfg(forward, n, bb, unit):
     if _ZTRSV_FUSED_FORCE is not None:
         return _ZTRSV_FUSED_FORCE
     if unit and n <= 64:
-        return (1, 2)
+        return (2, 1)
     return (1, 4)
 
 
@@ -64,7 +89,7 @@ def _ctrsv_fused_cfg(forward, n, bb, unit):
         return _CTRSV_FUSED_FORCE
     if unit:
         if n <= 64:
-            return (1, 1)
+            return (2, 1)
         if n > _DTRSV_ROWLOAD_MAX_N:
             return (1, 4)
         return (4, 4)
@@ -277,6 +302,2264 @@ def strsv_lu256_rowinv_kernel(
 
     sx = tl.sum(dinv * sx[None, :], axis=1)
     tl.store(x_ptr + rows, sx)
+    tl.atomic_xchg(flag_ptr, pid, sem="release")
+
+
+@triton.jit
+def strsv_lu_neu64_kernel(
+    a_ptr,
+    x_ptr,
+    flag_ptr,
+    n,
+    LDA,
+    BLOCK_N: tl.constexpr,
+    CHUNK: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    offs = tl.arange(0, BLOCK_N)
+    BK: tl.constexpr = BLOCK_N * CHUNK
+    koffs = tl.arange(0, BK)
+    row_start = pid * BLOCK_N
+    rows = row_start + offs
+    row_mask = rows < n
+    m_off = rows[:, None] + rows[None, :] * LDA
+    strict = (offs[:, None] > offs[None, :]) & row_mask[:, None] & row_mask[None, :]
+    M = tl.load(a_ptr + m_off, mask=strict, other=0.0, eviction_policy="evict_last")
+    X = tl.where(
+        offs[:, None] == offs[None, :],
+        tl.full((BLOCK_N, BLOCK_N), 1.0, tl.float32),
+        tl.full((BLOCK_N, BLOCK_N), 0.0, tl.float32),
+    )
+    X = X - M
+    S = tl.dot(M, M, input_precision="tf32x3")
+    for k in tl.static_range(0, 5):
+        X = X + tl.dot(X, S, input_precision="tf32x3")
+        if k < 4:
+            S = tl.dot(S, S, input_precision="tf32x3")
+    sx = tl.load(x_ptr + rows, mask=row_mask, other=0.0, eviction_policy="evict_last")
+
+    num_chunks = tl.cdiv(pid, CHUNK)
+    for g in tl.range(0, num_chunks):
+        pid_lo = g * CHUNK
+        pid_hi = tl.minimum(pid_lo + CHUNK, pid)
+        while tl.atomic_add(flag_ptr, 0, sem="acquire") < pid_hi - 1:
+            pass
+        kcols = pid_lo * BLOCK_N + koffs
+        col_mask = (kcols < pid_hi * BLOCK_N) & (kcols < n)
+        xprev = tl.load(
+            x_ptr + kcols, mask=col_mask, other=0.0, eviction_policy="evict_last"
+        )
+        a_vals = tl.load(
+            a_ptr + rows[:, None] + kcols[None, :] * LDA,
+            mask=row_mask[:, None] & col_mask[None, :],
+            other=0.0,
+            eviction_policy="evict_first",
+        )
+        sx -= tl.sum(a_vals * xprev[None, :], axis=1)
+
+    sx = tl.sum(X * sx[None, :], axis=1)
+    tl.store(x_ptr + rows, sx, mask=row_mask)
+    tl.atomic_xchg(flag_ptr, pid, sem="release")
+
+
+@triton.jit
+def strsv_un_neu64_kernel(
+    a_ptr,
+    x_ptr,
+    flag_ptr,
+    n,
+    LDA,
+    BLOCK_N: tl.constexpr,
+    CHUNK: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    offs = tl.arange(0, BLOCK_N)
+    BK: tl.constexpr = BLOCK_N * CHUNK
+    koffs = tl.arange(0, BK)
+    num_panels = tl.cdiv(n, BLOCK_N)
+    blk = num_panels - 1 - pid
+    row_start = blk * BLOCK_N
+    rows = row_start + offs
+    row_mask = rows < n
+    m_off = rows[:, None] + rows[None, :] * LDA
+    strict = (offs[:, None] < offs[None, :]) & row_mask[:, None] & row_mask[None, :]
+    M = tl.load(a_ptr + m_off, mask=strict, other=0.0, eviction_policy="evict_last")
+    d = tl.load(a_ptr + rows + rows * LDA, mask=row_mask, other=1.0)
+    rinv = 1.0 / d
+    M = M * rinv[:, None]
+    X = tl.where(
+        offs[:, None] == offs[None, :],
+        tl.full((BLOCK_N, BLOCK_N), 1.0, tl.float32),
+        tl.full((BLOCK_N, BLOCK_N), 0.0, tl.float32),
+    )
+    X = X - M
+    S = tl.dot(M, M, input_precision="tf32x3")
+    for k in tl.static_range(0, 5):
+        X = X + tl.dot(X, S, input_precision="tf32x3")
+        if k < 4:
+            S = tl.dot(S, S, input_precision="tf32x3")
+    X = X * rinv[None, :]
+    sx = tl.load(x_ptr + rows, mask=row_mask, other=0.0, eviction_policy="evict_last")
+
+    num_chunks = tl.cdiv(pid, CHUNK)
+    for g in tl.range(0, num_chunks):
+        pid_lo = g * CHUNK
+        pid_hi = tl.minimum(pid_lo + CHUNK, pid)
+        while tl.atomic_add(flag_ptr, 0, sem="acquire") < pid_hi - 1:
+            pass
+        c0 = (num_panels - pid_hi) * BLOCK_N
+        c1 = (num_panels - pid_lo) * BLOCK_N
+        kcols = c0 + koffs
+        col_mask = (kcols < c1) & (kcols < n)
+        xprev = tl.load(
+            x_ptr + kcols, mask=col_mask, other=0.0, eviction_policy="evict_last"
+        )
+        a_vals = tl.load(
+            a_ptr + rows[:, None] + kcols[None, :] * LDA,
+            mask=row_mask[:, None] & col_mask[None, :],
+            other=0.0,
+            eviction_policy="evict_first",
+        )
+        sx -= tl.sum(a_vals * xprev[None, :], axis=1)
+
+    sx = tl.sum(X * sx[None, :], axis=1)
+    tl.store(x_ptr + rows, sx, mask=row_mask)
+    tl.atomic_xchg(flag_ptr, pid, sem="release")
+
+
+@triton.jit
+def dtrsv_lu_neu64_kernel(
+    a_ptr,
+    x_ptr,
+    flag_ptr,
+    n,
+    LDA,
+    BLOCK_N: tl.constexpr,
+    CHUNK: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    offs = tl.arange(0, BLOCK_N)
+    BK: tl.constexpr = BLOCK_N * CHUNK
+    koffs = tl.arange(0, BK)
+    row_start = pid * BLOCK_N
+    rows = row_start + offs
+    row_mask = rows < n
+    m_off = rows[:, None] + rows[None, :] * LDA
+    strict = (offs[:, None] > offs[None, :]) & row_mask[:, None] & row_mask[None, :]
+    M = tl.load(a_ptr + m_off, mask=strict, other=0.0, eviction_policy="evict_last")
+    X = tl.where(
+        offs[:, None] == offs[None, :],
+        tl.full((BLOCK_N, BLOCK_N), 1.0, tl.float64),
+        tl.full((BLOCK_N, BLOCK_N), 0.0, tl.float64),
+    )
+    X = X - M
+    S = tl.dot(M, M, input_precision="ieee")
+    for k in tl.static_range(0, 5):
+        X = X + tl.dot(X, S, input_precision="ieee")
+        if k < 4:
+            S = tl.dot(S, S, input_precision="ieee")
+    sx = tl.load(x_ptr + rows, mask=row_mask, other=0.0, eviction_policy="evict_last")
+
+    num_chunks = tl.cdiv(pid, CHUNK)
+    for g in tl.range(0, num_chunks):
+        pid_lo = g * CHUNK
+        pid_hi = tl.minimum(pid_lo + CHUNK, pid)
+        while tl.atomic_add(flag_ptr, 0, sem="acquire") < pid_hi - 1:
+            pass
+        kcols = pid_lo * BLOCK_N + koffs
+        col_mask = (kcols < pid_hi * BLOCK_N) & (kcols < n)
+        xprev = tl.load(
+            x_ptr + kcols, mask=col_mask, other=0.0, eviction_policy="evict_last"
+        )
+        a_vals = tl.load(
+            a_ptr + rows[:, None] + kcols[None, :] * LDA,
+            mask=row_mask[:, None] & col_mask[None, :],
+            other=0.0,
+            eviction_policy="evict_first",
+        )
+        sx -= tl.sum(a_vals * xprev[None, :], axis=1)
+
+    sx = tl.sum(X * sx[None, :], axis=1)
+    tl.store(x_ptr + rows, sx, mask=row_mask)
+    tl.atomic_xchg(flag_ptr, pid, sem="release")
+
+
+@triton.jit
+def ctrsv_lu256_scalar_kernel(a_ptr, x_ptr, flag_ptr, CHUNK: tl.constexpr):
+    BLOCK_N: tl.constexpr = 32
+    G: tl.constexpr = 16
+    pid = tl.program_id(0)
+    offs = tl.arange(0, BLOCK_N)
+    goffs = tl.arange(0, G)
+    two = tl.arange(0, 2)
+    BK: tl.constexpr = BLOCK_N * CHUNK
+    koffs = tl.arange(0, BK)
+    row_start = pid * BLOCK_N
+    rows = row_start + offs
+    rows_t = row_start + goffs
+    rows_b = row_start + 16 + goffs
+    xr_0_0 = tl.where(goffs == 0, 1.0, 0.0)
+    xi_0_0 = tl.zeros((G,), tl.float32)
+    accr = tl.where(goffs == 1, 1.0, 0.0)
+    acci = tl.zeros((G,), tl.float32)
+    m = tl.load(
+        a_ptr + ((row_start + 1) + (row_start + 0) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_0 - li * xi_0_0
+    acci -= lr * xi_0_0 + li * xr_0_0
+    xr_0_1 = accr
+    xi_0_1 = acci
+    accr = tl.where(goffs == 2, 1.0, 0.0)
+    acci = tl.zeros((G,), tl.float32)
+    m = tl.load(
+        a_ptr + ((row_start + 2) + (row_start + 0) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_0 - li * xi_0_0
+    acci -= lr * xi_0_0 + li * xr_0_0
+    m = tl.load(
+        a_ptr + ((row_start + 2) + (row_start + 1) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_1 - li * xi_0_1
+    acci -= lr * xi_0_1 + li * xr_0_1
+    xr_0_2 = accr
+    xi_0_2 = acci
+    accr = tl.where(goffs == 3, 1.0, 0.0)
+    acci = tl.zeros((G,), tl.float32)
+    m = tl.load(
+        a_ptr + ((row_start + 3) + (row_start + 0) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_0 - li * xi_0_0
+    acci -= lr * xi_0_0 + li * xr_0_0
+    m = tl.load(
+        a_ptr + ((row_start + 3) + (row_start + 1) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_1 - li * xi_0_1
+    acci -= lr * xi_0_1 + li * xr_0_1
+    m = tl.load(
+        a_ptr + ((row_start + 3) + (row_start + 2) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_2 - li * xi_0_2
+    acci -= lr * xi_0_2 + li * xr_0_2
+    xr_0_3 = accr
+    xi_0_3 = acci
+    accr = tl.where(goffs == 4, 1.0, 0.0)
+    acci = tl.zeros((G,), tl.float32)
+    m = tl.load(
+        a_ptr + ((row_start + 4) + (row_start + 0) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_0 - li * xi_0_0
+    acci -= lr * xi_0_0 + li * xr_0_0
+    m = tl.load(
+        a_ptr + ((row_start + 4) + (row_start + 1) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_1 - li * xi_0_1
+    acci -= lr * xi_0_1 + li * xr_0_1
+    m = tl.load(
+        a_ptr + ((row_start + 4) + (row_start + 2) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_2 - li * xi_0_2
+    acci -= lr * xi_0_2 + li * xr_0_2
+    m = tl.load(
+        a_ptr + ((row_start + 4) + (row_start + 3) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_3 - li * xi_0_3
+    acci -= lr * xi_0_3 + li * xr_0_3
+    xr_0_4 = accr
+    xi_0_4 = acci
+    accr = tl.where(goffs == 5, 1.0, 0.0)
+    acci = tl.zeros((G,), tl.float32)
+    m = tl.load(
+        a_ptr + ((row_start + 5) + (row_start + 0) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_0 - li * xi_0_0
+    acci -= lr * xi_0_0 + li * xr_0_0
+    m = tl.load(
+        a_ptr + ((row_start + 5) + (row_start + 1) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_1 - li * xi_0_1
+    acci -= lr * xi_0_1 + li * xr_0_1
+    m = tl.load(
+        a_ptr + ((row_start + 5) + (row_start + 2) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_2 - li * xi_0_2
+    acci -= lr * xi_0_2 + li * xr_0_2
+    m = tl.load(
+        a_ptr + ((row_start + 5) + (row_start + 3) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_3 - li * xi_0_3
+    acci -= lr * xi_0_3 + li * xr_0_3
+    m = tl.load(
+        a_ptr + ((row_start + 5) + (row_start + 4) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_4 - li * xi_0_4
+    acci -= lr * xi_0_4 + li * xr_0_4
+    xr_0_5 = accr
+    xi_0_5 = acci
+    accr = tl.where(goffs == 6, 1.0, 0.0)
+    acci = tl.zeros((G,), tl.float32)
+    m = tl.load(
+        a_ptr + ((row_start + 6) + (row_start + 0) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_0 - li * xi_0_0
+    acci -= lr * xi_0_0 + li * xr_0_0
+    m = tl.load(
+        a_ptr + ((row_start + 6) + (row_start + 1) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_1 - li * xi_0_1
+    acci -= lr * xi_0_1 + li * xr_0_1
+    m = tl.load(
+        a_ptr + ((row_start + 6) + (row_start + 2) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_2 - li * xi_0_2
+    acci -= lr * xi_0_2 + li * xr_0_2
+    m = tl.load(
+        a_ptr + ((row_start + 6) + (row_start + 3) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_3 - li * xi_0_3
+    acci -= lr * xi_0_3 + li * xr_0_3
+    m = tl.load(
+        a_ptr + ((row_start + 6) + (row_start + 4) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_4 - li * xi_0_4
+    acci -= lr * xi_0_4 + li * xr_0_4
+    m = tl.load(
+        a_ptr + ((row_start + 6) + (row_start + 5) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_5 - li * xi_0_5
+    acci -= lr * xi_0_5 + li * xr_0_5
+    xr_0_6 = accr
+    xi_0_6 = acci
+    accr = tl.where(goffs == 7, 1.0, 0.0)
+    acci = tl.zeros((G,), tl.float32)
+    m = tl.load(
+        a_ptr + ((row_start + 7) + (row_start + 0) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_0 - li * xi_0_0
+    acci -= lr * xi_0_0 + li * xr_0_0
+    m = tl.load(
+        a_ptr + ((row_start + 7) + (row_start + 1) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_1 - li * xi_0_1
+    acci -= lr * xi_0_1 + li * xr_0_1
+    m = tl.load(
+        a_ptr + ((row_start + 7) + (row_start + 2) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_2 - li * xi_0_2
+    acci -= lr * xi_0_2 + li * xr_0_2
+    m = tl.load(
+        a_ptr + ((row_start + 7) + (row_start + 3) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_3 - li * xi_0_3
+    acci -= lr * xi_0_3 + li * xr_0_3
+    m = tl.load(
+        a_ptr + ((row_start + 7) + (row_start + 4) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_4 - li * xi_0_4
+    acci -= lr * xi_0_4 + li * xr_0_4
+    m = tl.load(
+        a_ptr + ((row_start + 7) + (row_start + 5) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_5 - li * xi_0_5
+    acci -= lr * xi_0_5 + li * xr_0_5
+    m = tl.load(
+        a_ptr + ((row_start + 7) + (row_start + 6) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_6 - li * xi_0_6
+    acci -= lr * xi_0_6 + li * xr_0_6
+    xr_0_7 = accr
+    xi_0_7 = acci
+    accr = tl.where(goffs == 8, 1.0, 0.0)
+    acci = tl.zeros((G,), tl.float32)
+    m = tl.load(
+        a_ptr + ((row_start + 8) + (row_start + 0) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_0 - li * xi_0_0
+    acci -= lr * xi_0_0 + li * xr_0_0
+    m = tl.load(
+        a_ptr + ((row_start + 8) + (row_start + 1) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_1 - li * xi_0_1
+    acci -= lr * xi_0_1 + li * xr_0_1
+    m = tl.load(
+        a_ptr + ((row_start + 8) + (row_start + 2) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_2 - li * xi_0_2
+    acci -= lr * xi_0_2 + li * xr_0_2
+    m = tl.load(
+        a_ptr + ((row_start + 8) + (row_start + 3) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_3 - li * xi_0_3
+    acci -= lr * xi_0_3 + li * xr_0_3
+    m = tl.load(
+        a_ptr + ((row_start + 8) + (row_start + 4) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_4 - li * xi_0_4
+    acci -= lr * xi_0_4 + li * xr_0_4
+    m = tl.load(
+        a_ptr + ((row_start + 8) + (row_start + 5) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_5 - li * xi_0_5
+    acci -= lr * xi_0_5 + li * xr_0_5
+    m = tl.load(
+        a_ptr + ((row_start + 8) + (row_start + 6) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_6 - li * xi_0_6
+    acci -= lr * xi_0_6 + li * xr_0_6
+    m = tl.load(
+        a_ptr + ((row_start + 8) + (row_start + 7) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_7 - li * xi_0_7
+    acci -= lr * xi_0_7 + li * xr_0_7
+    xr_0_8 = accr
+    xi_0_8 = acci
+    accr = tl.where(goffs == 9, 1.0, 0.0)
+    acci = tl.zeros((G,), tl.float32)
+    m = tl.load(
+        a_ptr + ((row_start + 9) + (row_start + 0) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_0 - li * xi_0_0
+    acci -= lr * xi_0_0 + li * xr_0_0
+    m = tl.load(
+        a_ptr + ((row_start + 9) + (row_start + 1) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_1 - li * xi_0_1
+    acci -= lr * xi_0_1 + li * xr_0_1
+    m = tl.load(
+        a_ptr + ((row_start + 9) + (row_start + 2) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_2 - li * xi_0_2
+    acci -= lr * xi_0_2 + li * xr_0_2
+    m = tl.load(
+        a_ptr + ((row_start + 9) + (row_start + 3) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_3 - li * xi_0_3
+    acci -= lr * xi_0_3 + li * xr_0_3
+    m = tl.load(
+        a_ptr + ((row_start + 9) + (row_start + 4) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_4 - li * xi_0_4
+    acci -= lr * xi_0_4 + li * xr_0_4
+    m = tl.load(
+        a_ptr + ((row_start + 9) + (row_start + 5) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_5 - li * xi_0_5
+    acci -= lr * xi_0_5 + li * xr_0_5
+    m = tl.load(
+        a_ptr + ((row_start + 9) + (row_start + 6) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_6 - li * xi_0_6
+    acci -= lr * xi_0_6 + li * xr_0_6
+    m = tl.load(
+        a_ptr + ((row_start + 9) + (row_start + 7) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_7 - li * xi_0_7
+    acci -= lr * xi_0_7 + li * xr_0_7
+    m = tl.load(
+        a_ptr + ((row_start + 9) + (row_start + 8) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_8 - li * xi_0_8
+    acci -= lr * xi_0_8 + li * xr_0_8
+    xr_0_9 = accr
+    xi_0_9 = acci
+    accr = tl.where(goffs == 10, 1.0, 0.0)
+    acci = tl.zeros((G,), tl.float32)
+    m = tl.load(
+        a_ptr + ((row_start + 10) + (row_start + 0) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_0 - li * xi_0_0
+    acci -= lr * xi_0_0 + li * xr_0_0
+    m = tl.load(
+        a_ptr + ((row_start + 10) + (row_start + 1) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_1 - li * xi_0_1
+    acci -= lr * xi_0_1 + li * xr_0_1
+    m = tl.load(
+        a_ptr + ((row_start + 10) + (row_start + 2) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_2 - li * xi_0_2
+    acci -= lr * xi_0_2 + li * xr_0_2
+    m = tl.load(
+        a_ptr + ((row_start + 10) + (row_start + 3) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_3 - li * xi_0_3
+    acci -= lr * xi_0_3 + li * xr_0_3
+    m = tl.load(
+        a_ptr + ((row_start + 10) + (row_start + 4) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_4 - li * xi_0_4
+    acci -= lr * xi_0_4 + li * xr_0_4
+    m = tl.load(
+        a_ptr + ((row_start + 10) + (row_start + 5) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_5 - li * xi_0_5
+    acci -= lr * xi_0_5 + li * xr_0_5
+    m = tl.load(
+        a_ptr + ((row_start + 10) + (row_start + 6) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_6 - li * xi_0_6
+    acci -= lr * xi_0_6 + li * xr_0_6
+    m = tl.load(
+        a_ptr + ((row_start + 10) + (row_start + 7) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_7 - li * xi_0_7
+    acci -= lr * xi_0_7 + li * xr_0_7
+    m = tl.load(
+        a_ptr + ((row_start + 10) + (row_start + 8) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_8 - li * xi_0_8
+    acci -= lr * xi_0_8 + li * xr_0_8
+    m = tl.load(
+        a_ptr + ((row_start + 10) + (row_start + 9) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_9 - li * xi_0_9
+    acci -= lr * xi_0_9 + li * xr_0_9
+    xr_0_10 = accr
+    xi_0_10 = acci
+    accr = tl.where(goffs == 11, 1.0, 0.0)
+    acci = tl.zeros((G,), tl.float32)
+    m = tl.load(
+        a_ptr + ((row_start + 11) + (row_start + 0) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_0 - li * xi_0_0
+    acci -= lr * xi_0_0 + li * xr_0_0
+    m = tl.load(
+        a_ptr + ((row_start + 11) + (row_start + 1) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_1 - li * xi_0_1
+    acci -= lr * xi_0_1 + li * xr_0_1
+    m = tl.load(
+        a_ptr + ((row_start + 11) + (row_start + 2) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_2 - li * xi_0_2
+    acci -= lr * xi_0_2 + li * xr_0_2
+    m = tl.load(
+        a_ptr + ((row_start + 11) + (row_start + 3) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_3 - li * xi_0_3
+    acci -= lr * xi_0_3 + li * xr_0_3
+    m = tl.load(
+        a_ptr + ((row_start + 11) + (row_start + 4) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_4 - li * xi_0_4
+    acci -= lr * xi_0_4 + li * xr_0_4
+    m = tl.load(
+        a_ptr + ((row_start + 11) + (row_start + 5) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_5 - li * xi_0_5
+    acci -= lr * xi_0_5 + li * xr_0_5
+    m = tl.load(
+        a_ptr + ((row_start + 11) + (row_start + 6) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_6 - li * xi_0_6
+    acci -= lr * xi_0_6 + li * xr_0_6
+    m = tl.load(
+        a_ptr + ((row_start + 11) + (row_start + 7) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_7 - li * xi_0_7
+    acci -= lr * xi_0_7 + li * xr_0_7
+    m = tl.load(
+        a_ptr + ((row_start + 11) + (row_start + 8) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_8 - li * xi_0_8
+    acci -= lr * xi_0_8 + li * xr_0_8
+    m = tl.load(
+        a_ptr + ((row_start + 11) + (row_start + 9) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_9 - li * xi_0_9
+    acci -= lr * xi_0_9 + li * xr_0_9
+    m = tl.load(
+        a_ptr + ((row_start + 11) + (row_start + 10) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_10 - li * xi_0_10
+    acci -= lr * xi_0_10 + li * xr_0_10
+    xr_0_11 = accr
+    xi_0_11 = acci
+    accr = tl.where(goffs == 12, 1.0, 0.0)
+    acci = tl.zeros((G,), tl.float32)
+    m = tl.load(
+        a_ptr + ((row_start + 12) + (row_start + 0) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_0 - li * xi_0_0
+    acci -= lr * xi_0_0 + li * xr_0_0
+    m = tl.load(
+        a_ptr + ((row_start + 12) + (row_start + 1) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_1 - li * xi_0_1
+    acci -= lr * xi_0_1 + li * xr_0_1
+    m = tl.load(
+        a_ptr + ((row_start + 12) + (row_start + 2) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_2 - li * xi_0_2
+    acci -= lr * xi_0_2 + li * xr_0_2
+    m = tl.load(
+        a_ptr + ((row_start + 12) + (row_start + 3) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_3 - li * xi_0_3
+    acci -= lr * xi_0_3 + li * xr_0_3
+    m = tl.load(
+        a_ptr + ((row_start + 12) + (row_start + 4) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_4 - li * xi_0_4
+    acci -= lr * xi_0_4 + li * xr_0_4
+    m = tl.load(
+        a_ptr + ((row_start + 12) + (row_start + 5) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_5 - li * xi_0_5
+    acci -= lr * xi_0_5 + li * xr_0_5
+    m = tl.load(
+        a_ptr + ((row_start + 12) + (row_start + 6) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_6 - li * xi_0_6
+    acci -= lr * xi_0_6 + li * xr_0_6
+    m = tl.load(
+        a_ptr + ((row_start + 12) + (row_start + 7) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_7 - li * xi_0_7
+    acci -= lr * xi_0_7 + li * xr_0_7
+    m = tl.load(
+        a_ptr + ((row_start + 12) + (row_start + 8) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_8 - li * xi_0_8
+    acci -= lr * xi_0_8 + li * xr_0_8
+    m = tl.load(
+        a_ptr + ((row_start + 12) + (row_start + 9) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_9 - li * xi_0_9
+    acci -= lr * xi_0_9 + li * xr_0_9
+    m = tl.load(
+        a_ptr + ((row_start + 12) + (row_start + 10) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_10 - li * xi_0_10
+    acci -= lr * xi_0_10 + li * xr_0_10
+    m = tl.load(
+        a_ptr + ((row_start + 12) + (row_start + 11) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_11 - li * xi_0_11
+    acci -= lr * xi_0_11 + li * xr_0_11
+    xr_0_12 = accr
+    xi_0_12 = acci
+    accr = tl.where(goffs == 13, 1.0, 0.0)
+    acci = tl.zeros((G,), tl.float32)
+    m = tl.load(
+        a_ptr + ((row_start + 13) + (row_start + 0) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_0 - li * xi_0_0
+    acci -= lr * xi_0_0 + li * xr_0_0
+    m = tl.load(
+        a_ptr + ((row_start + 13) + (row_start + 1) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_1 - li * xi_0_1
+    acci -= lr * xi_0_1 + li * xr_0_1
+    m = tl.load(
+        a_ptr + ((row_start + 13) + (row_start + 2) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_2 - li * xi_0_2
+    acci -= lr * xi_0_2 + li * xr_0_2
+    m = tl.load(
+        a_ptr + ((row_start + 13) + (row_start + 3) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_3 - li * xi_0_3
+    acci -= lr * xi_0_3 + li * xr_0_3
+    m = tl.load(
+        a_ptr + ((row_start + 13) + (row_start + 4) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_4 - li * xi_0_4
+    acci -= lr * xi_0_4 + li * xr_0_4
+    m = tl.load(
+        a_ptr + ((row_start + 13) + (row_start + 5) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_5 - li * xi_0_5
+    acci -= lr * xi_0_5 + li * xr_0_5
+    m = tl.load(
+        a_ptr + ((row_start + 13) + (row_start + 6) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_6 - li * xi_0_6
+    acci -= lr * xi_0_6 + li * xr_0_6
+    m = tl.load(
+        a_ptr + ((row_start + 13) + (row_start + 7) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_7 - li * xi_0_7
+    acci -= lr * xi_0_7 + li * xr_0_7
+    m = tl.load(
+        a_ptr + ((row_start + 13) + (row_start + 8) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_8 - li * xi_0_8
+    acci -= lr * xi_0_8 + li * xr_0_8
+    m = tl.load(
+        a_ptr + ((row_start + 13) + (row_start + 9) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_9 - li * xi_0_9
+    acci -= lr * xi_0_9 + li * xr_0_9
+    m = tl.load(
+        a_ptr + ((row_start + 13) + (row_start + 10) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_10 - li * xi_0_10
+    acci -= lr * xi_0_10 + li * xr_0_10
+    m = tl.load(
+        a_ptr + ((row_start + 13) + (row_start + 11) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_11 - li * xi_0_11
+    acci -= lr * xi_0_11 + li * xr_0_11
+    m = tl.load(
+        a_ptr + ((row_start + 13) + (row_start + 12) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_12 - li * xi_0_12
+    acci -= lr * xi_0_12 + li * xr_0_12
+    xr_0_13 = accr
+    xi_0_13 = acci
+    accr = tl.where(goffs == 14, 1.0, 0.0)
+    acci = tl.zeros((G,), tl.float32)
+    m = tl.load(
+        a_ptr + ((row_start + 14) + (row_start + 0) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_0 - li * xi_0_0
+    acci -= lr * xi_0_0 + li * xr_0_0
+    m = tl.load(
+        a_ptr + ((row_start + 14) + (row_start + 1) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_1 - li * xi_0_1
+    acci -= lr * xi_0_1 + li * xr_0_1
+    m = tl.load(
+        a_ptr + ((row_start + 14) + (row_start + 2) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_2 - li * xi_0_2
+    acci -= lr * xi_0_2 + li * xr_0_2
+    m = tl.load(
+        a_ptr + ((row_start + 14) + (row_start + 3) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_3 - li * xi_0_3
+    acci -= lr * xi_0_3 + li * xr_0_3
+    m = tl.load(
+        a_ptr + ((row_start + 14) + (row_start + 4) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_4 - li * xi_0_4
+    acci -= lr * xi_0_4 + li * xr_0_4
+    m = tl.load(
+        a_ptr + ((row_start + 14) + (row_start + 5) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_5 - li * xi_0_5
+    acci -= lr * xi_0_5 + li * xr_0_5
+    m = tl.load(
+        a_ptr + ((row_start + 14) + (row_start + 6) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_6 - li * xi_0_6
+    acci -= lr * xi_0_6 + li * xr_0_6
+    m = tl.load(
+        a_ptr + ((row_start + 14) + (row_start + 7) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_7 - li * xi_0_7
+    acci -= lr * xi_0_7 + li * xr_0_7
+    m = tl.load(
+        a_ptr + ((row_start + 14) + (row_start + 8) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_8 - li * xi_0_8
+    acci -= lr * xi_0_8 + li * xr_0_8
+    m = tl.load(
+        a_ptr + ((row_start + 14) + (row_start + 9) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_9 - li * xi_0_9
+    acci -= lr * xi_0_9 + li * xr_0_9
+    m = tl.load(
+        a_ptr + ((row_start + 14) + (row_start + 10) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_10 - li * xi_0_10
+    acci -= lr * xi_0_10 + li * xr_0_10
+    m = tl.load(
+        a_ptr + ((row_start + 14) + (row_start + 11) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_11 - li * xi_0_11
+    acci -= lr * xi_0_11 + li * xr_0_11
+    m = tl.load(
+        a_ptr + ((row_start + 14) + (row_start + 12) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_12 - li * xi_0_12
+    acci -= lr * xi_0_12 + li * xr_0_12
+    m = tl.load(
+        a_ptr + ((row_start + 14) + (row_start + 13) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_13 - li * xi_0_13
+    acci -= lr * xi_0_13 + li * xr_0_13
+    xr_0_14 = accr
+    xi_0_14 = acci
+    accr = tl.where(goffs == 15, 1.0, 0.0)
+    acci = tl.zeros((G,), tl.float32)
+    m = tl.load(
+        a_ptr + ((row_start + 15) + (row_start + 0) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_0 - li * xi_0_0
+    acci -= lr * xi_0_0 + li * xr_0_0
+    m = tl.load(
+        a_ptr + ((row_start + 15) + (row_start + 1) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_1 - li * xi_0_1
+    acci -= lr * xi_0_1 + li * xr_0_1
+    m = tl.load(
+        a_ptr + ((row_start + 15) + (row_start + 2) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_2 - li * xi_0_2
+    acci -= lr * xi_0_2 + li * xr_0_2
+    m = tl.load(
+        a_ptr + ((row_start + 15) + (row_start + 3) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_3 - li * xi_0_3
+    acci -= lr * xi_0_3 + li * xr_0_3
+    m = tl.load(
+        a_ptr + ((row_start + 15) + (row_start + 4) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_4 - li * xi_0_4
+    acci -= lr * xi_0_4 + li * xr_0_4
+    m = tl.load(
+        a_ptr + ((row_start + 15) + (row_start + 5) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_5 - li * xi_0_5
+    acci -= lr * xi_0_5 + li * xr_0_5
+    m = tl.load(
+        a_ptr + ((row_start + 15) + (row_start + 6) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_6 - li * xi_0_6
+    acci -= lr * xi_0_6 + li * xr_0_6
+    m = tl.load(
+        a_ptr + ((row_start + 15) + (row_start + 7) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_7 - li * xi_0_7
+    acci -= lr * xi_0_7 + li * xr_0_7
+    m = tl.load(
+        a_ptr + ((row_start + 15) + (row_start + 8) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_8 - li * xi_0_8
+    acci -= lr * xi_0_8 + li * xr_0_8
+    m = tl.load(
+        a_ptr + ((row_start + 15) + (row_start + 9) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_9 - li * xi_0_9
+    acci -= lr * xi_0_9 + li * xr_0_9
+    m = tl.load(
+        a_ptr + ((row_start + 15) + (row_start + 10) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_10 - li * xi_0_10
+    acci -= lr * xi_0_10 + li * xr_0_10
+    m = tl.load(
+        a_ptr + ((row_start + 15) + (row_start + 11) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_11 - li * xi_0_11
+    acci -= lr * xi_0_11 + li * xr_0_11
+    m = tl.load(
+        a_ptr + ((row_start + 15) + (row_start + 12) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_12 - li * xi_0_12
+    acci -= lr * xi_0_12 + li * xr_0_12
+    m = tl.load(
+        a_ptr + ((row_start + 15) + (row_start + 13) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_13 - li * xi_0_13
+    acci -= lr * xi_0_13 + li * xr_0_13
+    m = tl.load(
+        a_ptr + ((row_start + 15) + (row_start + 14) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_0_14 - li * xi_0_14
+    acci -= lr * xi_0_14 + li * xr_0_14
+    xr_0_15 = accr
+    xi_0_15 = acci
+    xr_1_0 = tl.where(goffs == 0, 1.0, 0.0)
+    xi_1_0 = tl.zeros((G,), tl.float32)
+    accr = tl.where(goffs == 1, 1.0, 0.0)
+    acci = tl.zeros((G,), tl.float32)
+    m = tl.load(
+        a_ptr + ((row_start + 17) + (row_start + 16) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_0 - li * xi_1_0
+    acci -= lr * xi_1_0 + li * xr_1_0
+    xr_1_1 = accr
+    xi_1_1 = acci
+    accr = tl.where(goffs == 2, 1.0, 0.0)
+    acci = tl.zeros((G,), tl.float32)
+    m = tl.load(
+        a_ptr + ((row_start + 18) + (row_start + 16) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_0 - li * xi_1_0
+    acci -= lr * xi_1_0 + li * xr_1_0
+    m = tl.load(
+        a_ptr + ((row_start + 18) + (row_start + 17) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_1 - li * xi_1_1
+    acci -= lr * xi_1_1 + li * xr_1_1
+    xr_1_2 = accr
+    xi_1_2 = acci
+    accr = tl.where(goffs == 3, 1.0, 0.0)
+    acci = tl.zeros((G,), tl.float32)
+    m = tl.load(
+        a_ptr + ((row_start + 19) + (row_start + 16) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_0 - li * xi_1_0
+    acci -= lr * xi_1_0 + li * xr_1_0
+    m = tl.load(
+        a_ptr + ((row_start + 19) + (row_start + 17) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_1 - li * xi_1_1
+    acci -= lr * xi_1_1 + li * xr_1_1
+    m = tl.load(
+        a_ptr + ((row_start + 19) + (row_start + 18) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_2 - li * xi_1_2
+    acci -= lr * xi_1_2 + li * xr_1_2
+    xr_1_3 = accr
+    xi_1_3 = acci
+    accr = tl.where(goffs == 4, 1.0, 0.0)
+    acci = tl.zeros((G,), tl.float32)
+    m = tl.load(
+        a_ptr + ((row_start + 20) + (row_start + 16) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_0 - li * xi_1_0
+    acci -= lr * xi_1_0 + li * xr_1_0
+    m = tl.load(
+        a_ptr + ((row_start + 20) + (row_start + 17) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_1 - li * xi_1_1
+    acci -= lr * xi_1_1 + li * xr_1_1
+    m = tl.load(
+        a_ptr + ((row_start + 20) + (row_start + 18) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_2 - li * xi_1_2
+    acci -= lr * xi_1_2 + li * xr_1_2
+    m = tl.load(
+        a_ptr + ((row_start + 20) + (row_start + 19) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_3 - li * xi_1_3
+    acci -= lr * xi_1_3 + li * xr_1_3
+    xr_1_4 = accr
+    xi_1_4 = acci
+    accr = tl.where(goffs == 5, 1.0, 0.0)
+    acci = tl.zeros((G,), tl.float32)
+    m = tl.load(
+        a_ptr + ((row_start + 21) + (row_start + 16) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_0 - li * xi_1_0
+    acci -= lr * xi_1_0 + li * xr_1_0
+    m = tl.load(
+        a_ptr + ((row_start + 21) + (row_start + 17) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_1 - li * xi_1_1
+    acci -= lr * xi_1_1 + li * xr_1_1
+    m = tl.load(
+        a_ptr + ((row_start + 21) + (row_start + 18) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_2 - li * xi_1_2
+    acci -= lr * xi_1_2 + li * xr_1_2
+    m = tl.load(
+        a_ptr + ((row_start + 21) + (row_start + 19) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_3 - li * xi_1_3
+    acci -= lr * xi_1_3 + li * xr_1_3
+    m = tl.load(
+        a_ptr + ((row_start + 21) + (row_start + 20) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_4 - li * xi_1_4
+    acci -= lr * xi_1_4 + li * xr_1_4
+    xr_1_5 = accr
+    xi_1_5 = acci
+    accr = tl.where(goffs == 6, 1.0, 0.0)
+    acci = tl.zeros((G,), tl.float32)
+    m = tl.load(
+        a_ptr + ((row_start + 22) + (row_start + 16) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_0 - li * xi_1_0
+    acci -= lr * xi_1_0 + li * xr_1_0
+    m = tl.load(
+        a_ptr + ((row_start + 22) + (row_start + 17) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_1 - li * xi_1_1
+    acci -= lr * xi_1_1 + li * xr_1_1
+    m = tl.load(
+        a_ptr + ((row_start + 22) + (row_start + 18) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_2 - li * xi_1_2
+    acci -= lr * xi_1_2 + li * xr_1_2
+    m = tl.load(
+        a_ptr + ((row_start + 22) + (row_start + 19) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_3 - li * xi_1_3
+    acci -= lr * xi_1_3 + li * xr_1_3
+    m = tl.load(
+        a_ptr + ((row_start + 22) + (row_start + 20) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_4 - li * xi_1_4
+    acci -= lr * xi_1_4 + li * xr_1_4
+    m = tl.load(
+        a_ptr + ((row_start + 22) + (row_start + 21) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_5 - li * xi_1_5
+    acci -= lr * xi_1_5 + li * xr_1_5
+    xr_1_6 = accr
+    xi_1_6 = acci
+    accr = tl.where(goffs == 7, 1.0, 0.0)
+    acci = tl.zeros((G,), tl.float32)
+    m = tl.load(
+        a_ptr + ((row_start + 23) + (row_start + 16) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_0 - li * xi_1_0
+    acci -= lr * xi_1_0 + li * xr_1_0
+    m = tl.load(
+        a_ptr + ((row_start + 23) + (row_start + 17) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_1 - li * xi_1_1
+    acci -= lr * xi_1_1 + li * xr_1_1
+    m = tl.load(
+        a_ptr + ((row_start + 23) + (row_start + 18) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_2 - li * xi_1_2
+    acci -= lr * xi_1_2 + li * xr_1_2
+    m = tl.load(
+        a_ptr + ((row_start + 23) + (row_start + 19) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_3 - li * xi_1_3
+    acci -= lr * xi_1_3 + li * xr_1_3
+    m = tl.load(
+        a_ptr + ((row_start + 23) + (row_start + 20) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_4 - li * xi_1_4
+    acci -= lr * xi_1_4 + li * xr_1_4
+    m = tl.load(
+        a_ptr + ((row_start + 23) + (row_start + 21) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_5 - li * xi_1_5
+    acci -= lr * xi_1_5 + li * xr_1_5
+    m = tl.load(
+        a_ptr + ((row_start + 23) + (row_start + 22) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_6 - li * xi_1_6
+    acci -= lr * xi_1_6 + li * xr_1_6
+    xr_1_7 = accr
+    xi_1_7 = acci
+    accr = tl.where(goffs == 8, 1.0, 0.0)
+    acci = tl.zeros((G,), tl.float32)
+    m = tl.load(
+        a_ptr + ((row_start + 24) + (row_start + 16) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_0 - li * xi_1_0
+    acci -= lr * xi_1_0 + li * xr_1_0
+    m = tl.load(
+        a_ptr + ((row_start + 24) + (row_start + 17) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_1 - li * xi_1_1
+    acci -= lr * xi_1_1 + li * xr_1_1
+    m = tl.load(
+        a_ptr + ((row_start + 24) + (row_start + 18) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_2 - li * xi_1_2
+    acci -= lr * xi_1_2 + li * xr_1_2
+    m = tl.load(
+        a_ptr + ((row_start + 24) + (row_start + 19) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_3 - li * xi_1_3
+    acci -= lr * xi_1_3 + li * xr_1_3
+    m = tl.load(
+        a_ptr + ((row_start + 24) + (row_start + 20) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_4 - li * xi_1_4
+    acci -= lr * xi_1_4 + li * xr_1_4
+    m = tl.load(
+        a_ptr + ((row_start + 24) + (row_start + 21) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_5 - li * xi_1_5
+    acci -= lr * xi_1_5 + li * xr_1_5
+    m = tl.load(
+        a_ptr + ((row_start + 24) + (row_start + 22) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_6 - li * xi_1_6
+    acci -= lr * xi_1_6 + li * xr_1_6
+    m = tl.load(
+        a_ptr + ((row_start + 24) + (row_start + 23) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_7 - li * xi_1_7
+    acci -= lr * xi_1_7 + li * xr_1_7
+    xr_1_8 = accr
+    xi_1_8 = acci
+    accr = tl.where(goffs == 9, 1.0, 0.0)
+    acci = tl.zeros((G,), tl.float32)
+    m = tl.load(
+        a_ptr + ((row_start + 25) + (row_start + 16) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_0 - li * xi_1_0
+    acci -= lr * xi_1_0 + li * xr_1_0
+    m = tl.load(
+        a_ptr + ((row_start + 25) + (row_start + 17) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_1 - li * xi_1_1
+    acci -= lr * xi_1_1 + li * xr_1_1
+    m = tl.load(
+        a_ptr + ((row_start + 25) + (row_start + 18) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_2 - li * xi_1_2
+    acci -= lr * xi_1_2 + li * xr_1_2
+    m = tl.load(
+        a_ptr + ((row_start + 25) + (row_start + 19) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_3 - li * xi_1_3
+    acci -= lr * xi_1_3 + li * xr_1_3
+    m = tl.load(
+        a_ptr + ((row_start + 25) + (row_start + 20) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_4 - li * xi_1_4
+    acci -= lr * xi_1_4 + li * xr_1_4
+    m = tl.load(
+        a_ptr + ((row_start + 25) + (row_start + 21) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_5 - li * xi_1_5
+    acci -= lr * xi_1_5 + li * xr_1_5
+    m = tl.load(
+        a_ptr + ((row_start + 25) + (row_start + 22) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_6 - li * xi_1_6
+    acci -= lr * xi_1_6 + li * xr_1_6
+    m = tl.load(
+        a_ptr + ((row_start + 25) + (row_start + 23) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_7 - li * xi_1_7
+    acci -= lr * xi_1_7 + li * xr_1_7
+    m = tl.load(
+        a_ptr + ((row_start + 25) + (row_start + 24) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_8 - li * xi_1_8
+    acci -= lr * xi_1_8 + li * xr_1_8
+    xr_1_9 = accr
+    xi_1_9 = acci
+    accr = tl.where(goffs == 10, 1.0, 0.0)
+    acci = tl.zeros((G,), tl.float32)
+    m = tl.load(
+        a_ptr + ((row_start + 26) + (row_start + 16) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_0 - li * xi_1_0
+    acci -= lr * xi_1_0 + li * xr_1_0
+    m = tl.load(
+        a_ptr + ((row_start + 26) + (row_start + 17) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_1 - li * xi_1_1
+    acci -= lr * xi_1_1 + li * xr_1_1
+    m = tl.load(
+        a_ptr + ((row_start + 26) + (row_start + 18) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_2 - li * xi_1_2
+    acci -= lr * xi_1_2 + li * xr_1_2
+    m = tl.load(
+        a_ptr + ((row_start + 26) + (row_start + 19) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_3 - li * xi_1_3
+    acci -= lr * xi_1_3 + li * xr_1_3
+    m = tl.load(
+        a_ptr + ((row_start + 26) + (row_start + 20) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_4 - li * xi_1_4
+    acci -= lr * xi_1_4 + li * xr_1_4
+    m = tl.load(
+        a_ptr + ((row_start + 26) + (row_start + 21) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_5 - li * xi_1_5
+    acci -= lr * xi_1_5 + li * xr_1_5
+    m = tl.load(
+        a_ptr + ((row_start + 26) + (row_start + 22) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_6 - li * xi_1_6
+    acci -= lr * xi_1_6 + li * xr_1_6
+    m = tl.load(
+        a_ptr + ((row_start + 26) + (row_start + 23) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_7 - li * xi_1_7
+    acci -= lr * xi_1_7 + li * xr_1_7
+    m = tl.load(
+        a_ptr + ((row_start + 26) + (row_start + 24) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_8 - li * xi_1_8
+    acci -= lr * xi_1_8 + li * xr_1_8
+    m = tl.load(
+        a_ptr + ((row_start + 26) + (row_start + 25) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_9 - li * xi_1_9
+    acci -= lr * xi_1_9 + li * xr_1_9
+    xr_1_10 = accr
+    xi_1_10 = acci
+    accr = tl.where(goffs == 11, 1.0, 0.0)
+    acci = tl.zeros((G,), tl.float32)
+    m = tl.load(
+        a_ptr + ((row_start + 27) + (row_start + 16) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_0 - li * xi_1_0
+    acci -= lr * xi_1_0 + li * xr_1_0
+    m = tl.load(
+        a_ptr + ((row_start + 27) + (row_start + 17) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_1 - li * xi_1_1
+    acci -= lr * xi_1_1 + li * xr_1_1
+    m = tl.load(
+        a_ptr + ((row_start + 27) + (row_start + 18) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_2 - li * xi_1_2
+    acci -= lr * xi_1_2 + li * xr_1_2
+    m = tl.load(
+        a_ptr + ((row_start + 27) + (row_start + 19) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_3 - li * xi_1_3
+    acci -= lr * xi_1_3 + li * xr_1_3
+    m = tl.load(
+        a_ptr + ((row_start + 27) + (row_start + 20) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_4 - li * xi_1_4
+    acci -= lr * xi_1_4 + li * xr_1_4
+    m = tl.load(
+        a_ptr + ((row_start + 27) + (row_start + 21) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_5 - li * xi_1_5
+    acci -= lr * xi_1_5 + li * xr_1_5
+    m = tl.load(
+        a_ptr + ((row_start + 27) + (row_start + 22) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_6 - li * xi_1_6
+    acci -= lr * xi_1_6 + li * xr_1_6
+    m = tl.load(
+        a_ptr + ((row_start + 27) + (row_start + 23) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_7 - li * xi_1_7
+    acci -= lr * xi_1_7 + li * xr_1_7
+    m = tl.load(
+        a_ptr + ((row_start + 27) + (row_start + 24) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_8 - li * xi_1_8
+    acci -= lr * xi_1_8 + li * xr_1_8
+    m = tl.load(
+        a_ptr + ((row_start + 27) + (row_start + 25) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_9 - li * xi_1_9
+    acci -= lr * xi_1_9 + li * xr_1_9
+    m = tl.load(
+        a_ptr + ((row_start + 27) + (row_start + 26) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_10 - li * xi_1_10
+    acci -= lr * xi_1_10 + li * xr_1_10
+    xr_1_11 = accr
+    xi_1_11 = acci
+    accr = tl.where(goffs == 12, 1.0, 0.0)
+    acci = tl.zeros((G,), tl.float32)
+    m = tl.load(
+        a_ptr + ((row_start + 28) + (row_start + 16) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_0 - li * xi_1_0
+    acci -= lr * xi_1_0 + li * xr_1_0
+    m = tl.load(
+        a_ptr + ((row_start + 28) + (row_start + 17) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_1 - li * xi_1_1
+    acci -= lr * xi_1_1 + li * xr_1_1
+    m = tl.load(
+        a_ptr + ((row_start + 28) + (row_start + 18) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_2 - li * xi_1_2
+    acci -= lr * xi_1_2 + li * xr_1_2
+    m = tl.load(
+        a_ptr + ((row_start + 28) + (row_start + 19) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_3 - li * xi_1_3
+    acci -= lr * xi_1_3 + li * xr_1_3
+    m = tl.load(
+        a_ptr + ((row_start + 28) + (row_start + 20) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_4 - li * xi_1_4
+    acci -= lr * xi_1_4 + li * xr_1_4
+    m = tl.load(
+        a_ptr + ((row_start + 28) + (row_start + 21) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_5 - li * xi_1_5
+    acci -= lr * xi_1_5 + li * xr_1_5
+    m = tl.load(
+        a_ptr + ((row_start + 28) + (row_start + 22) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_6 - li * xi_1_6
+    acci -= lr * xi_1_6 + li * xr_1_6
+    m = tl.load(
+        a_ptr + ((row_start + 28) + (row_start + 23) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_7 - li * xi_1_7
+    acci -= lr * xi_1_7 + li * xr_1_7
+    m = tl.load(
+        a_ptr + ((row_start + 28) + (row_start + 24) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_8 - li * xi_1_8
+    acci -= lr * xi_1_8 + li * xr_1_8
+    m = tl.load(
+        a_ptr + ((row_start + 28) + (row_start + 25) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_9 - li * xi_1_9
+    acci -= lr * xi_1_9 + li * xr_1_9
+    m = tl.load(
+        a_ptr + ((row_start + 28) + (row_start + 26) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_10 - li * xi_1_10
+    acci -= lr * xi_1_10 + li * xr_1_10
+    m = tl.load(
+        a_ptr + ((row_start + 28) + (row_start + 27) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_11 - li * xi_1_11
+    acci -= lr * xi_1_11 + li * xr_1_11
+    xr_1_12 = accr
+    xi_1_12 = acci
+    accr = tl.where(goffs == 13, 1.0, 0.0)
+    acci = tl.zeros((G,), tl.float32)
+    m = tl.load(
+        a_ptr + ((row_start + 29) + (row_start + 16) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_0 - li * xi_1_0
+    acci -= lr * xi_1_0 + li * xr_1_0
+    m = tl.load(
+        a_ptr + ((row_start + 29) + (row_start + 17) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_1 - li * xi_1_1
+    acci -= lr * xi_1_1 + li * xr_1_1
+    m = tl.load(
+        a_ptr + ((row_start + 29) + (row_start + 18) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_2 - li * xi_1_2
+    acci -= lr * xi_1_2 + li * xr_1_2
+    m = tl.load(
+        a_ptr + ((row_start + 29) + (row_start + 19) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_3 - li * xi_1_3
+    acci -= lr * xi_1_3 + li * xr_1_3
+    m = tl.load(
+        a_ptr + ((row_start + 29) + (row_start + 20) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_4 - li * xi_1_4
+    acci -= lr * xi_1_4 + li * xr_1_4
+    m = tl.load(
+        a_ptr + ((row_start + 29) + (row_start + 21) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_5 - li * xi_1_5
+    acci -= lr * xi_1_5 + li * xr_1_5
+    m = tl.load(
+        a_ptr + ((row_start + 29) + (row_start + 22) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_6 - li * xi_1_6
+    acci -= lr * xi_1_6 + li * xr_1_6
+    m = tl.load(
+        a_ptr + ((row_start + 29) + (row_start + 23) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_7 - li * xi_1_7
+    acci -= lr * xi_1_7 + li * xr_1_7
+    m = tl.load(
+        a_ptr + ((row_start + 29) + (row_start + 24) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_8 - li * xi_1_8
+    acci -= lr * xi_1_8 + li * xr_1_8
+    m = tl.load(
+        a_ptr + ((row_start + 29) + (row_start + 25) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_9 - li * xi_1_9
+    acci -= lr * xi_1_9 + li * xr_1_9
+    m = tl.load(
+        a_ptr + ((row_start + 29) + (row_start + 26) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_10 - li * xi_1_10
+    acci -= lr * xi_1_10 + li * xr_1_10
+    m = tl.load(
+        a_ptr + ((row_start + 29) + (row_start + 27) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_11 - li * xi_1_11
+    acci -= lr * xi_1_11 + li * xr_1_11
+    m = tl.load(
+        a_ptr + ((row_start + 29) + (row_start + 28) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_12 - li * xi_1_12
+    acci -= lr * xi_1_12 + li * xr_1_12
+    xr_1_13 = accr
+    xi_1_13 = acci
+    accr = tl.where(goffs == 14, 1.0, 0.0)
+    acci = tl.zeros((G,), tl.float32)
+    m = tl.load(
+        a_ptr + ((row_start + 30) + (row_start + 16) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_0 - li * xi_1_0
+    acci -= lr * xi_1_0 + li * xr_1_0
+    m = tl.load(
+        a_ptr + ((row_start + 30) + (row_start + 17) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_1 - li * xi_1_1
+    acci -= lr * xi_1_1 + li * xr_1_1
+    m = tl.load(
+        a_ptr + ((row_start + 30) + (row_start + 18) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_2 - li * xi_1_2
+    acci -= lr * xi_1_2 + li * xr_1_2
+    m = tl.load(
+        a_ptr + ((row_start + 30) + (row_start + 19) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_3 - li * xi_1_3
+    acci -= lr * xi_1_3 + li * xr_1_3
+    m = tl.load(
+        a_ptr + ((row_start + 30) + (row_start + 20) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_4 - li * xi_1_4
+    acci -= lr * xi_1_4 + li * xr_1_4
+    m = tl.load(
+        a_ptr + ((row_start + 30) + (row_start + 21) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_5 - li * xi_1_5
+    acci -= lr * xi_1_5 + li * xr_1_5
+    m = tl.load(
+        a_ptr + ((row_start + 30) + (row_start + 22) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_6 - li * xi_1_6
+    acci -= lr * xi_1_6 + li * xr_1_6
+    m = tl.load(
+        a_ptr + ((row_start + 30) + (row_start + 23) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_7 - li * xi_1_7
+    acci -= lr * xi_1_7 + li * xr_1_7
+    m = tl.load(
+        a_ptr + ((row_start + 30) + (row_start + 24) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_8 - li * xi_1_8
+    acci -= lr * xi_1_8 + li * xr_1_8
+    m = tl.load(
+        a_ptr + ((row_start + 30) + (row_start + 25) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_9 - li * xi_1_9
+    acci -= lr * xi_1_9 + li * xr_1_9
+    m = tl.load(
+        a_ptr + ((row_start + 30) + (row_start + 26) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_10 - li * xi_1_10
+    acci -= lr * xi_1_10 + li * xr_1_10
+    m = tl.load(
+        a_ptr + ((row_start + 30) + (row_start + 27) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_11 - li * xi_1_11
+    acci -= lr * xi_1_11 + li * xr_1_11
+    m = tl.load(
+        a_ptr + ((row_start + 30) + (row_start + 28) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_12 - li * xi_1_12
+    acci -= lr * xi_1_12 + li * xr_1_12
+    m = tl.load(
+        a_ptr + ((row_start + 30) + (row_start + 29) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_13 - li * xi_1_13
+    acci -= lr * xi_1_13 + li * xr_1_13
+    xr_1_14 = accr
+    xi_1_14 = acci
+    accr = tl.where(goffs == 15, 1.0, 0.0)
+    acci = tl.zeros((G,), tl.float32)
+    m = tl.load(
+        a_ptr + ((row_start + 31) + (row_start + 16) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_0 - li * xi_1_0
+    acci -= lr * xi_1_0 + li * xr_1_0
+    m = tl.load(
+        a_ptr + ((row_start + 31) + (row_start + 17) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_1 - li * xi_1_1
+    acci -= lr * xi_1_1 + li * xr_1_1
+    m = tl.load(
+        a_ptr + ((row_start + 31) + (row_start + 18) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_2 - li * xi_1_2
+    acci -= lr * xi_1_2 + li * xr_1_2
+    m = tl.load(
+        a_ptr + ((row_start + 31) + (row_start + 19) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_3 - li * xi_1_3
+    acci -= lr * xi_1_3 + li * xr_1_3
+    m = tl.load(
+        a_ptr + ((row_start + 31) + (row_start + 20) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_4 - li * xi_1_4
+    acci -= lr * xi_1_4 + li * xr_1_4
+    m = tl.load(
+        a_ptr + ((row_start + 31) + (row_start + 21) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_5 - li * xi_1_5
+    acci -= lr * xi_1_5 + li * xr_1_5
+    m = tl.load(
+        a_ptr + ((row_start + 31) + (row_start + 22) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_6 - li * xi_1_6
+    acci -= lr * xi_1_6 + li * xr_1_6
+    m = tl.load(
+        a_ptr + ((row_start + 31) + (row_start + 23) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_7 - li * xi_1_7
+    acci -= lr * xi_1_7 + li * xr_1_7
+    m = tl.load(
+        a_ptr + ((row_start + 31) + (row_start + 24) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_8 - li * xi_1_8
+    acci -= lr * xi_1_8 + li * xr_1_8
+    m = tl.load(
+        a_ptr + ((row_start + 31) + (row_start + 25) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_9 - li * xi_1_9
+    acci -= lr * xi_1_9 + li * xr_1_9
+    m = tl.load(
+        a_ptr + ((row_start + 31) + (row_start + 26) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_10 - li * xi_1_10
+    acci -= lr * xi_1_10 + li * xr_1_10
+    m = tl.load(
+        a_ptr + ((row_start + 31) + (row_start + 27) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_11 - li * xi_1_11
+    acci -= lr * xi_1_11 + li * xr_1_11
+    m = tl.load(
+        a_ptr + ((row_start + 31) + (row_start + 28) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_12 - li * xi_1_12
+    acci -= lr * xi_1_12 + li * xr_1_12
+    m = tl.load(
+        a_ptr + ((row_start + 31) + (row_start + 29) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_13 - li * xi_1_13
+    acci -= lr * xi_1_13 + li * xr_1_13
+    m = tl.load(
+        a_ptr + ((row_start + 31) + (row_start + 30) * 256) * 2 + two,
+        eviction_policy="evict_last",
+    )
+    lr, li = tl.split(m)
+    accr -= lr * xr_1_14 - li * xi_1_14
+    acci -= lr * xi_1_14 + li * xr_1_14
+    xr_1_15 = accr
+    xi_1_15 = acci
+    XAr = tl.zeros((G, G), tl.float32)
+    XAi = tl.zeros((G, G), tl.float32)
+    XCr = tl.zeros((G, G), tl.float32)
+    XCi = tl.zeros((G, G), tl.float32)
+    XAr = tl.where(goffs[:, None] == 0, xr_0_0[None, :], XAr)
+    XAi = tl.where(goffs[:, None] == 0, xi_0_0[None, :], XAi)
+    XCr = tl.where(goffs[:, None] == 0, xr_1_0[None, :], XCr)
+    XCi = tl.where(goffs[:, None] == 0, xi_1_0[None, :], XCi)
+    XAr = tl.where(goffs[:, None] == 1, xr_0_1[None, :], XAr)
+    XAi = tl.where(goffs[:, None] == 1, xi_0_1[None, :], XAi)
+    XCr = tl.where(goffs[:, None] == 1, xr_1_1[None, :], XCr)
+    XCi = tl.where(goffs[:, None] == 1, xi_1_1[None, :], XCi)
+    XAr = tl.where(goffs[:, None] == 2, xr_0_2[None, :], XAr)
+    XAi = tl.where(goffs[:, None] == 2, xi_0_2[None, :], XAi)
+    XCr = tl.where(goffs[:, None] == 2, xr_1_2[None, :], XCr)
+    XCi = tl.where(goffs[:, None] == 2, xi_1_2[None, :], XCi)
+    XAr = tl.where(goffs[:, None] == 3, xr_0_3[None, :], XAr)
+    XAi = tl.where(goffs[:, None] == 3, xi_0_3[None, :], XAi)
+    XCr = tl.where(goffs[:, None] == 3, xr_1_3[None, :], XCr)
+    XCi = tl.where(goffs[:, None] == 3, xi_1_3[None, :], XCi)
+    XAr = tl.where(goffs[:, None] == 4, xr_0_4[None, :], XAr)
+    XAi = tl.where(goffs[:, None] == 4, xi_0_4[None, :], XAi)
+    XCr = tl.where(goffs[:, None] == 4, xr_1_4[None, :], XCr)
+    XCi = tl.where(goffs[:, None] == 4, xi_1_4[None, :], XCi)
+    XAr = tl.where(goffs[:, None] == 5, xr_0_5[None, :], XAr)
+    XAi = tl.where(goffs[:, None] == 5, xi_0_5[None, :], XAi)
+    XCr = tl.where(goffs[:, None] == 5, xr_1_5[None, :], XCr)
+    XCi = tl.where(goffs[:, None] == 5, xi_1_5[None, :], XCi)
+    XAr = tl.where(goffs[:, None] == 6, xr_0_6[None, :], XAr)
+    XAi = tl.where(goffs[:, None] == 6, xi_0_6[None, :], XAi)
+    XCr = tl.where(goffs[:, None] == 6, xr_1_6[None, :], XCr)
+    XCi = tl.where(goffs[:, None] == 6, xi_1_6[None, :], XCi)
+    XAr = tl.where(goffs[:, None] == 7, xr_0_7[None, :], XAr)
+    XAi = tl.where(goffs[:, None] == 7, xi_0_7[None, :], XAi)
+    XCr = tl.where(goffs[:, None] == 7, xr_1_7[None, :], XCr)
+    XCi = tl.where(goffs[:, None] == 7, xi_1_7[None, :], XCi)
+    XAr = tl.where(goffs[:, None] == 8, xr_0_8[None, :], XAr)
+    XAi = tl.where(goffs[:, None] == 8, xi_0_8[None, :], XAi)
+    XCr = tl.where(goffs[:, None] == 8, xr_1_8[None, :], XCr)
+    XCi = tl.where(goffs[:, None] == 8, xi_1_8[None, :], XCi)
+    XAr = tl.where(goffs[:, None] == 9, xr_0_9[None, :], XAr)
+    XAi = tl.where(goffs[:, None] == 9, xi_0_9[None, :], XAi)
+    XCr = tl.where(goffs[:, None] == 9, xr_1_9[None, :], XCr)
+    XCi = tl.where(goffs[:, None] == 9, xi_1_9[None, :], XCi)
+    XAr = tl.where(goffs[:, None] == 10, xr_0_10[None, :], XAr)
+    XAi = tl.where(goffs[:, None] == 10, xi_0_10[None, :], XAi)
+    XCr = tl.where(goffs[:, None] == 10, xr_1_10[None, :], XCr)
+    XCi = tl.where(goffs[:, None] == 10, xi_1_10[None, :], XCi)
+    XAr = tl.where(goffs[:, None] == 11, xr_0_11[None, :], XAr)
+    XAi = tl.where(goffs[:, None] == 11, xi_0_11[None, :], XAi)
+    XCr = tl.where(goffs[:, None] == 11, xr_1_11[None, :], XCr)
+    XCi = tl.where(goffs[:, None] == 11, xi_1_11[None, :], XCi)
+    XAr = tl.where(goffs[:, None] == 12, xr_0_12[None, :], XAr)
+    XAi = tl.where(goffs[:, None] == 12, xi_0_12[None, :], XAi)
+    XCr = tl.where(goffs[:, None] == 12, xr_1_12[None, :], XCr)
+    XCi = tl.where(goffs[:, None] == 12, xi_1_12[None, :], XCi)
+    XAr = tl.where(goffs[:, None] == 13, xr_0_13[None, :], XAr)
+    XAi = tl.where(goffs[:, None] == 13, xi_0_13[None, :], XAi)
+    XCr = tl.where(goffs[:, None] == 13, xr_1_13[None, :], XCr)
+    XCi = tl.where(goffs[:, None] == 13, xi_1_13[None, :], XCi)
+    XAr = tl.where(goffs[:, None] == 14, xr_0_14[None, :], XAr)
+    XAi = tl.where(goffs[:, None] == 14, xi_0_14[None, :], XAi)
+    XCr = tl.where(goffs[:, None] == 14, xr_1_14[None, :], XCr)
+    XCi = tl.where(goffs[:, None] == 14, xi_1_14[None, :], XCi)
+    XAr = tl.where(goffs[:, None] == 15, xr_0_15[None, :], XAr)
+    XAi = tl.where(goffs[:, None] == 15, xi_0_15[None, :], XAi)
+    XCr = tl.where(goffs[:, None] == 15, xr_1_15[None, :], XCr)
+    XCi = tl.where(goffs[:, None] == 15, xi_1_15[None, :], XCi)
+    b_off = (rows_b[:, None] + rows_t[None, :] * 256) * 2
+    Br = tl.load(a_ptr + b_off, eviction_policy="evict_last")
+    Bi = tl.load(a_ptr + b_off + 1, eviction_policy="evict_last")
+    T1r = tl.dot(Br, XAr, input_precision="tf32x3") - tl.dot(
+        Bi, XAi, input_precision="tf32x3"
+    )
+    T1i = tl.dot(Br, XAi, input_precision="tf32x3") + tl.dot(
+        Bi, XAr, input_precision="tf32x3"
+    )
+    T2r = tl.dot(XCr, T1r, input_precision="tf32x3") - tl.dot(
+        XCi, T1i, input_precision="tf32x3"
+    )
+    T2i = tl.dot(XCr, T1i, input_precision="tf32x3") + tl.dot(
+        XCi, T1r, input_precision="tf32x3"
+    )
+    lo = offs[None, :] < 16
+    Xtopr = tl.where(
+        lo,
+        tl.reshape(tl.broadcast_to(tl.reshape(XAr, (G, 1, G)), (G, 2, G)), (G, 32)),
+        0.0,
+    )
+    Xtopi = tl.where(
+        lo,
+        tl.reshape(tl.broadcast_to(tl.reshape(XAi, (G, 1, G)), (G, 2, G)), (G, 32)),
+        0.0,
+    )
+    Xbotr = tl.where(
+        lo,
+        -tl.reshape(tl.broadcast_to(tl.reshape(T2r, (G, 1, G)), (G, 2, G)), (G, 32)),
+        tl.reshape(tl.broadcast_to(tl.reshape(XCr, (G, 1, G)), (G, 2, G)), (G, 32)),
+    )
+    Xboti = tl.where(
+        lo,
+        -tl.reshape(tl.broadcast_to(tl.reshape(T2i, (G, 1, G)), (G, 2, G)), (G, 32)),
+        tl.reshape(tl.broadcast_to(tl.reshape(XCi, (G, 1, G)), (G, 2, G)), (G, 32)),
+    )
+    sx2 = tl.load(
+        x_ptr + (rows * 2)[:, None] + two[None, :], eviction_policy="evict_last"
+    )
+    sxr, sxi = tl.split(sx2)
+    num_chunks = tl.cdiv(pid, CHUNK)
+    for gg in tl.range(0, num_chunks):
+        pid_lo = gg * CHUNK
+        pid_hi = tl.minimum(pid_lo + CHUNK, pid)
+        while tl.atomic_add(flag_ptr, 0, sem="acquire") < pid_hi - 1:
+            pass
+        kcols = pid_lo * BLOCK_N + koffs
+        col_mask = kcols < pid_hi * BLOCK_N
+        x2 = tl.load(
+            x_ptr + (kcols * 2)[:, None] + two[None, :],
+            mask=col_mask[:, None],
+            other=0.0,
+            eviction_policy="evict_last",
+        )
+        xpr, xpi = tl.split(x2)
+        a_off = (rows[:, None] + kcols[None, :] * 256) * 2
+        a2 = tl.load(
+            a_ptr + a_off[:, :, None] + two[None, None, :],
+            mask=col_mask[None, :, None],
+            other=0.0,
+            eviction_policy="evict_first",
+        )
+        ar, ai = tl.split(a2)
+        sxr -= tl.sum(ar * xpr[None, :] - ai * xpi[None, :], axis=1)
+        sxi -= tl.sum(ar * xpi[None, :] + ai * xpr[None, :], axis=1)
+    otr = tl.sum(Xtopr * sxr[None, :] - Xtopi * sxi[None, :], axis=1)
+    oti = tl.sum(Xtopr * sxi[None, :] + Xtopi * sxr[None, :], axis=1)
+    obr = tl.sum(Xbotr * sxr[None, :] - Xboti * sxi[None, :], axis=1)
+    obi = tl.sum(Xbotr * sxi[None, :] + Xboti * sxr[None, :], axis=1)
+    tl.store(x_ptr + (rows_t * 2)[:, None] + two[None, :], tl.join(otr, oti))
+    tl.store(x_ptr + (rows_b * 2)[:, None] + two[None, :], tl.join(obr, obi))
+    tl.atomic_xchg(flag_ptr, pid, sem="release")
+
+
+@triton.jit
+def _cz_neumann16(Nr, Ni, offs16, DT: tl.constexpr, IP: tl.constexpr):
+    I16 = tl.where(
+        offs16[:, None] == offs16[None, :],
+        tl.full((16, 16), 1.0, DT),
+        tl.full((16, 16), 0.0, DT),
+    )
+    Xr = I16 - Nr
+    Xi = -Ni
+    Sr = tl.dot(Nr, Nr, input_precision=IP) - tl.dot(Ni, Ni, input_precision=IP)
+    Si = tl.dot(Nr, Ni, input_precision=IP) + tl.dot(Ni, Nr, input_precision=IP)
+    for k in tl.static_range(0, 3):
+        dr = tl.dot(Xr, Sr, input_precision=IP) - tl.dot(Xi, Si, input_precision=IP)
+        di = tl.dot(Xr, Si, input_precision=IP) + tl.dot(Xi, Sr, input_precision=IP)
+        Xr = Xr + dr
+        Xi = Xi + di
+        if k < 2:
+            dr = tl.dot(Sr, Sr, input_precision=IP) - tl.dot(Si, Si, input_precision=IP)
+            di = tl.dot(Sr, Si, input_precision=IP) + tl.dot(Si, Sr, input_precision=IP)
+            Sr = dr
+            Si = di
+    return Xr, Xi
+
+
+@triton.jit
+def ztrsv_lu256_neu16_kernel(
+    a_ptr,
+    x_ptr,
+    flag_ptr,
+    BLOCK_N: tl.constexpr,
+    CHUNK: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    offs16 = tl.arange(0, 16)
+    BK: tl.constexpr = BLOCK_N * CHUNK
+    koffs = tl.arange(0, BK)
+    row_start = pid * BLOCK_N
+    rows_t = row_start + offs16
+    rows_b = row_start + 16 + offs16
+    strict16 = offs16[:, None] > offs16[None, :]
+    a_off = (rows_t[:, None] + rows_t[None, :] * 256) * 2
+    c_off = (rows_b[:, None] + rows_b[None, :] * 256) * 2
+    b_off = (rows_b[:, None] + rows_t[None, :] * 256) * 2
+    NAr = tl.load(a_ptr + a_off, mask=strict16, other=0.0, eviction_policy="evict_last")
+    NAi = tl.load(
+        a_ptr + a_off + 1, mask=strict16, other=0.0, eviction_policy="evict_last"
+    )
+    NCr = tl.load(a_ptr + c_off, mask=strict16, other=0.0, eviction_policy="evict_last")
+    NCi = tl.load(
+        a_ptr + c_off + 1, mask=strict16, other=0.0, eviction_policy="evict_last"
+    )
+    Br = tl.load(a_ptr + b_off, eviction_policy="evict_last")
+    Bi = tl.load(a_ptr + b_off + 1, eviction_policy="evict_last")
+    XAr, XAi = _cz_neumann16(NAr, NAi, offs16, tl.float64, "ieee")
+    XCr, XCi = _cz_neumann16(NCr, NCi, offs16, tl.float64, "ieee")
+    st2 = tl.load(
+        x_ptr + (rows_t * 2)[:, None] + tl.arange(0, 2)[None, :],
+        eviction_policy="evict_last",
+    )
+    sxtr, sxti = tl.split(st2)
+    sb2 = tl.load(
+        x_ptr + (rows_b * 2)[:, None] + tl.arange(0, 2)[None, :],
+        eviction_policy="evict_last",
+    )
+    sxbr, sxbi = tl.split(sb2)
+
+    num_chunks = tl.cdiv(pid, CHUNK)
+    for g in tl.range(0, num_chunks):
+        pid_lo = g * CHUNK
+        pid_hi = tl.minimum(pid_lo + CHUNK, pid)
+        while tl.atomic_add(flag_ptr, 0, sem="acquire") < pid_hi - 1:
+            pass
+        kcols = pid_lo * BLOCK_N + koffs
+        col_mask = kcols < pid_hi * BLOCK_N
+        x2 = tl.load(
+            x_ptr + (kcols * 2)[:, None] + tl.arange(0, 2)[None, :],
+            mask=col_mask[:, None],
+            other=0.0,
+            eviction_policy="evict_last",
+        )
+        xpr, xpi = tl.split(x2)
+        at_off = (rows_t[:, None] + kcols[None, :] * 256) * 2
+        a2 = tl.load(
+            a_ptr + at_off[:, :, None] + tl.arange(0, 2)[None, None, :],
+            mask=col_mask[None, :, None],
+            other=0.0,
+            eviction_policy="evict_first",
+        )
+        ar, ai = tl.split(a2)
+        sxtr -= tl.sum(ar * xpr[None, :] - ai * xpi[None, :], axis=1)
+        sxti -= tl.sum(ar * xpi[None, :] + ai * xpr[None, :], axis=1)
+        ab_off = (rows_b[:, None] + kcols[None, :] * 256) * 2
+        a2 = tl.load(
+            a_ptr + ab_off[:, :, None] + tl.arange(0, 2)[None, None, :],
+            mask=col_mask[None, :, None],
+            other=0.0,
+            eviction_policy="evict_first",
+        )
+        ar, ai = tl.split(a2)
+        sxbr -= tl.sum(ar * xpr[None, :] - ai * xpi[None, :], axis=1)
+        sxbi -= tl.sum(ar * xpi[None, :] + ai * xpr[None, :], axis=1)
+
+    otr = tl.sum(XAr * sxtr[None, :] - XAi * sxti[None, :], axis=1)
+    oti = tl.sum(XAr * sxti[None, :] + XAi * sxtr[None, :], axis=1)
+    tr = sxbr - tl.sum(Br * otr[None, :] - Bi * oti[None, :], axis=1)
+    ti = sxbi - tl.sum(Br * oti[None, :] + Bi * otr[None, :], axis=1)
+    obr = tl.sum(XCr * tr[None, :] - XCi * ti[None, :], axis=1)
+    obi = tl.sum(XCr * ti[None, :] + XCi * tr[None, :], axis=1)
+    tl.store(
+        x_ptr + (rows_t * 2)[:, None] + tl.arange(0, 2)[None, :],
+        tl.join(otr, oti),
+    )
+    tl.store(
+        x_ptr + (rows_b * 2)[:, None] + tl.arange(0, 2)[None, :],
+        tl.join(obr, obi),
+    )
     tl.atomic_xchg(flag_ptr, pid, sem="release")
 
 
@@ -1053,24 +3336,26 @@ def _dtrsv_diag_block_inv(
     ROWLOAD: tl.constexpr,
 ):
     if UNIT and LOWER_EFF and TRANS == 0 and ROWLOAD:
-        one = tl.full((BLOCK_N,), 1.0, tl.float64)
-        zero = tl.full((BLOCK_N,), 0.0, tl.float64)
+        if BLOCK_N == 16:
+            LEVELS: tl.constexpr = 3
+        elif BLOCK_N == 32:
+            LEVELS: tl.constexpr = 4
+        else:
+            LEVELS: tl.constexpr = 5
+        m_off = (s + offs)[:, None] + (s + offs)[None, :] * LDA
+        strict = (offs[:, None] > offs[None, :]) & row_mask[:, None] & row_mask[None, :]
+        M = tl.load(a_ptr + m_off, mask=strict, other=0.0, eviction_policy="evict_last")
         X = tl.where(
             offs[:, None] == offs[None, :],
             tl.full((BLOCK_N, BLOCK_N), 1.0, tl.float64),
             tl.full((BLOCK_N, BLOCK_N), 0.0, tl.float64),
         )
-        for i in tl.static_range(0, BLOCK_N):
-            mrow = tl.load(
-                a_ptr + (s + i) + (s + offs) * LDA,
-                mask=(offs < i) & row_mask,
-                other=0.0,
-                eviction_policy="evict_last",
-            )
-            contrib = tl.sum(mrow[:, None] * X, axis=0)
-            ei = tl.where(offs == i, one, zero)
-            xi = ei - contrib
-            X = tl.where(offs[:, None] == i, xi[None, :], X)
+        X = X - M
+        S = tl.dot(M, M, input_precision="ieee")
+        for k in tl.static_range(0, LEVELS):
+            X = X + tl.dot(X, S, input_precision="ieee")
+            if k < LEVELS - 1:
+                S = tl.dot(S, S, input_precision="ieee")
         return X
     if TRANS == 0:
         m_off = (s + offs)[:, None] + (s + offs)[None, :] * LDA
@@ -1124,35 +3409,26 @@ def _dtrsv_diag_block_inv_32_nomask(
 ):
     m_off = (s + offs)[:, None] + (s + offs)[None, :] * 256
     M = tl.load(a_ptr + m_off)
-    one = tl.full((BLOCK_N,), 1.0, tl.float64)
-    zero = tl.full((BLOCK_N,), 0.0, tl.float64)
     diag_each = tl.sum(tl.where(offs[:, None] == offs[None, :], M, 0.0), axis=1)
+    rinv = 1.0 / diag_each
+    if LOWER_EFF:
+        strict = offs[:, None] > offs[None, :]
+    else:
+        strict = offs[:, None] < offs[None, :]
+    M = tl.where(strict, M, tl.full((BLOCK_N, BLOCK_N), 0.0, tl.float64))
+    M = M * rinv[:, None]
     X = tl.where(
         offs[:, None] == offs[None, :],
         tl.full((BLOCK_N, BLOCK_N), 1.0, tl.float64),
         tl.full((BLOCK_N, BLOCK_N), 0.0, tl.float64),
     )
-    if LOWER_EFF:
-        for i in tl.range(0, BLOCK_N):
-            mrow = tl.sum(tl.where(offs[:, None] == i, M, 0.0), axis=0)
-            mtri = tl.where(offs < i, mrow, zero)
-            contrib = tl.sum(mtri[:, None] * X, axis=0)
-            ei = tl.where(offs == i, one, zero)
-            di = tl.sum(tl.where(offs == i, diag_each, zero), axis=0)
-            inv_di = one / di
-            xi = (ei - contrib) * inv_di
-            X = tl.where(offs[:, None] == i, xi[None, :], X)
-    else:
-        for ii in tl.range(0, BLOCK_N):
-            i = BLOCK_N - 1 - ii
-            mrow = tl.sum(tl.where(offs[:, None] == i, M, 0.0), axis=0)
-            mtri = tl.where(offs > i, mrow, zero)
-            contrib = tl.sum(mtri[:, None] * X, axis=0)
-            ei = tl.where(offs == i, one, zero)
-            di = tl.sum(tl.where(offs == i, diag_each, zero), axis=0)
-            inv_di = one / di
-            xi = (ei - contrib) * inv_di
-            X = tl.where(offs[:, None] == i, xi[None, :], X)
+    X = X - M
+    S = tl.dot(M, M, input_precision="ieee")
+    for k in tl.static_range(0, 4):
+        X = X + tl.dot(X, S, input_precision="ieee")
+        if k < 3:
+            S = tl.dot(S, S, input_precision="ieee")
+    X = X * rinv[None, :]
     return X
 
 
@@ -1763,11 +4039,31 @@ def strsv(
             trans_flag == 0
             and incx == 1
             and lda == n
+            and n >= 256
+            and uplo == CUBLAS_FILL_MODE_LOWER
+            and unit == 1
+        ):
+            flags = _trsv_flags(A.device)
+            strsv_lu_neu64_kernel[(triton.cdiv(n, 64),)](
+                A,
+                x,
+                flags,
+                n,
+                lda,
+                BLOCK_N=64,
+                CHUNK=2 if n <= 256 else 1,
+                num_warps=4,
+            )
+            return
+        if (
+            trans_flag == 0
+            and incx == 1
+            and lda == n
             and n == 256
             and uplo == CUBLAS_FILL_MODE_LOWER
             and unit == 1
         ):
-            flags = torch.full((1,), -1, dtype=torch.int32, device=A.device)
+            flags = _trsv_flags(A.device)
             strsv_lu256_rowinv_kernel[(8,)](
                 A,
                 x,
@@ -1782,11 +4078,31 @@ def strsv(
             trans_flag == 0
             and incx == 1
             and lda == n
+            and n >= 256
+            and uplo == CUBLAS_FILL_MODE_UPPER
+            and unit == 0
+        ):
+            flags = _trsv_flags(A.device)
+            strsv_un_neu64_kernel[(triton.cdiv(n, 64),)](
+                A,
+                x,
+                flags,
+                n,
+                lda,
+                BLOCK_N=64,
+                CHUNK=2 if n <= 256 else 1,
+                num_warps=4,
+            )
+            return
+        if (
+            trans_flag == 0
+            and incx == 1
+            and lda == n
             and n == 256
             and uplo == CUBLAS_FILL_MODE_UPPER
             and unit == 0
         ):
-            flags = torch.full((1,), -1, dtype=torch.int32, device=A.device)
+            flags = _trsv_flags(A.device)
             strsv_un256_rowinv_kernel[(8,)](
                 A,
                 x,
@@ -1800,7 +4116,7 @@ def strsv(
         def grid(meta):
             return (triton.cdiv(n, meta["BLOCK_N"]),)
 
-        flags = torch.full((1,), -1, dtype=torch.int32, device=A.device)
+        flags = _trsv_flags(A.device)
         if n >= _STRSV_INV_MIN_N:
             bb = 64 if n >= _STRSV_INV_BB64_MIN_N else 32
             npanel = triton.cdiv(n, bb)
@@ -1929,6 +4245,24 @@ def dtrsv(
                 trans_flag == 0
                 and uplo == CUBLAS_FILL_MODE_LOWER
                 and unit == 1
+                and n >= 1024
+            ):
+                flags = _trsv_flags(A.device)
+                dtrsv_lu_neu64_kernel[(triton.cdiv(n, 64),)](
+                    A,
+                    x,
+                    flags,
+                    n,
+                    lda,
+                    BLOCK_N=64,
+                    CHUNK=1,
+                    num_warps=4,
+                )
+                return
+            if (
+                trans_flag == 0
+                and uplo == CUBLAS_FILL_MODE_LOWER
+                and unit == 1
                 and n <= 64
             ):
                 dtrsv_n64_kernel[(1,)](
@@ -1942,7 +4276,7 @@ def dtrsv(
                 )
                 return
             if trans_flag == 0 and n == 256 and unit == 0:
-                flags = torch.full((1,), -1, dtype=torch.int32, device=A.device)
+                flags = _trsv_flags(A.device)
                 dtrsv_n256_fused_kernel[(8,)](
                     A,
                     x,
@@ -1958,12 +4292,12 @@ def dtrsv(
             else:
                 bb = 64 if n >= _DTRSV_INV_BB64_MIN_N else 32
             npanel = triton.cdiv(n, bb)
-            flags = torch.full((1,), -1, dtype=torch.int32, device=A.device)
             lower_eff = 1 if (uplo == CUBLAS_FILL_MODE_LOWER) ^ (trans_flag == 1) else 0
             inv_grid = (npanel,)
             rowload = 1 if n <= _DTRSV_ROWLOAD_MAX_N else 0
             if (bb == 16 or bb == 32) and n <= _DTRSV_FUSE_MAX_N:
                 chunk, nw = _dtrsv_fused_cfg(forward, n, bb, unit)
+                flags = _trsv_flags(A.device)
                 if forward:
                     dtrsv_fwd_fused_kernel[inv_grid](
                         A,
@@ -1997,6 +4331,7 @@ def dtrsv(
                         num_warps=nw,
                     )
             else:
+                flags = _trsv_flags(A.device)
                 dinv = torch.empty(
                     (npanel, bb, bb), dtype=torch.float64, device=A.device
                 )
@@ -2091,7 +4426,76 @@ def _ctrsv_diag_block_inv(
     LOWER_EFF: tl.constexpr,
     BLOCK_N: tl.constexpr,
     ROWLOAD: tl.constexpr,
+    INV_DOT: tl.constexpr,
 ):
+    if (
+        BLOCK_N == 16
+        and INV_DOT
+        and not (UNIT and LOWER_EFF and TRANS == 0 and ROWLOAD)
+    ):
+        if TRANS == 0:
+            m_off = ((s + offs)[:, None] + (s + offs)[None, :] * LDA) * 2
+        else:
+            m_off = ((s + offs)[None, :] + (s + offs)[:, None] * LDA) * 2
+        if LOWER_EFF:
+            strict = offs[:, None] > offs[None, :]
+        else:
+            strict = offs[:, None] < offs[None, :]
+        smask = strict & row_mask[:, None] & row_mask[None, :]
+        Mr = tl.load(a_ptr + m_off, mask=smask, other=0.0, eviction_policy="evict_last")
+        Mi = tl.load(
+            a_ptr + m_off + 1, mask=smask, other=0.0, eviction_policy="evict_last"
+        )
+        if CONJ:
+            Mi = -Mi
+        if not UNIT:
+            d_off = ((s + offs) + (s + offs) * LDA) * 2
+            nb_dr = tl.load(a_ptr + d_off, mask=row_mask, other=1.0)
+            nb_di = tl.load(a_ptr + d_off + 1, mask=row_mask, other=0.0)
+            if CONJ:
+                nb_di = -nb_di
+            nb_den = nb_dr * nb_dr + nb_di * nb_di
+            nb_rr = nb_dr / nb_den
+            nb_ri = -nb_di / nb_den
+            nb_tmr = Mr * nb_rr[:, None] - Mi * nb_ri[:, None]
+            Mi = Mr * nb_ri[:, None] + Mi * nb_rr[:, None]
+            Mr = nb_tmr
+        Xr = tl.where(
+            offs[:, None] == offs[None, :],
+            tl.full((BLOCK_N, BLOCK_N), 1.0, tl.float32),
+            tl.full((BLOCK_N, BLOCK_N), 0.0, tl.float32),
+        )
+        Xr = Xr - Mr
+        Xi = -Mi
+        Sr = tl.dot(Mr, Mr, input_precision="ieee") - tl.dot(
+            Mi, Mi, input_precision="ieee"
+        )
+        Si = tl.dot(Mr, Mi, input_precision="ieee") + tl.dot(
+            Mi, Mr, input_precision="ieee"
+        )
+        for k in tl.static_range(0, 3):
+            nb_tr = tl.dot(Xr, Sr, input_precision="ieee") - tl.dot(
+                Xi, Si, input_precision="ieee"
+            )
+            nb_ti = tl.dot(Xr, Si, input_precision="ieee") + tl.dot(
+                Xi, Sr, input_precision="ieee"
+            )
+            Xr = Xr + nb_tr
+            Xi = Xi + nb_ti
+            if k < 2:
+                nb_tr = tl.dot(Sr, Sr, input_precision="ieee") - tl.dot(
+                    Si, Si, input_precision="ieee"
+                )
+                nb_ti = tl.dot(Sr, Si, input_precision="ieee") + tl.dot(
+                    Si, Sr, input_precision="ieee"
+                )
+                Sr = nb_tr
+                Si = nb_ti
+        if not UNIT:
+            nb_tr = Xr * nb_rr[None, :] - Xi * nb_ri[None, :]
+            Xi = Xr * nb_ri[None, :] + Xi * nb_rr[None, :]
+            Xr = nb_tr
+        return Xr, Xi
     if UNIT and LOWER_EFF and TRANS == 0 and ROWLOAD:
         one = tl.full((BLOCK_N,), 1.0, tl.float32)
         zero = tl.full((BLOCK_N,), 0.0, tl.float32)
@@ -2212,6 +4616,7 @@ def ctrsv_fwd_fused_kernel(
     BLOCK_N: tl.constexpr,
     CHUNK: tl.constexpr,
     ROWLOAD: tl.constexpr,
+    INV_DOT: tl.constexpr,
 ):
     pid = tl.program_id(0)
     offs = tl.arange(0, BLOCK_N)
@@ -2234,6 +4639,7 @@ def ctrsv_fwd_fused_kernel(
         LOWER_EFF,
         BLOCK_N,
         ROWLOAD,
+        INV_DOT,
     )
     sxr = tl.load(
         x_ptr + rows * 2, mask=row_mask, other=0.0, eviction_policy="evict_last"
@@ -2299,6 +4705,7 @@ def ctrsv_bwd_fused_kernel(
     BLOCK_N: tl.constexpr,
     CHUNK: tl.constexpr,
     ROWLOAD: tl.constexpr,
+    INV_DOT: tl.constexpr,
 ):
     pid = tl.program_id(0)
     offs = tl.arange(0, BLOCK_N)
@@ -2323,6 +4730,7 @@ def ctrsv_bwd_fused_kernel(
         LOWER_EFF,
         BLOCK_N,
         ROWLOAD,
+        INV_DOT,
     )
     sxr = tl.load(
         x_ptr + rows * 2, mask=row_mask, other=0.0, eviction_policy="evict_last"
@@ -2396,11 +4804,27 @@ def ctrsv(
         A_real = torch.view_as_real(A)
         x_real = torch.view_as_real(x)
         if incx == 1 and lda == n:
+            if (
+                n == 256
+                and trans_flag == 0
+                and unit == 1
+                and uplo == CUBLAS_FILL_MODE_LOWER
+            ):
+                flags = _trsv_flags(A.device)
+                ctrsv_lu256_scalar_kernel[(8,)](
+                    A_real,
+                    x_real,
+                    flags,
+                    CHUNK=4,
+                    num_warps=4,
+                )
+                return
             bb = 16 if n <= 64 else 32
             npanel = triton.cdiv(n, bb)
-            flags = torch.full((1,), -1, dtype=torch.int32, device=A.device)
+            flags = _trsv_flags(A.device)
             lower_eff = 1 if (uplo == CUBLAS_FILL_MODE_LOWER) ^ (trans_flag == 1) else 0
             rowload = 1 if n <= _DTRSV_ROWLOAD_MAX_N else 0
+            inv_dot = 1 if n <= 64 else 0
             chunk, nw = _ctrsv_fused_cfg(forward, n, bb, unit)
             if forward:
                 ctrsv_fwd_fused_kernel[(npanel,)](
@@ -2417,6 +4841,7 @@ def ctrsv(
                     BLOCK_N=bb,
                     CHUNK=chunk,
                     ROWLOAD=rowload,
+                    INV_DOT=inv_dot,
                     num_warps=nw,
                 )
             else:
@@ -2434,6 +4859,7 @@ def ctrsv(
                     BLOCK_N=bb,
                     CHUNK=chunk,
                     ROWLOAD=rowload,
+                    INV_DOT=inv_dot,
                     num_warps=nw,
                 )
             return
@@ -2492,7 +4918,76 @@ def _ztrsv_diag_block_inv(
     LOWER_EFF: tl.constexpr,
     BLOCK_N: tl.constexpr,
     ROWLOAD: tl.constexpr,
+    INV_DOT: tl.constexpr,
 ):
+    if (
+        BLOCK_N == 16
+        and INV_DOT
+        and not (UNIT and LOWER_EFF and TRANS == 0 and ROWLOAD)
+    ):
+        if TRANS == 0:
+            m_off = ((s + offs)[:, None] + (s + offs)[None, :] * LDA) * 2
+        else:
+            m_off = ((s + offs)[None, :] + (s + offs)[:, None] * LDA) * 2
+        if LOWER_EFF:
+            strict = offs[:, None] > offs[None, :]
+        else:
+            strict = offs[:, None] < offs[None, :]
+        smask = strict & row_mask[:, None] & row_mask[None, :]
+        Mr = tl.load(a_ptr + m_off, mask=smask, other=0.0, eviction_policy="evict_last")
+        Mi = tl.load(
+            a_ptr + m_off + 1, mask=smask, other=0.0, eviction_policy="evict_last"
+        )
+        if CONJ:
+            Mi = -Mi
+        if not UNIT:
+            d_off = ((s + offs) + (s + offs) * LDA) * 2
+            nb_dr = tl.load(a_ptr + d_off, mask=row_mask, other=1.0)
+            nb_di = tl.load(a_ptr + d_off + 1, mask=row_mask, other=0.0)
+            if CONJ:
+                nb_di = -nb_di
+            nb_den = nb_dr * nb_dr + nb_di * nb_di
+            nb_rr = nb_dr / nb_den
+            nb_ri = -nb_di / nb_den
+            nb_tmr = Mr * nb_rr[:, None] - Mi * nb_ri[:, None]
+            Mi = Mr * nb_ri[:, None] + Mi * nb_rr[:, None]
+            Mr = nb_tmr
+        Xr = tl.where(
+            offs[:, None] == offs[None, :],
+            tl.full((BLOCK_N, BLOCK_N), 1.0, tl.float64),
+            tl.full((BLOCK_N, BLOCK_N), 0.0, tl.float64),
+        )
+        Xr = Xr - Mr
+        Xi = -Mi
+        Sr = tl.dot(Mr, Mr, input_precision="ieee") - tl.dot(
+            Mi, Mi, input_precision="ieee"
+        )
+        Si = tl.dot(Mr, Mi, input_precision="ieee") + tl.dot(
+            Mi, Mr, input_precision="ieee"
+        )
+        for k in tl.static_range(0, 3):
+            nb_tr = tl.dot(Xr, Sr, input_precision="ieee") - tl.dot(
+                Xi, Si, input_precision="ieee"
+            )
+            nb_ti = tl.dot(Xr, Si, input_precision="ieee") + tl.dot(
+                Xi, Sr, input_precision="ieee"
+            )
+            Xr = Xr + nb_tr
+            Xi = Xi + nb_ti
+            if k < 2:
+                nb_tr = tl.dot(Sr, Sr, input_precision="ieee") - tl.dot(
+                    Si, Si, input_precision="ieee"
+                )
+                nb_ti = tl.dot(Sr, Si, input_precision="ieee") + tl.dot(
+                    Si, Sr, input_precision="ieee"
+                )
+                Sr = nb_tr
+                Si = nb_ti
+        if not UNIT:
+            nb_tr = Xr * nb_rr[None, :] - Xi * nb_ri[None, :]
+            Xi = Xr * nb_ri[None, :] + Xi * nb_rr[None, :]
+            Xr = nb_tr
+        return Xr, Xi
     if UNIT and LOWER_EFF and TRANS == 0 and ROWLOAD:
         one = tl.full((BLOCK_N,), 1.0, tl.float64)
         zero = tl.full((BLOCK_N,), 0.0, tl.float64)
@@ -2613,6 +5108,7 @@ def ztrsv_fwd_fused_kernel(
     BLOCK_N: tl.constexpr,
     CHUNK: tl.constexpr,
     ROWLOAD: tl.constexpr,
+    INV_DOT: tl.constexpr,
 ):
     pid = tl.program_id(0)
     offs = tl.arange(0, BLOCK_N)
@@ -2635,6 +5131,7 @@ def ztrsv_fwd_fused_kernel(
         LOWER_EFF,
         BLOCK_N,
         ROWLOAD,
+        INV_DOT,
     )
     sxr = tl.load(
         x_ptr + rows * 2, mask=row_mask, other=0.0, eviction_policy="evict_last"
@@ -2700,6 +5197,7 @@ def ztrsv_bwd_fused_kernel(
     BLOCK_N: tl.constexpr,
     CHUNK: tl.constexpr,
     ROWLOAD: tl.constexpr,
+    INV_DOT: tl.constexpr,
 ):
     pid = tl.program_id(0)
     offs = tl.arange(0, BLOCK_N)
@@ -2724,6 +5222,7 @@ def ztrsv_bwd_fused_kernel(
         LOWER_EFF,
         BLOCK_N,
         ROWLOAD,
+        INV_DOT,
     )
     sxr = tl.load(
         x_ptr + rows * 2, mask=row_mask, other=0.0, eviction_policy="evict_last"
@@ -2797,14 +5296,31 @@ def ztrsv(
         A_real = torch.view_as_real(A)
         x_real = torch.view_as_real(x)
         if incx == 1 and lda == n:
+            if (
+                n == 256
+                and trans_flag == 0
+                and unit == 1
+                and uplo == CUBLAS_FILL_MODE_LOWER
+            ):
+                flags = _trsv_flags(A.device)
+                ztrsv_lu256_neu16_kernel[(8,)](
+                    A_real,
+                    x_real,
+                    flags,
+                    BLOCK_N=32,
+                    CHUNK=1,
+                    num_warps=4,
+                )
+                return
             if unit:
                 bb = 16 if n <= 64 else 32
             else:
                 bb = 16 if n <= 512 else 32
             npanel = triton.cdiv(n, bb)
-            flags = torch.full((1,), -1, dtype=torch.int32, device=A.device)
+            flags = _trsv_flags(A.device)
             lower_eff = 1 if (uplo == CUBLAS_FILL_MODE_LOWER) ^ (trans_flag == 1) else 0
             rowload = 1 if n <= _ZTRSV_ROWLOAD_MAX_N else 0
+            inv_dot = 1 if n <= 64 else 0
             chunk, nw = _ztrsv_fused_cfg(forward, n, bb, unit)
             if forward:
                 ztrsv_fwd_fused_kernel[(npanel,)](
@@ -2821,6 +5337,7 @@ def ztrsv(
                     BLOCK_N=bb,
                     CHUNK=chunk,
                     ROWLOAD=rowload,
+                    INV_DOT=inv_dot,
                     num_warps=nw,
                 )
             else:
@@ -2838,6 +5355,7 @@ def ztrsv(
                     BLOCK_N=bb,
                     CHUNK=chunk,
                     ROWLOAD=rowload,
+                    INV_DOT=inv_dot,
                     num_warps=nw,
                 )
             return
