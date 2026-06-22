@@ -11,7 +11,6 @@ from flag_blas import testing  # noqa: F401
 from flag_blas.ops import *  # noqa: F401,F403
 from flag_blas.config import aten_patch_list, resolve_user_setting
 from flag_blas.runtime.register import Register
-from flag_blas.testing.cublas_compat import install_origin_trsv_cublas_compat
 
 device = runtime.device.name
 vendor_name = runtime.device.vendor_name
@@ -19,7 +18,6 @@ aten_lib = torch.library.Library("aten", "IMPL")
 registrar = Register
 current_work_registerar = None
 runtime.replace_customized_ops(globals())
-install_origin_trsv_cublas_compat()
 
 __version__ = "0.1.0"
 
