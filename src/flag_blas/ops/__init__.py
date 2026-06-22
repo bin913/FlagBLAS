@@ -39,10 +39,16 @@ from flag_blas.ops.level2.gemv import (
 )
 from flag_blas.ops.level2.hbmv import chbmv, zhbmv
 from flag_blas.ops.level2.hemv import chemv, zhemv
+from flag_blas.ops.level2.her2 import cher2, zher2
 from flag_blas.ops.level2.hpmv import chpmv, zhpmv
+from flag_blas.ops.level2.hpr import chpr, zhpr
+from flag_blas.ops.level2.hpr2 import chpr2, zhpr2
 from flag_blas.ops.level2.sbmv import dsbmv, ssbmv
 from flag_blas.ops.level2.spmv import dspmv, sspmv
+from flag_blas.ops.level2.spr import dspr, sspr
+from flag_blas.ops.level2.spr2 import dspr2, sspr2
 from flag_blas.ops.level2.symv import csymv, dsymv, ssymv, zsymv
+from flag_blas.ops.level2.syr2 import dsyr2, ssyr2
 from flag_blas.ops.level2.tbmv import ctbmv, dtbmv, stbmv, ztbmv
 from flag_blas.ops.level2.tbsv import stbsv
 from flag_blas.ops.level2.tpmv import ctpmv, dtpmv, stpmv, ztpmv
@@ -125,6 +131,12 @@ __all__ = [
     # spmv
     "sspmv",
     "dspmv",
+    # spr
+    "sspr",
+    "dspr",
+    # spr2
+    "sspr2",
+    "dspr2",
     # hbmv
     "chbmv",
     "zhbmv",
@@ -133,6 +145,11 @@ __all__ = [
     "dsymv",
     "csymv",
     "zsymv",
+    # syr2
+    "ssyr2",
+    "dsyr2",
+    # "csyr2",  # disabled: no direct SciPy/CPU BLAS SYR2 reference
+    # "zsyr2",  # disabled: no direct SciPy/CPU BLAS SYR2 reference
     # trmv
     "strmv",
     "dtrmv",
@@ -151,9 +168,18 @@ __all__ = [
     # hemv
     "chemv",
     "zhemv",
+    # her2
+    "cher2",
+    "zher2",
     # hpmv
     "chpmv",
     "zhpmv",
+    # hpr
+    "chpr",
+    "zhpr",
+    # hpr2
+    "chpr2",
+    "zhpr2",
     "CUBLAS_DIAG_NON_UNIT",
     "CUBLAS_DIAG_UNIT",
     "CUBLAS_FILL_MODE_LOWER",

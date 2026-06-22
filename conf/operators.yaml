@@ -899,6 +899,138 @@ ops:
       - BLAS
     stages:
       - beta: '0.1'
+  - id: sspr
+    description: |
+      Single-precision BLAS Level 2 symmetric packed rank-1 update.
+      Updates a float32 symmetric matrix in BLAS packed storage with
+      AP = alpha * x * x^T + AP.
+    for:
+      - sspr
+    labels:
+      - spr
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: dspr
+    description: |
+      Double-precision BLAS Level 2 symmetric packed rank-1 update.
+      Updates a float64 symmetric matrix in BLAS packed storage with
+      AP = alpha * x * x^T + AP.
+    for:
+      - dspr
+    labels:
+      - spr
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: sspr2
+    description: |
+      Single-precision BLAS Level 2 symmetric packed rank-2 update.
+      Updates a float32 symmetric matrix in BLAS packed storage with
+      AP = alpha * x * y^T + alpha * y * x^T + AP.
+    for:
+      - sspr2
+    labels:
+      - spr2
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: dspr2
+    description: |
+      Double-precision BLAS Level 2 symmetric packed rank-2 update.
+      Updates a float64 symmetric matrix in BLAS packed storage with
+      AP = alpha * x * y^T + alpha * y * x^T + AP.
+    for:
+      - dspr2
+    labels:
+      - spr2
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: ssyr2
+    description: |
+      Single-precision BLAS Level 2 symmetric rank-2 update.
+      Updates the referenced triangle of a float32 symmetric matrix with
+      A = alpha * x * y^T + alpha * y * x^T + A.
+    for:
+      - ssyr2
+    labels:
+      - syr2
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: dsyr2
+    description: |
+      Double-precision BLAS Level 2 symmetric rank-2 update.
+      Updates the referenced triangle of a float64 symmetric matrix with
+      A = alpha * x * y^T + alpha * y * x^T + A.
+    for:
+      - dsyr2
+    labels:
+      - syr2
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  # csyr2/zsyr2 are disabled in the strict workflow: SciPy/CPU BLAS does not
+  # expose direct complex SYR2 references, so they cannot meet CPU correctness.
+  # - id: csyr2
+  #   description: |
+  #     Single-precision complex BLAS Level 2 symmetric rank-2 update.
+  #     Updates the referenced triangle of a complex64 symmetric matrix with
+  #     A = alpha * x * y^T + alpha * y * x^T + A.
+  #   for:
+  #     - csyr2
+  #   labels:
+  #     - syr2
+  #   kind:
+  #     - BLAS
+  #   stages:
+  #     - beta: '0.1'
+  # - id: zsyr2
+  #   description: |
+  #     Double-precision complex BLAS Level 2 symmetric rank-2 update.
+  #     Updates the referenced triangle of a complex128 symmetric matrix with
+  #     A = alpha * x * y^T + alpha * y * x^T + A.
+  #   for:
+  #     - zsyr2
+  #   labels:
+  #     - syr2
+  #   kind:
+  #     - BLAS
+  #   stages:
+  #     - beta: '0.1'
+  - id: cher2
+    description: |
+      Single-precision complex BLAS Level 2 Hermitian rank-2 update.
+      Updates the referenced triangle of a complex64 Hermitian matrix with
+      A = alpha * x * y^H + conj(alpha) * y * x^H + A.
+    for:
+      - cher2
+    labels:
+      - her2
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: zher2
+    description: |
+      Double-precision complex BLAS Level 2 Hermitian rank-2 update.
+      Updates the referenced triangle of a complex128 Hermitian matrix with
+      A = alpha * x * y^H + conj(alpha) * y * x^H + A.
+    for:
+      - zher2
+    labels:
+      - her2
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
   - id: chemv
     description: |
       Single-precision complex BLAS Level 2 Hermitian matrix-vector multiplication.
@@ -1099,6 +1231,58 @@ ops:
       - zhpmv
     labels:
       - hpmv
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: chpr
+    description: |
+      Single-precision complex BLAS Level 2 Hermitian packed rank-1 update.
+      Updates a complex64 Hermitian matrix in packed storage with
+      AP = alpha * x * x^H + AP, where alpha is real.
+    for:
+      - chpr
+    labels:
+      - hpr
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: zhpr
+    description: |
+      Double-precision complex BLAS Level 2 Hermitian packed rank-1 update.
+      Updates a complex128 Hermitian matrix in packed storage with
+      AP = alpha * x * x^H + AP, where alpha is real.
+    for:
+      - zhpr
+    labels:
+      - hpr
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: chpr2
+    description: |
+      Single-precision complex BLAS Level 2 Hermitian packed rank-2 update.
+      Updates a complex64 Hermitian matrix in packed storage with
+      AP = alpha * x * y^H + conj(alpha) * y * x^H + AP.
+    for:
+      - chpr2
+    labels:
+      - hpr2
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: zhpr2
+    description: |
+      Double-precision complex BLAS Level 2 Hermitian packed rank-2 update.
+      Updates a complex128 Hermitian matrix in packed storage with
+      AP = alpha * x * y^H + conj(alpha) * y * x^H + AP.
+    for:
+      - zhpr2
+    labels:
+      - hpr2
     kind:
       - BLAS
     stages:
