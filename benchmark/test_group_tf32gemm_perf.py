@@ -114,8 +114,9 @@ GROUP_GEMM_SHAPES = [
 ]
 
 SEED = 50
-CUDA_R_16F = 2
-CUBLAS_COMPUTE_32F = 0
+CUDA_R_32F = 0
+CUBLAS_COMPUTE_32F_FAST_TF32 = 77
+CUBLAS_COMPUTE_32F = 68
 
 
 def cublas_group_gemm(
@@ -219,7 +220,7 @@ def gems_group_gemm_wrapper(
     beta,
     **kwargs,
 ):
-    return flag_blas.group_hgemm(
+    return flag_blas.group_tf32gemm(
         out_flag,
         a_flag,
         b_flag,
@@ -250,7 +251,6 @@ class GroupGemmBenchmark(Benchmark):
         handle = cp.cuda.device.get_cublas_handle()
         cublas.setPointerMode(handle, cublas.CUBLAS_POINTER_MODE_HOST)
         cublas.setMathMode(handle, 0)
-        torch.backends.cuda.matmul.allow_tf32 = False
 
         scale = 1.0
         random.seed(SEED)
@@ -265,6 +265,7 @@ class GroupGemmBenchmark(Benchmark):
             group_B = (
                 torch.randn(total_K, n, dtype=cur_dtype, device=self.device) * scale
             )
+            group_B_T = torch.empty((e * n, k), dtype=cur_dtype, device=self.device)
             group_C = (
                 torch.randn(total_M, n, dtype=cur_dtype, device=self.device) * scale
             )
@@ -298,11 +299,15 @@ class GroupGemmBenchmark(Benchmark):
             flag_sizes = []
             flag_lds = []
 
+            start_BT_offs = 0
             for entry in offs:
                 mg, ng, kg, start_M_offs, start_K_offs, start_C_offs = entry
 
                 cu_a_ptrs.append(
                     group_B[start_K_offs : start_K_offs + kg, :].data_ptr()
+                )
+                group_B_T[start_BT_offs : start_BT_offs + ng, :].copy_(
+                    group_B[start_K_offs : start_K_offs + kg, :].T
                 )
                 cu_b_ptrs.append(
                     group_A[start_M_offs : start_M_offs + mg, :].data_ptr()
@@ -321,7 +326,7 @@ class GroupGemmBenchmark(Benchmark):
                     group_A[start_M_offs : start_M_offs + mg, :].data_ptr()
                 )
                 flag_b_ptrs.append(
-                    group_B[start_K_offs : start_K_offs + kg, :].data_ptr()
+                    group_B_T[start_BT_offs : start_BT_offs + ng, :].data_ptr()
                 )
                 flag_c_ptrs.append(
                     group_C[start_C_offs : start_C_offs + mg, :].data_ptr()
@@ -330,7 +335,8 @@ class GroupGemmBenchmark(Benchmark):
                     out_flag[start_C_offs : start_C_offs + mg, :].data_ptr()
                 )
                 flag_sizes += [mg, ng, kg]
-                flag_lds += [kg, ng, ng]
+                flag_lds += [kg, kg, ng]
+                start_BT_offs += ng
 
             yield group_A, group_B, group_C, offs, {
                 "transa": torch.tensor([CUBLAS_OP_N] * e, dtype=torch.int32),
@@ -353,8 +359,8 @@ class GroupGemmBenchmark(Benchmark):
                 "alpha_arr": torch.full((e,), self.alpha, dtype=torch.float32),
                 "beta_arr": torch.full((e,), self.beta, dtype=torch.float32),
                 "batch": torch.tensor([1] * e, dtype=torch.int32),
-                "cu_dtype": CUDA_R_16F,
-                "compute_type": CUBLAS_COMPUTE_32F,
+                "cu_dtype": CUDA_R_32F,
+                "compute_type": CUBLAS_COMPUTE_32F_FAST_TF32,
                 "out_cublas": out_cublas,
                 "a_flag": torch.tensor(
                     flag_a_ptrs, dtype=torch.int64, device=self.device
@@ -401,7 +407,7 @@ class GroupGemmBenchmark(Benchmark):
         )
         return io_amount * 1e-9 / (latency * 1e-3)
 
-    def validate_results(self, torch_result, gems_result, reduce_dim, tolerance=1e-2):
+    def validate_results(self, torch_result, gems_result, reduce_dim, tolerance=1e-3):
         torch_cpu = torch_result.cpu()
         gems_cpu = gems_result.cpu()
 
@@ -428,16 +434,17 @@ class GroupGemmBenchmark(Benchmark):
 
 
 @pytest.mark.group_gemm
-def test_perf_group_gemm_fp16():
+def test_perf_group_gemm_tf32():
     bench = GroupGemmBenchmark(
         op_name="group_gemm",
         torch_op=cublas_group_gemm,
         gems_op=gems_group_gemm_wrapper,
-        dtypes=[torch.float16],
+        dtypes=[torch.float32],
     )
     for cur_dtype in bench.dtypes:
         for A, B, C, offs, kwargs in bench.get_input_iter(cur_dtype):
             torch_result = cublas_group_gemm(A, B, C.clone(), offs, **kwargs)
             gems_result = gems_group_gemm_wrapper(A, B, C.clone(), offs, **kwargs)
-            bench.validate_results(torch_result, gems_result, 1, tolerance=1e-2)
+            k = kwargs.get("K", 0)
+            bench.validate_results(torch_result, gems_result, k, tolerance=1e-3)
     bench.run()

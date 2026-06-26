@@ -44,7 +44,7 @@ from flag_blas.ops.level2.tbsv import stbsv
 from flag_blas.ops.level2.tpmv import ctpmv, dtpmv, stpmv, ztpmv
 from flag_blas.ops.level2.trmv import ctrmv, dtrmv, strmv, ztrmv
 from flag_blas.ops.level3.gemm import bfgemm, fp8gemm, hgemm, sgemm
-from flag_blas.ops.level3.group_gemm import group_hgemm, group_bfgemm, group_mm
+from flag_blas.ops.level3.group_gemm import group_hgemm, group_bfgemm, group_tf32gemm, group_mm
 
 __all__ = [
     # amax
@@ -153,6 +153,7 @@ __all__ = [
     "group_mm",
     "group_hgemm",
     "group_bfgemm",
+    "group_tf32gemm",
     # abs
     "sabs",
     "dabs",

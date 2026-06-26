@@ -12,6 +12,7 @@ import flag_blas
 from flag_blas.ops import CUBLAS_OP_N
 
 from benchmark.performance_utils import Benchmark
+from flag_blas.utils import shape_utils
 
 
 def load_cublas():
@@ -34,9 +35,9 @@ def _cublasGemmGroupedBatchedEx(
     handle,
     transa,
     transb,
-    cu_m_arr,
-    cu_n_arr,
-    cu_k_arr,
+    m_arr,
+    n_arr,
+    k_arr,
     alpha,
     a_array,
     a_type,
@@ -56,9 +57,9 @@ def _cublasGemmGroupedBatchedEx(
         ctypes.c_void_p(handle),
         ctypes.c_void_p(transa.data_ptr()),
         ctypes.c_void_p(transb.data_ptr()),
-        ctypes.c_void_p(cu_m_arr.data_ptr()),
-        ctypes.c_void_p(cu_n_arr.data_ptr()),
-        ctypes.c_void_p(cu_k_arr.data_ptr()),
+        ctypes.c_void_p(m_arr.data_ptr()),
+        ctypes.c_void_p(n_arr.data_ptr()),
+        ctypes.c_void_p(k_arr.data_ptr()),
         ctypes.c_void_p(alpha),
         ctypes.c_void_p(a_array),
         ctypes.c_int(a_type),
@@ -118,6 +119,10 @@ CUBLAS_COMPUTE_32F = 0
 
 
 def cublas_group_gemm(
+    group_A,
+    group_B,
+    group_C,
+    offs_table,
     transa,
     transb,
     cu_m_arr,
@@ -177,6 +182,10 @@ def cublas_group_gemm(
 
 
 def gems_group_gemm_wrapper(
+    group_A,
+    group_B,
+    group_C,
+    offs_table,
     transa,
     transb,
     cu_m_arr,
@@ -323,8 +332,7 @@ class GroupGemmBenchmark(Benchmark):
                 flag_sizes += [mg, ng, kg]
                 flag_lds += [kg, ng, ng]
 
-            self._gbps_info = (2, total_M, n, k, e)
-            yield {
+            yield group_A, group_B, group_C, offs, {
                 "transa": torch.tensor([CUBLAS_OP_N] * e, dtype=torch.int32),
                 "transb": torch.tensor([CUBLAS_OP_N] * e, dtype=torch.int32),
                 "cu_m_arr": torch.tensor(cu_m_list, dtype=torch.int32),
@@ -377,17 +385,19 @@ class GroupGemmBenchmark(Benchmark):
             }
 
     def get_tflops(self, op, *args, **kwargs):
-        m = kwargs.get("M", 0)
-        n = kwargs.get("N", 0)
-        k = kwargs.get("K", 0)
-        return 2 * m * n * k
+        offs_table = args[3]
+        total_flops = 0
+        for entry in offs_table:
+            m_g, n_g, k_g = entry[0], entry[1], entry[2]
+            total_flops += 2 * m_g * n_g * k_g
+        return total_flops
 
-    def get_gbps(self, args, latency=None):
-        element_size, M, N, K, group_size = self._gbps_info
+    def get_gbps(self, args, latency):
+        group_A, group_B, group_C = args[0], args[1], args[2]
         io_amount = (
-            M * K * element_size
-            + group_size * K * N * element_size
-            + 2 * M * N * element_size
+            shape_utils.size_in_bytes(group_A)
+            + shape_utils.size_in_bytes(group_B)
+            + 2 * shape_utils.size_in_bytes(group_C)
         )
         return io_amount * 1e-9 / (latency * 1e-3)
 
@@ -426,8 +436,8 @@ def test_perf_group_gemm_bf16():
         dtypes=[torch.bfloat16],
     )
     for cur_dtype in bench.dtypes:
-        for kwargs in bench.get_input_iter(cur_dtype):
-            torch_result = cublas_group_gemm(**kwargs)
-            gems_result = gems_group_gemm_wrapper(**kwargs)
+        for A, B, C, offs, kwargs in bench.get_input_iter(cur_dtype):
+            torch_result = cublas_group_gemm(A, B, C.clone(), offs, **kwargs)
+            gems_result = gems_group_gemm_wrapper(A, B, C.clone(), offs, **kwargs)
             bench.validate_results(torch_result, gems_result, 1, tolerance=1e-2)
     bench.run()

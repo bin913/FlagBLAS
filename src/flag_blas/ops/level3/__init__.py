@@ -1,5 +1,5 @@
 from .gemm import sgemm, hgemm, bfgemm, fp8gemm
-from .group_gemm import group_mm, group_hgemm, group_bfgemm
+from .group_gemm import group_mm, group_hgemm, group_bfgemm, group_tf32gemm
 
 __all__ = [
     "sgemm",
@@ -9,4 +9,5 @@ __all__ = [
     "group_mm",
     "group_hgemm",
     "group_bfgemm",
+    "group_tf32gemm",
 ]
