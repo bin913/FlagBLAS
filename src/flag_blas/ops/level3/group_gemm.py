@@ -105,14 +105,17 @@ def get_autotune_config(pre_hook=None):
         ),
     ]
 
+
 def get_autotune_config_tf32(pre_hook=None):
     return [
-        # triton.Config({"BLOCK_M": 128, "BLOCK_N": 256, "BLOCK_K": 32, "GROUP_M": 8}, num_stages=2, num_warps=4, pre_hook=pre_hook),
-        triton.Config({"BLOCK_M": 128, "BLOCK_N": 64, "BLOCK_K": 64, "GROUP_M": 8}, num_stages=3, num_warps=4, pre_hook=pre_hook),
-        # triton.Config({"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 64, "GROUP_M": 8}, num_stages=3, num_warps=4, pre_hook=pre_hook),
-        # triton.Config({"BLOCK_M": 128, "BLOCK_N": 64, "BLOCK_K": 64, "GROUP_M": 8}, num_stages=3, num_warps=8, pre_hook=pre_hook),
-        # triton.Config({"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 64, "GROUP_M": 8}, num_stages=3, num_warps=8, pre_hook=pre_hook),
+        triton.Config(
+            {"BLOCK_M": 128, "BLOCK_N": 64, "BLOCK_K": 64, "GROUP_M": 8},
+            num_stages=3,
+            num_warps=4,
+            pre_hook=pre_hook,
+        ),
     ]
+
 
 @libentry()
 @libtuner(configs=get_autotune_config(), key=["M", "N", "K"])
@@ -732,7 +735,13 @@ def grouped_tf32gemm_tma_kernel(
                 for kk in range(0, tl.cdiv(gk, BLOCK_K)):
                     a = a_desc.load([offs_am, kk * BLOCK_K])
                     b = b_desc.load([offs_bn, kk * BLOCK_K])
-                    accumulator = tl.dot(a, b.T, acc=accumulator, input_precision="tf32", out_dtype=tl.float32)
+                    accumulator = tl.dot(
+                        a,
+                        b.T,
+                        acc=accumulator,
+                        input_precision="tf32",
+                        out_dtype=tl.float32,
+                    )
 
                 offs_cm = tile_m_idx * BLOCK_M
                 offs_cn = tile_n_idx * BLOCK_N
@@ -814,20 +823,21 @@ def grouped_tf32gemm_kernel(
                 )
                 b_ptrs = tl.make_block_ptr(
                     base=b_ptr,
-                    shape=(gk, gn),
+                    shape=(gn, gk),
                     strides=(ldb, 1),
-                    offsets=(0, offs_bn),
-                    block_shape=(BLOCK_K, BLOCK_N),
+                    offsets=(offs_bn, 0),
+                    block_shape=(BLOCK_N, BLOCK_K),
                     order=(1, 0),
                 )
-
                 accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
                 for kk in range(0, tl.cdiv(gk, BLOCK_K)):
                     a = tl.load(a_ptrs, boundary_check=(0, 1))
                     b = tl.load(b_ptrs, boundary_check=(0, 1))
-                    accumulator = tl.dot(a, b, acc=accumulator, input_precision="tf32")
+                    accumulator = tl.dot(
+                        a, b.T, acc=accumulator, input_precision="tf32"
+                    )
                     a_ptrs = tl.advance(a_ptrs, (0, BLOCK_K))
-                    b_ptrs = tl.advance(b_ptrs, (BLOCK_K, 0))
+                    b_ptrs = tl.advance(b_ptrs, (0, BLOCK_K))
 
                 offs_cm = tile_m_idx * BLOCK_M
                 offs_cn = tile_n_idx * BLOCK_N

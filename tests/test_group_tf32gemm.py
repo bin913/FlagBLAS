@@ -10,8 +10,8 @@ from cupy_backends.cuda.libs import cublas
 import flag_blas
 from flag_blas.ops import CUBLAS_OP_N
 
-from .conftest import TO_CPU
 from . import accuracy_utils as utils
+from .conftest import TO_CPU
 
 
 def load_cublas():
@@ -95,7 +95,23 @@ def _build_offs_table(k, e, n, m_list):
     return offs
 
 
-def _build_triton_arrays(group_A, group_B, group_C, offs_table):
+def _build_transposed_group_b(group_B, offs_table):
+    total_N = sum(entry[1] for entry in offs_table)
+    K = max((entry[2] for entry in offs_table), default=0)
+    group_B_T = torch.empty((total_N, K), device=group_B.device, dtype=group_B.dtype)
+
+    start_BT = 0
+    for entry in offs_table:
+        _, ng, kg, _, start_K, _ = entry
+        group_B_T[start_BT : start_BT + ng, :kg].copy_(
+            group_B[start_K : start_K + kg, :ng].T
+        )
+        start_BT += ng
+
+    return group_B_T
+
+
+def _build_triton_arrays(group_A, group_B_T, group_C, offs_table):
     group_size = len(offs_table)
     M, N = group_C.shape
     K = group_A.shape[1]
@@ -108,18 +124,20 @@ def _build_triton_arrays(group_A, group_B, group_C, offs_table):
     group_sizes = []
     group_lds = []
 
+    start_BT = 0
     for i in range(group_size):
         mg, ng, kg = offs_table[i][0], offs_table[i][1], offs_table[i][2]
         A_g = group_A[offs_table[i][3]]
-        B_g = group_B[offs_table[i][4]]
+        B_g = group_B_T[start_BT]
         C_g = group_C[offs_table[i][5]]
         out_g = group_out[offs_table[i][5]]
         group_sizes += [mg, ng, kg]
-        group_lds += [kg, ng, ng]
+        group_lds += [kg, kg, ng]
         A_addrs.append(A_g.data_ptr())
         B_addrs.append(B_g.data_ptr())
         C_addrs.append(C_g.data_ptr())
         out_addrs.append(out_g.data_ptr())
+        start_BT += ng
 
     d_a_ptrs = torch.tensor(A_addrs, device=group_A.device)
     d_b_ptrs = torch.tensor(B_addrs, device=group_A.device)
@@ -234,15 +252,9 @@ def test_accuracy_group_gemm(k, e, n):
     total_M = sum(m_list)
     total_K = e * k
 
-    group_A = (
-        torch.randn(total_M, k, dtype=dtype, device=device) * scale
-    ).contiguous()
-    group_B = (
-        torch.randn(total_K, n, dtype=dtype, device=device) * scale
-    ).contiguous()
-    group_C = (
-        torch.randn(total_M, n, dtype=dtype, device=device) * scale
-    ).contiguous()
+    group_A = (torch.randn(total_M, k, dtype=dtype, device=device) * scale).contiguous()
+    group_B = (torch.randn(total_K, n, dtype=dtype, device=device) * scale).contiguous()
+    group_C = (torch.randn(total_M, n, dtype=dtype, device=device) * scale).contiguous()
 
     offs_table = _build_offs_table(k, e, n, m_list)
 
@@ -267,13 +279,14 @@ def test_accuracy_group_gemm(k, e, n):
             group_A, group_B, group_C, offs_table, alpha, beta
         )
 
+    group_B_T = _build_transposed_group_b(group_B, offs_table)
     out = flag_blas.group_tf32gemm(
-        *_build_triton_arrays(group_A, group_B, group_C, offs_table),
+        *_build_triton_arrays(group_A, group_B_T, group_C, offs_table),
         alpha=alpha,
         beta=beta,
     )
 
-    utils.blas_assert_close(out, ref, dtype, reduce_dim=k, atol=5e-2)
+    utils.blas_assert_close(out, ref, dtype, reduce_dim=k, atol=1e-3)
 
 
 @pytest.mark.group_gemm
@@ -286,20 +299,23 @@ def test_group_gemm_alpha_zero():
     C_orig = C.clone()
     m_list = [m] * e
     offs_table = _build_offs_table(k, e, n, m_list)
+    B_T = _build_transposed_group_b(B, offs_table)
 
     out = flag_blas.group_tf32gemm(
-        *_build_triton_arrays(A, B, C, offs_table), alpha=0.0, beta=2.0
+        *_build_triton_arrays(A, B_T, C, offs_table), alpha=0.0, beta=2.0
     )
 
     if TO_CPU:
-        utils.blas_assert_close(out, (C_orig * 2.0).to("cpu"), dtype, reduce_dim=k, atol=5e-2)
+        utils.blas_assert_close(
+            out, (C_orig * 2.0).to("cpu"), dtype, reduce_dim=k, atol=1e-3
+        )
     else:
-        utils.blas_assert_close(out, C_orig * 2.0, dtype, reduce_dim=k, atol=5e-2)
+        utils.blas_assert_close(out, C_orig * 2.0, dtype, reduce_dim=k, atol=1e-3)
 
 
 @pytest.mark.group_gemm
 def test_group_gemm_beta_zero():
-    m, k, e, n = 8, 32, 3, 64
+    m, k, e, n = 8, 64, 3, 64
     dtype, device = torch.float32, flag_blas.device
     A = torch.randn(e * m, k, dtype=dtype, device=device).contiguous()
     B = torch.randn(e * k, n, dtype=dtype, device=device).contiguous()
@@ -308,14 +324,15 @@ def test_group_gemm_beta_zero():
     offs_table = _build_offs_table(k, e, n, m_list)
 
     ref = cublas_group_gemm_reference(A, B, C_zeros, offs_table, 1.0, 0.0)
+    B_T = _build_transposed_group_b(B, offs_table)
     out = flag_blas.group_tf32gemm(
-        *_build_triton_arrays(A, B, C_zeros, offs_table), alpha=1.0, beta=0.0
+        *_build_triton_arrays(A, B_T, C_zeros, offs_table), alpha=1.0, beta=0.0
     )
 
     if TO_CPU:
-        utils.blas_assert_close(out, ref.to("cpu"), dtype, reduce_dim=k, atol=5e-2)
+        utils.blas_assert_close(out, ref.to("cpu"), dtype, reduce_dim=k, atol=1e-3)
     else:
-        utils.blas_assert_close(out, ref, dtype, reduce_dim=k, atol=5e-2)
+        utils.blas_assert_close(out, ref, dtype, reduce_dim=k, atol=1e-3)
 
 
 @pytest.mark.group_gemm
@@ -333,11 +350,12 @@ def test_group_gemm_alpha_beta(alpha, beta):
     offs_table = _build_offs_table(k, e, n, m_list)
 
     ref = cublas_group_gemm_reference(A, B, C, offs_table, alpha, beta)
+    B_T = _build_transposed_group_b(B, offs_table)
     out = flag_blas.group_tf32gemm(
-        *_build_triton_arrays(A, B, C, offs_table), alpha=alpha, beta=beta
+        *_build_triton_arrays(A, B_T, C, offs_table), alpha=alpha, beta=beta
     )
 
     if TO_CPU:
-        utils.blas_assert_close(out, ref.to("cpu"), dtype, reduce_dim=k, atol=5e-2)
+        utils.blas_assert_close(out, ref.to("cpu"), dtype, reduce_dim=k, atol=1e-3)
     else:
-        utils.blas_assert_close(out, ref, dtype, reduce_dim=k, atol=5e-2)
+        utils.blas_assert_close(out, ref, dtype, reduce_dim=k, atol=1e-3)
