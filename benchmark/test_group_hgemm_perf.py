@@ -9,9 +9,8 @@ import torch
 from cupy_backends.cuda.libs import cublas
 
 import flag_blas
-from flag_blas.ops import CUBLAS_OP_N
-
 from benchmark.performance_utils import Benchmark
+from flag_blas.ops import CUBLAS_OP_N
 from flag_blas.utils import shape_utils
 
 
@@ -79,39 +78,6 @@ def _cublasGemmGroupedBatchedEx(
 
 cublas.cublasGemmGroupedBatchedEx = _cublasGemmGroupedBatchedEx
 
-
-GROUP_GEMM_SHAPES = [
-    (2048, 128, 1536),
-    (768, 128, 2048),
-    (2048, 128, 768),
-    (384, 128, 2048),
-    (2048, 128, 384),
-    (192, 128, 2048),
-    (2048, 128, 192),
-    (96, 128, 2048),
-    (2048, 64, 1536),
-    (768, 64, 2048),
-    (2048, 32, 1536),
-    (768, 32, 2048),
-    (2048, 16, 1536),
-    (768, 16, 2048),
-    (4096, 128, 384),
-    (192, 128, 4096),
-    (4096, 16, 3072),
-    (1536, 16, 4096),
-    (7168, 16, 4096),
-    (2048, 16, 7168),
-    (7168, 17, 4096),
-    (2048, 17, 7168),
-    (2048, 512, 256),
-    (128, 512, 2048),
-    (2048, 512, 128),
-    (64, 512, 2048),
-    (2048, 128, 1024),
-    (512, 128, 2048),
-    (2048, 64, 1024),
-    (512, 64, 2048),
-]
 
 SEED = 50
 CUDA_R_16F = 2
@@ -237,7 +203,6 @@ def gems_group_gemm_wrapper(
 
 
 class GroupGemmBenchmark(Benchmark):
-
     def __init__(self, *args, alpha=1.0, beta=0.0, **kwargs):
         super().__init__(*args, **kwargs)
         self.alpha = alpha
@@ -254,7 +219,7 @@ class GroupGemmBenchmark(Benchmark):
 
         scale = 1.0
         random.seed(SEED)
-        for k, e, n in GROUP_GEMM_SHAPES:
+        for k, e, n in self.shapes:
             m_list = [random.randint(1, 4096) for _ in range(e)]
             total_M = sum(m_list)
             total_K = e * k
@@ -435,7 +400,8 @@ def test_perf_group_gemm_fp16():
         gems_op=gems_group_gemm_wrapper,
         dtypes=[torch.float16],
     )
-    for cur_dtype in bench.dtypes:
+    bench.init_user_config()
+    for cur_dtype in bench.to_bench_dtypes:
         for A, B, C, offs, kwargs in bench.get_input_iter(cur_dtype):
             torch_result = cublas_group_gemm(A, B, C.clone(), offs, **kwargs)
             gems_result = gems_group_gemm_wrapper(A, B, C.clone(), offs, **kwargs)
