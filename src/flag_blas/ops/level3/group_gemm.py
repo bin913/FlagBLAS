@@ -114,6 +114,36 @@ def get_autotune_config_tf32(pre_hook=None):
             num_warps=4,
             pre_hook=pre_hook,
         ),
+        triton.Config(
+            {"BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 64, "GROUP_M": 8},
+            num_stages=3,
+            num_warps=4,
+            pre_hook=pre_hook,
+        ),
+        triton.Config(
+            {"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 64, "GROUP_M": 8},
+            num_stages=3,
+            num_warps=4,
+            pre_hook=pre_hook,
+        ),
+        triton.Config(
+            {"BLOCK_M": 64, "BLOCK_N": 256, "BLOCK_K": 64, "GROUP_M": 8},
+            num_stages=3,
+            num_warps=8,
+            pre_hook=pre_hook,
+        ),
+        triton.Config(
+            {"BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 64, "GROUP_M": 8},
+            num_stages=2,
+            num_warps=4,
+            pre_hook=pre_hook,
+        ),
+        triton.Config(
+            {"BLOCK_M": 128, "BLOCK_N": 256, "BLOCK_K": 32, "GROUP_M": 8},
+            num_stages=2,
+            num_warps=8,
+            pre_hook=pre_hook,
+        ),
     ]
 
 
