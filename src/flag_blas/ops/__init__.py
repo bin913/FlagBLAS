@@ -37,6 +37,7 @@ from flag_blas.ops.level2.gemv import (
     sgemv,
     zgemv,
 )
+from flag_blas.ops.level2.ger import cgerc, cgeru, dger, sger, zgerc, zgeru
 from flag_blas.ops.level2.hbmv import chbmv, zhbmv
 from flag_blas.ops.level2.hemv import chemv, zhemv
 from flag_blas.ops.level2.hpmv import chpmv, zhpmv
@@ -114,6 +115,13 @@ __all__ = [
     "hgemv",
     "bfgemv",
     "fp8_gemv",
+    # ger
+    "sger",
+    "dger",
+    "cgeru",
+    "cgerc",
+    "zgeru",
+    "zgerc",
     # gbmv
     "sgbmv",
     "dgbmv",

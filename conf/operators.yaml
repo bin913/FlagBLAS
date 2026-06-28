@@ -731,6 +731,78 @@ ops:
       - BLAS
     stages:
       - beta: '0.1'
+  - id: sger
+    description: |
+      Single-precision BLAS Level 2 general rank-1 update.
+      Updates A in place with A = alpha * x * y^T + A for a float32 dense matrix A.
+    for:
+      - sger
+    labels:
+      - ger
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: dger
+    description: |
+      Double-precision BLAS Level 2 general rank-1 update.
+      Updates A in place with A = alpha * x * y^T + A for a float64 dense matrix A.
+    for:
+      - dger
+    labels:
+      - ger
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: cgeru
+    description: |
+      Single-precision complex BLAS Level 2 unconjugated general rank-1 update.
+      Updates A in place with A = alpha * x * y^T + A for a complex64 dense matrix A.
+    for:
+      - cgeru
+    labels:
+      - ger
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: cgerc
+    description: |
+      Single-precision complex BLAS Level 2 conjugated general rank-1 update.
+      Updates A in place with A = alpha * x * conj(y)^T + A for a complex64 dense matrix A.
+    for:
+      - cgerc
+    labels:
+      - ger
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: zgeru
+    description: |
+      Double-precision complex BLAS Level 2 unconjugated general rank-1 update.
+      Updates A in place with A = alpha * x * y^T + A for a complex128 dense matrix A.
+    for:
+      - zgeru
+    labels:
+      - ger
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: zgerc
+    description: |
+      Double-precision complex BLAS Level 2 conjugated general rank-1 update.
+      Updates A in place with A = alpha * x * conj(y)^T + A for a complex128 dense matrix A.
+    for:
+      - zgerc
+    labels:
+      - ger
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
   - id: dgemv
     description: |
       Double-precision BLAS Level 2 general matrix-vector multiplication.

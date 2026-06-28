@@ -1,0 +1,178 @@
+import cupy as cp
+import numpy as np
+import pytest
+import torch
+from cupy_backends.cuda.libs import cublas
+from scipy.linalg import blas as cpu_blas
+
+import flag_blas
+
+from .accuracy_utils import blas_assert_close, to_cpu_blas_tensor, to_reference
+from .conftest import TO_CPU
+
+
+GER_OPS = {
+    "sger": (torch.float32, cublas.sger, np.float32, 1.5),
+    "dger": (torch.float64, cublas.dger, np.float64, 1.5),
+    "cgeru": (torch.complex64, cublas.cgeru, np.complex64, 1.5 - 0.5j),
+    "cgerc": (torch.complex64, cublas.cgerc, np.complex64, 1.5 - 0.5j),
+    "zgeru": (torch.complex128, cublas.zgeru, np.complex128, 1.5 - 0.5j),
+    "zgerc": (torch.complex128, cublas.zgerc, np.complex128, 1.5 - 0.5j),
+}
+
+GER_PERF_SHAPES = [
+    (64, 64),
+    (256, 256),
+    (1024, 1024),
+    (4096, 4096),
+    (1024, 4096),
+    (4096, 1024),
+    (127, 255),
+    (1023, 4095),
+    (4095, 1023),
+]
+
+GER_EDGE_SHAPES = [
+    (128, 256),
+    (257, 129),
+    (1, 128),
+    (128, 1),
+    (1, 1),
+    (0, 64),
+    (64, 0),
+]
+
+GER_SHAPES = GER_PERF_SHAPES + GER_EDGE_SHAPES
+
+STRIDE_SHAPES = [(64, 128), (127, 65), (1, 256), (256, 1)]
+STRIDES = [(1, 1), (2, 1), (1, 2), (2, 3)]
+
+
+def _skip_if_unsupported(dtype):
+    if dtype in (torch.float64, torch.complex128):
+        if not flag_blas.runtime.device.support_fp64:
+            pytest.skip("Device does not support float64")
+
+
+def cublas_ger_reference(op_name, m, n, alpha, x, incx, y, incy, A, lda):
+    if m == 0 or n == 0:
+        return
+
+    _, func, np_dtype, _ = GER_OPS[op_name]
+    handle = cp.cuda.device.get_cublas_handle()
+    cublas.setPointerMode(handle, cublas.CUBLAS_POINTER_MODE_HOST)
+    alpha_np = np.asarray(alpha, dtype=np_dtype)
+    func(
+        handle,
+        m,
+        n,
+        alpha_np.ctypes.data,
+        x.data_ptr(),
+        incx,
+        y.data_ptr(),
+        incy,
+        A.data_ptr(),
+        lda,
+    )
+
+
+def cpu_ger_reference(op_name, m, n, alpha, x, incx, y, incy, A, lda):
+    if m == 0 or n == 0:
+        return to_cpu_blas_tensor(A)
+
+    ref_A = to_cpu_blas_tensor(A)
+    ref_x = to_cpu_blas_tensor(x)[::incx][:m].contiguous()
+    ref_y = to_cpu_blas_tensor(y)[::incy][:n].contiguous()
+    func = getattr(cpu_blas, op_name)
+    out = func(
+        alpha,
+        ref_x.numpy(),
+        ref_y.numpy(),
+        incx=1,
+        incy=1,
+        a=ref_A.numpy(),
+        overwrite_a=1,
+    )
+    return torch.from_numpy(out)
+
+
+def ger_reference(op_name, m, n, alpha, x, incx, y, incy, A, lda):
+    if TO_CPU:
+        return cpu_ger_reference(op_name, m, n, alpha, x, incx, y, incy, A, lda)
+
+    ref_A = A.clone()
+    cublas_ger_reference(op_name, m, n, alpha, x, incx, y, incy, ref_A, lda)
+    return ref_A
+
+
+def run_ger_case(op_name, m, n, alpha, incx=1, incy=1):
+    dtype = GER_OPS[op_name][0]
+    _skip_if_unsupported(dtype)
+
+    A_col = torch.randn(n, m, dtype=dtype, device=flag_blas.device).t()
+    A_row = A_col.contiguous()
+    x = torch.randn(max(1, m) * incx, dtype=dtype, device=flag_blas.device)
+    y = torch.randn(max(1, n) * incy, dtype=dtype, device=flag_blas.device)
+
+    ref_A = ger_reference(op_name, m, n, alpha, x, incx, y, incy, A_col, m)
+    getattr(flag_blas.ops, op_name)(m, n, alpha, x, incx, y, incy, A_row, n)
+
+    blas_assert_close(A_row, ref_A.contiguous(), dtype)
+
+
+@pytest.mark.ger
+@pytest.mark.parametrize("op_name", GER_OPS)
+def test_ger_exports(op_name):
+    assert hasattr(flag_blas.ops, op_name)
+    assert hasattr(flag_blas, op_name)
+    assert getattr(flag_blas, op_name) is getattr(flag_blas.ops, op_name)
+
+
+@pytest.mark.ger
+@pytest.mark.parametrize("op_name", GER_OPS)
+@pytest.mark.parametrize("m,n", GER_SHAPES)
+def test_accuracy_ger(op_name, m, n):
+    alpha = GER_OPS[op_name][3]
+    run_ger_case(op_name, m, n, alpha=alpha)
+
+
+@pytest.mark.ger
+@pytest.mark.parametrize("op_name", GER_OPS)
+@pytest.mark.parametrize("m,n", STRIDE_SHAPES)
+@pytest.mark.parametrize("incx,incy", STRIDES)
+def test_accuracy_ger_stride(op_name, m, n, incx, incy):
+    alpha = GER_OPS[op_name][3]
+    run_ger_case(op_name, m, n, alpha=alpha, incx=incx, incy=incy)
+
+
+@pytest.mark.ger
+@pytest.mark.parametrize("op_name", GER_OPS)
+@pytest.mark.parametrize("m,n", [(64, 64), (127, 65), (1, 128), (128, 1)])
+def test_accuracy_ger_alpha_zero(op_name, m, n):
+    run_ger_case(op_name, m, n, alpha=0.0)
+
+
+@pytest.mark.ger
+@pytest.mark.parametrize(
+    "op_u,op_c,dtype,alpha",
+    [
+        ("cgeru", "cgerc", torch.complex64, 0.75 + 0.25j),
+        ("zgeru", "zgerc", torch.complex128, 0.75 + 0.25j),
+    ],
+)
+def test_accuracy_ger_conjugate_difference(op_u, op_c, dtype, alpha):
+    _skip_if_unsupported(dtype)
+    m, n = 5, 7
+    x = torch.randn(m, dtype=dtype, device=flag_blas.device)
+    y = torch.randn(n, dtype=dtype, device=flag_blas.device)
+    A_u = torch.randn(m, n, dtype=dtype, device=flag_blas.device)
+    A_c = A_u.clone()
+    ref_u = A_u + alpha * x[:, None] * y[None, :]
+    ref_c = A_c + alpha * x[:, None] * y.conj()[None, :]
+
+    getattr(flag_blas.ops, op_u)(m, n, alpha, x, 1, y, 1, A_u, n)
+    getattr(flag_blas.ops, op_c)(m, n, alpha, x, 1, y, 1, A_c, n)
+
+    blas_assert_close(A_u, to_reference(ref_u), dtype)
+    blas_assert_close(A_c, to_reference(ref_c), dtype)
+    assert not torch.equal(A_u, A_c)
