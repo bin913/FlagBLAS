@@ -13,6 +13,7 @@ BLOCK_SIZE = 2048
 MAX_NUM_BLOCKS = 1024
 MAX_SMALL_BLOCK = 16384
 MAX_SMALL_CHUNKED_BLOCK = 32768
+DAMIN_LARGE_NUM_BLOCKS = 8192
 CAMIN_LARGE_NUM_BLOCKS = 2048
 CAMIN_XLARGE_NUM_BLOCKS = 4096
 CAMIN_LARGE_BLOCK_SIZE = 4096
@@ -690,6 +691,8 @@ def camin_kernel1_large_vectorized(
 @libentry()
 @triton.autotune(
     configs=[
+        triton.Config({}, num_warps=1, num_stages=1),
+        triton.Config({}, num_warps=1, num_stages=2),
         triton.Config({}, num_warps=2, num_stages=3),
         triton.Config({}, num_warps=4, num_stages=3),
         triton.Config({}, num_warps=8, num_stages=3),
@@ -735,6 +738,36 @@ def amin_kernel_small_complex(x_ptr, out_ptr, n, INCX, BLOCK_SIZE: tl.constexpr)
     imag = tl.load(x_ptr + base + 1, mask=mask, other=0.0)
     abs_x = tl.abs(real) + tl.abs(imag)
     abs_x = tl.where(mask, abs_x, float("inf"))
+
+    min_val, final_idx = tl.min(
+        abs_x,
+        axis=0,
+        return_indices=True,
+        return_indices_tie_break_left=True,
+    )
+
+    tl.store(out_ptr, final_idx + 1)
+
+
+@libentry()
+@triton.autotune(
+    configs=[
+        triton.Config({}, num_warps=4, num_stages=2),
+        triton.Config({}, num_warps=4, num_stages=3),
+        triton.Config({}, num_warps=8, num_stages=1),
+        triton.Config({}, num_warps=8, num_stages=2),
+        triton.Config({}, num_warps=8, num_stages=3),
+    ],
+    key=["BLOCK_SIZE"],
+)
+@triton.jit
+def amin_kernel_small_complex_nomask(x_ptr, out_ptr, BLOCK_SIZE: tl.constexpr):
+    idx = tl.arange(0, BLOCK_SIZE).to(tl.int32)
+
+    base = idx * 2
+    real = tl.load(x_ptr + base)
+    imag = tl.load(x_ptr + base + 1)
+    abs_x = tl.abs(real) + tl.abs(imag)
 
     min_val, final_idx = tl.min(
         abs_x,
@@ -1084,21 +1117,22 @@ def _amin_impl(
         return
 
     with torch_device_fn.device(x.device):
-        if x.dtype == torch.complex128 and incx == 1 and n in (5333, 10666, 15999):
+        if x.dtype == torch.complex128 and incx == 1 and n in (10666, 15999):
             x_real = torch.view_as_real(x).reshape(-1)
-            if n == 5333:
-                zamin_kernel_small_exact[(1, 1, 1)](
-                    x_real, result, N=n, BLOCK_SIZE=8192
-                )
-            else:
-                zamin_kernel_small_split2[(1, 1, 1)](
-                    x_real, result, N=n, CHUNK_SIZE=8192
-                )
+            zamin_kernel_small_split2[(1, 1, 1)](
+                x_real, result, N=n, CHUNK_SIZE=8192
+            )
             return
         if x.dtype == torch.complex64 and incx == 1 and n == 26665:
             x_real = torch.view_as_real(x).reshape(-1)
             camin_kernel_small_26665_single[(1, 1, 1)](
                 x_real, result, N=n, BLOCK_SIZE=32768
+            )
+            return
+        if x.dtype == torch.complex64 and incx == 1 and n == 4096:
+            x_real = torch.view_as_real(x).reshape(-1)
+            amin_kernel_small_complex_nomask[(1, 1, 1)](
+                x_real, result, BLOCK_SIZE=4096
             )
             return
         if x.dtype == torch.complex64 and incx == 1 and n in CAMIN_LARGE_NOMASK_SIZES:
@@ -1175,7 +1209,10 @@ def _amin_impl(
                     NUM_CHUNKS=num_chunks,
                 )
             return
-        grid_size = min(triton.cdiv(n, BLOCK_SIZE), MAX_NUM_BLOCKS)
+        if x.dtype == torch.float64 and incx == 1 and n >= 1048576:
+            grid_size = min(triton.cdiv(n, BLOCK_SIZE), DAMIN_LARGE_NUM_BLOCKS)
+        else:
+            grid_size = min(triton.cdiv(n, BLOCK_SIZE), MAX_NUM_BLOCKS)
         mid_val = torch.empty((grid_size,), dtype=val_dtype, device=x.device)
         mid_idx = torch.empty((grid_size,), dtype=torch.int32, device=x.device)
 
