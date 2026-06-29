@@ -162,6 +162,19 @@ GemmBenchmark:
     - [4097, 8191, 4095]   # odd dimensions
   shape_desc: "M, N, K"
 
+GerBenchmark:
+  shapes:
+    - [64, 64]
+    - [256, 256]
+    - [1024, 1024]
+    - [4096, 4096]
+    - [1024, 4096]
+    - [4096, 1024]
+    - [127, 255]
+    - [1023, 4095]
+    - [4095, 1023]
+  shape_desc: "M, N"
+
 # the default shapes info
 Benchmark:
   shapes:
