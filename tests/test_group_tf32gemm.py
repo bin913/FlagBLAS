@@ -121,8 +121,12 @@ def _build_triton_arrays(group_A, group_B_T, group_C, offs_table):
     B_addrs = []
     C_addrs = []
     out_addrs = []
-    group_sizes = []
-    group_lds = []
+    m_sizes = []
+    n_sizes = []
+    k_sizes = []
+    ldas = []
+    ldbs = []
+    ldcs = []
 
     start_BT = 0
     for i in range(group_size):
@@ -131,8 +135,12 @@ def _build_triton_arrays(group_A, group_B_T, group_C, offs_table):
         B_g = group_B_T[start_BT]
         C_g = group_C[offs_table[i][5]]
         out_g = group_out[offs_table[i][5]]
-        group_sizes += [mg, ng, kg]
-        group_lds += [kg, kg, ng]
+        m_sizes.append(mg)
+        n_sizes.append(ng)
+        k_sizes.append(kg)
+        ldas.append(kg)
+        ldbs.append(kg)
+        ldcs.append(ng)
         A_addrs.append(A_g.data_ptr())
         B_addrs.append(B_g.data_ptr())
         C_addrs.append(C_g.data_ptr())
@@ -143,8 +151,12 @@ def _build_triton_arrays(group_A, group_B_T, group_C, offs_table):
     d_b_ptrs = torch.tensor(B_addrs, device=group_A.device)
     d_c_ptrs = torch.tensor(C_addrs, device=group_A.device)
     d_output_ptrs = torch.tensor(out_addrs, device=group_A.device)
-    d_g_sizes = torch.tensor(group_sizes, dtype=torch.int32, device=group_A.device)
-    d_g_lds = torch.tensor(group_lds, dtype=torch.int32, device=group_A.device)
+    d_m_sizes = torch.tensor(m_sizes, dtype=torch.int32, device=group_A.device)
+    d_n_sizes = torch.tensor(n_sizes, dtype=torch.int32, device=group_A.device)
+    d_k_sizes = torch.tensor(k_sizes, dtype=torch.int32, device=group_A.device)
+    d_ldas = torch.tensor(ldas, dtype=torch.int32, device=group_A.device)
+    d_ldbs = torch.tensor(ldbs, dtype=torch.int32, device=group_A.device)
+    d_ldcs = torch.tensor(ldcs, dtype=torch.int32, device=group_A.device)
 
     return (
         group_out,
@@ -152,8 +164,12 @@ def _build_triton_arrays(group_A, group_B_T, group_C, offs_table):
         d_b_ptrs,
         d_c_ptrs,
         d_output_ptrs,
-        d_g_sizes,
-        d_g_lds,
+        d_m_sizes,
+        d_n_sizes,
+        d_k_sizes,
+        d_ldas,
+        d_ldbs,
+        d_ldcs,
         group_size,
         M,
         N,
@@ -311,6 +327,128 @@ def test_group_gemm_alpha_zero():
         )
     else:
         utils.blas_assert_close(out, C_orig * 2.0, dtype, reduce_dim=k, atol=1e-3)
+
+
+@pytest.mark.group_gemm
+def test_group_tf32gemm_dispatches_small_m_with_autotune(monkeypatch):
+    import types
+
+    from flag_blas.runtime.backend._nvidia.hopper.ops import (
+        group_gemm as hopper_group_gemm,
+    )
+
+    calls = []
+
+    class FakeKernel:
+        def __init__(self, name):
+            self.name = name
+
+        def __getitem__(self, grid):
+            def launch(*args, **kwargs):
+                calls.append((self.name, grid, kwargs))
+
+            return launch
+
+    monkeypatch.setattr(
+        torch.cuda,
+        "get_device_properties",
+        lambda *_args, **_kwargs: types.SimpleNamespace(multi_processor_count=1),
+    )
+    monkeypatch.setattr(hopper_group_gemm, "supports_tma", lambda _device=None: True)
+    monkeypatch.setattr(
+        hopper_group_gemm, "grouped_tf32gemm_small_m_tma_kernel", FakeKernel("small")
+    )
+    monkeypatch.setattr(
+        hopper_group_gemm, "grouped_tf32gemm_tma_kernel", FakeKernel("regular")
+    )
+    monkeypatch.setattr(
+        hopper_group_gemm, "grouped_tf32gemm_kernel", FakeKernel("fallback")
+    )
+
+    group_out = torch.empty((1, 1), dtype=torch.float32)
+    dummy_ptrs = torch.empty((0,), dtype=torch.int64)
+    small_m = torch.full((512,), 64, dtype=torch.int32)
+    small_n = torch.full((512,), 2048, dtype=torch.int32)
+    small_k = torch.full((512,), 64, dtype=torch.int32)
+    small_lda = small_k
+    small_ldb = small_k
+    small_ldc = small_n
+    large_m = small_m.clone()
+    large_m[0] = 65
+    mixed_m = torch.tensor([64, 7], dtype=torch.int32)
+    mixed_n = torch.tensor([128, 128], dtype=torch.int32)
+    mixed_k = torch.tensor([32, 32], dtype=torch.int32)
+
+    hopper_group_gemm.group_tf32gemm(
+        group_out,
+        dummy_ptrs,
+        dummy_ptrs,
+        dummy_ptrs,
+        dummy_ptrs,
+        small_m,
+        small_n,
+        small_k,
+        small_lda,
+        small_ldb,
+        small_ldc,
+        512,
+        512 * 64,
+        2048,
+        64,
+        alpha=1.0,
+        beta=0.0,
+        use_small_m=True,
+    )
+
+    assert calls[-1][0] == "small"
+    assert "BLOCK_M" not in calls[-1][2]
+    assert "BLOCK_N" not in calls[-1][2]
+    assert "BLOCK_K" not in calls[-1][2]
+
+    hopper_group_gemm.group_tf32gemm(
+        group_out,
+        dummy_ptrs,
+        dummy_ptrs,
+        dummy_ptrs,
+        dummy_ptrs,
+        mixed_m,
+        mixed_n,
+        mixed_k,
+        mixed_k,
+        mixed_k,
+        mixed_n,
+        2,
+        128,
+        128,
+        32,
+        alpha=1.0,
+        beta=0.0,
+        use_small_m=True,
+    )
+    assert calls[-1][0] == "small"
+
+    hopper_group_gemm.group_tf32gemm(
+        group_out,
+        dummy_ptrs,
+        dummy_ptrs,
+        dummy_ptrs,
+        dummy_ptrs,
+        large_m,
+        small_n,
+        small_k,
+        small_lda,
+        small_ldb,
+        small_ldc,
+        512,
+        511 * 64 + 65,
+        2048,
+        64,
+        alpha=1.0,
+        beta=0.0,
+        use_small_m=True,
+    )
+
+    assert calls[-1][0] == "small"
 
 
 @pytest.mark.group_gemm

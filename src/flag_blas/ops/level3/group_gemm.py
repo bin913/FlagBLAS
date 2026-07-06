@@ -28,39 +28,9 @@ def grouped_launch(
 def get_autotune_config(pre_hook=None):
     return [
         triton.Config(
-            {"BLOCK_M": 128, "BLOCK_N": 256, "BLOCK_K": 64, "GROUP_M": 8},
-            num_stages=3,
-            num_warps=8,
-            pre_hook=pre_hook,
-        ),
-        triton.Config(
-            {"BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 128, "GROUP_M": 8},
-            num_stages=2,
-            num_warps=4,
-            pre_hook=pre_hook,
-        ),
-        triton.Config(
-            {"BLOCK_M": 256, "BLOCK_N": 128, "BLOCK_K": 128, "GROUP_M": 8},
-            num_stages=3,
-            num_warps=4,
-            pre_hook=pre_hook,
-        ),
-        triton.Config(
-            {"BLOCK_M": 256, "BLOCK_N": 128, "BLOCK_K": 64, "GROUP_M": 8},
-            num_stages=3,
-            num_warps=8,
-            pre_hook=pre_hook,
-        ),
-        triton.Config(
-            {"BLOCK_M": 128, "BLOCK_N": 64, "BLOCK_K": 32, "GROUP_M": 4},
+            {"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 128, "GROUP_M": 4},
             num_stages=4,
             num_warps=4,
-            pre_hook=pre_hook,
-        ),
-        triton.Config(
-            {"BLOCK_M": 256, "BLOCK_N": 256, "BLOCK_K": 64, "GROUP_M": 8},
-            num_stages=3,
-            num_warps=8,
             pre_hook=pre_hook,
         ),
         triton.Config(
@@ -70,9 +40,21 @@ def get_autotune_config(pre_hook=None):
             pre_hook=pre_hook,
         ),
         triton.Config(
-            {"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 128, "GROUP_M": 4},
-            num_stages=4,
+            {"BLOCK_M": 64, "BLOCK_N": 256, "BLOCK_K": 64, "GROUP_M": 4},
+            num_stages=3,
             num_warps=4,
+            pre_hook=pre_hook,
+        ),
+        triton.Config(
+            {"BLOCK_M": 64, "BLOCK_N": 512, "BLOCK_K": 32, "GROUP_M": 4},
+            num_stages=4,
+            num_warps=8,
+            pre_hook=pre_hook,
+        ),
+        triton.Config(
+            {"BLOCK_M": 128, "BLOCK_N": 256, "BLOCK_K": 64, "GROUP_M": 8},
+            num_stages=3,
+            num_warps=8,
             pre_hook=pre_hook,
         ),
     ]
@@ -81,32 +63,20 @@ def get_autotune_config(pre_hook=None):
 def get_autotune_config_tf32(pre_hook=None):
     return [
         triton.Config(
-            {"BLOCK_M": 128, "BLOCK_N": 64, "BLOCK_K": 64, "GROUP_M": 8},
-            num_stages=3,
-            num_warps=4,
-            pre_hook=pre_hook,
-        ),
-        triton.Config(
-            {"BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 64, "GROUP_M": 8},
-            num_stages=3,
-            num_warps=4,
-            pre_hook=pre_hook,
-        ),
-        triton.Config(
             {"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 64, "GROUP_M": 8},
             num_stages=3,
             num_warps=4,
             pre_hook=pre_hook,
         ),
         triton.Config(
-            {"BLOCK_M": 64, "BLOCK_N": 256, "BLOCK_K": 64, "GROUP_M": 8},
+            {"BLOCK_M": 64, "BLOCK_N": 256, "BLOCK_K": 32, "GROUP_M": 4},
             num_stages=3,
-            num_warps=8,
+            num_warps=4,
             pre_hook=pre_hook,
         ),
         triton.Config(
-            {"BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 64, "GROUP_M": 8},
-            num_stages=2,
+            {"BLOCK_M": 128, "BLOCK_N": 64, "BLOCK_K": 64, "GROUP_M": 8},
+            num_stages=3,
             num_warps=4,
             pre_hook=pre_hook,
         ),
@@ -130,8 +100,12 @@ def grouped_bfgemm_kernel(
     group_b_ptrs,
     group_c_ptrs,
     group_out_ptrs,
-    group_gemm_sizes,
-    g_lds,
+    group_m_sizes,
+    group_n_sizes,
+    group_k_sizes,
+    group_ldas,
+    group_ldbs,
+    group_ldcs,
     group_size,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -144,22 +118,21 @@ def grouped_bfgemm_kernel(
     total_grid = tl.num_programs(0)
     last_problem_end = 0
     for g in range(group_size):
-        gm = tl.load(group_gemm_sizes + g * 3)
-        gn = tl.load(group_gemm_sizes + g * 3 + 1)
-        gk = tl.load(group_gemm_sizes + g * 3 + 2)
+        gm = tl.load(group_m_sizes + g)
+        gn = tl.load(group_n_sizes + g)
+        gk = tl.load(group_k_sizes + g)
         num_m_tiles = tl.cdiv(gm, BLOCK_M)
         num_n_tiles = tl.cdiv(gn, BLOCK_N)
         num_tiles = num_m_tiles * num_n_tiles
 
         current_problem_end = last_problem_end + num_tiles
         if tile_idx >= last_problem_end and tile_idx < current_problem_end:
-            lda = tl.load(g_lds + g * 3)
-            ldb = tl.load(g_lds + g * 3 + 1)
-            ldc = tl.load(g_lds + g * 3 + 2)
+            lda = tl.load(group_ldas + g)
+            ldb = tl.load(group_ldbs + g)
+            ldc = tl.load(group_ldcs + g)
 
             a_ptr = tl.load(group_a_ptrs + g).to(tl.pointer_type(tl.bfloat16))
             b_ptr = tl.load(group_b_ptrs + g).to(tl.pointer_type(tl.bfloat16))
-            c_ptr = tl.load(group_c_ptrs + g).to(tl.pointer_type(tl.bfloat16))
             out_ptr = tl.load(group_out_ptrs + g).to(tl.pointer_type(tl.bfloat16))
 
             loop_count = (current_problem_end - tile_idx + total_grid - 1) // total_grid
@@ -200,14 +173,6 @@ def grouped_bfgemm_kernel(
                 offs_cm = tile_m_idx * BLOCK_M
                 offs_cn = tile_n_idx * BLOCK_N
 
-                c_ptrs = tl.make_block_ptr(
-                    base=c_ptr,
-                    shape=(gm, gn),
-                    strides=(ldc, 1),
-                    offsets=(offs_cm, offs_cn),
-                    block_shape=(BLOCK_M, BLOCK_N),
-                    order=(1, 0),
-                )
                 out_ptrs = tl.make_block_ptr(
                     base=out_ptr,
                     shape=(gm, gn),
@@ -219,10 +184,19 @@ def grouped_bfgemm_kernel(
                 if beta == 0.0:
                     accumulator = accumulator * alpha
                 else:
+                    c_ptr = tl.load(group_c_ptrs + g).to(tl.pointer_type(tl.bfloat16))
+                    c_ptrs = tl.make_block_ptr(
+                        base=c_ptr,
+                        shape=(gm, gn),
+                        strides=(ldc, 1),
+                        offsets=(offs_cm, offs_cn),
+                        block_shape=(BLOCK_M, BLOCK_N),
+                        order=(1, 0),
+                    )
                     ori_c = tl.load(c_ptrs, boundary_check=(0, 1))
                     accumulator = ori_c * beta + accumulator * alpha
 
-                c = accumulator.to(c_ptrs.dtype.element_ty)
+                c = accumulator.to(out_ptrs.dtype.element_ty)
                 tl.store(out_ptrs, c, boundary_check=(0, 1))
 
                 tile_idx += total_grid
@@ -236,14 +210,19 @@ def group_bfgemm(
     d_b_ptrs,
     d_c_ptrs,
     d_output_ptrs,
-    d_g_sizes,
-    d_g_lds,
+    d_m_sizes,
+    d_n_sizes,
+    d_k_sizes,
+    d_ldas,
+    d_ldbs,
+    d_ldcs,
     group_size,
     M,
     N,
     K,
     alpha,
     beta,
+    use_small_m=False,
 ):
     NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
 
@@ -255,8 +234,12 @@ def group_bfgemm(
         d_b_ptrs,
         d_c_ptrs,
         d_output_ptrs,
-        d_g_sizes,
-        d_g_lds,
+        d_m_sizes,
+        d_n_sizes,
+        d_k_sizes,
+        d_ldas,
+        d_ldbs,
+        d_ldcs,
         group_size,
         alpha=alpha,
         beta=beta,
@@ -276,8 +259,12 @@ def grouped_hgemm_kernel(
     group_b_ptrs,
     group_c_ptrs,
     group_out_ptrs,
-    group_gemm_sizes,
-    g_lds,
+    group_m_sizes,
+    group_n_sizes,
+    group_k_sizes,
+    group_ldas,
+    group_ldbs,
+    group_ldcs,
     group_size,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -290,22 +277,21 @@ def grouped_hgemm_kernel(
     total_grid = tl.num_programs(0)
     last_problem_end = 0
     for g in range(group_size):
-        gm = tl.load(group_gemm_sizes + g * 3)
-        gn = tl.load(group_gemm_sizes + g * 3 + 1)
-        gk = tl.load(group_gemm_sizes + g * 3 + 2)
+        gm = tl.load(group_m_sizes + g)
+        gn = tl.load(group_n_sizes + g)
+        gk = tl.load(group_k_sizes + g)
         num_m_tiles = tl.cdiv(gm, BLOCK_M)
         num_n_tiles = tl.cdiv(gn, BLOCK_N)
         num_tiles = num_m_tiles * num_n_tiles
 
         current_problem_end = last_problem_end + num_tiles
         if tile_idx >= last_problem_end and tile_idx < current_problem_end:
-            lda = tl.load(g_lds + g * 3)
-            ldb = tl.load(g_lds + g * 3 + 1)
-            ldc = tl.load(g_lds + g * 3 + 2)
+            lda = tl.load(group_ldas + g)
+            ldb = tl.load(group_ldbs + g)
+            ldc = tl.load(group_ldcs + g)
 
             a_ptr = tl.load(group_a_ptrs + g).to(tl.pointer_type(tl.float16))
             b_ptr = tl.load(group_b_ptrs + g).to(tl.pointer_type(tl.float16))
-            c_ptr = tl.load(group_c_ptrs + g).to(tl.pointer_type(tl.float16))
             out_ptr = tl.load(group_out_ptrs + g).to(tl.pointer_type(tl.float16))
 
             loop_count = (current_problem_end - tile_idx + total_grid - 1) // total_grid
@@ -346,14 +332,6 @@ def grouped_hgemm_kernel(
                 offs_cm = tile_m_idx * BLOCK_M
                 offs_cn = tile_n_idx * BLOCK_N
 
-                c_ptrs = tl.make_block_ptr(
-                    base=c_ptr,
-                    shape=(gm, gn),
-                    strides=(ldc, 1),
-                    offsets=(offs_cm, offs_cn),
-                    block_shape=(BLOCK_M, BLOCK_N),
-                    order=(1, 0),
-                )
                 out_ptrs = tl.make_block_ptr(
                     base=out_ptr,
                     shape=(gm, gn),
@@ -365,10 +343,19 @@ def grouped_hgemm_kernel(
                 if beta == 0.0:
                     accumulator = accumulator * alpha
                 else:
+                    c_ptr = tl.load(group_c_ptrs + g).to(tl.pointer_type(tl.float16))
+                    c_ptrs = tl.make_block_ptr(
+                        base=c_ptr,
+                        shape=(gm, gn),
+                        strides=(ldc, 1),
+                        offsets=(offs_cm, offs_cn),
+                        block_shape=(BLOCK_M, BLOCK_N),
+                        order=(1, 0),
+                    )
                     ori_c = tl.load(c_ptrs, boundary_check=(0, 1))
                     accumulator = ori_c * beta + accumulator * alpha
 
-                c = accumulator.to(c_ptrs.dtype.element_ty)
+                c = accumulator.to(out_ptrs.dtype.element_ty)
                 tl.store(out_ptrs, c, boundary_check=(0, 1))
 
                 tile_idx += total_grid
@@ -382,14 +369,19 @@ def group_hgemm(
     d_b_ptrs,
     d_c_ptrs,
     d_output_ptrs,
-    d_g_sizes,
-    d_g_lds,
+    d_m_sizes,
+    d_n_sizes,
+    d_k_sizes,
+    d_ldas,
+    d_ldbs,
+    d_ldcs,
     group_size,
     M,
     N,
     K,
     alpha,
     beta,
+    use_small_m=False,
 ):
     NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
 
@@ -401,8 +393,12 @@ def group_hgemm(
         d_b_ptrs,
         d_c_ptrs,
         d_output_ptrs,
-        d_g_sizes,
-        d_g_lds,
+        d_m_sizes,
+        d_n_sizes,
+        d_k_sizes,
+        d_ldas,
+        d_ldbs,
+        d_ldcs,
         group_size,
         alpha=alpha,
         beta=beta,
@@ -422,8 +418,12 @@ def grouped_tf32gemm_kernel(
     group_b_ptrs,
     group_c_ptrs,
     group_out_ptrs,
-    group_gemm_sizes,
-    g_lds,
+    group_m_sizes,
+    group_n_sizes,
+    group_k_sizes,
+    group_ldas,
+    group_ldbs,
+    group_ldcs,
     group_size,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -436,22 +436,21 @@ def grouped_tf32gemm_kernel(
     total_grid = tl.num_programs(0)
     last_problem_end = 0
     for g in range(group_size):
-        gm = tl.load(group_gemm_sizes + g * 3)
-        gn = tl.load(group_gemm_sizes + g * 3 + 1)
-        gk = tl.load(group_gemm_sizes + g * 3 + 2)
+        gm = tl.load(group_m_sizes + g)
+        gn = tl.load(group_n_sizes + g)
+        gk = tl.load(group_k_sizes + g)
         num_m_tiles = tl.cdiv(gm, BLOCK_M)
         num_n_tiles = tl.cdiv(gn, BLOCK_N)
         num_tiles = num_m_tiles * num_n_tiles
 
         current_problem_end = last_problem_end + num_tiles
         if tile_idx >= last_problem_end and tile_idx < current_problem_end:
-            lda = tl.load(g_lds + g * 3)
-            ldb = tl.load(g_lds + g * 3 + 1)
-            ldc = tl.load(g_lds + g * 3 + 2)
+            lda = tl.load(group_ldas + g)
+            ldb = tl.load(group_ldbs + g)
+            ldc = tl.load(group_ldcs + g)
 
             a_ptr = tl.load(group_a_ptrs + g).to(tl.pointer_type(tl.float32))
             b_ptr = tl.load(group_b_ptrs + g).to(tl.pointer_type(tl.float32))
-            c_ptr = tl.load(group_c_ptrs + g).to(tl.pointer_type(tl.float32))
             out_ptr = tl.load(group_out_ptrs + g).to(tl.pointer_type(tl.float32))
 
             loop_count = (current_problem_end - tile_idx + total_grid - 1) // total_grid
@@ -493,14 +492,6 @@ def grouped_tf32gemm_kernel(
                 offs_cm = tile_m_idx * BLOCK_M
                 offs_cn = tile_n_idx * BLOCK_N
 
-                c_ptrs = tl.make_block_ptr(
-                    base=c_ptr,
-                    shape=(gm, gn),
-                    strides=(ldc, 1),
-                    offsets=(offs_cm, offs_cn),
-                    block_shape=(BLOCK_M, BLOCK_N),
-                    order=(1, 0),
-                )
                 out_ptrs = tl.make_block_ptr(
                     base=out_ptr,
                     shape=(gm, gn),
@@ -512,10 +503,19 @@ def grouped_tf32gemm_kernel(
                 if beta == 0.0:
                     accumulator = accumulator * alpha
                 else:
+                    c_ptr = tl.load(group_c_ptrs + g).to(tl.pointer_type(tl.float32))
+                    c_ptrs = tl.make_block_ptr(
+                        base=c_ptr,
+                        shape=(gm, gn),
+                        strides=(ldc, 1),
+                        offsets=(offs_cm, offs_cn),
+                        block_shape=(BLOCK_M, BLOCK_N),
+                        order=(1, 0),
+                    )
                     ori_c = tl.load(c_ptrs, boundary_check=(0, 1))
                     accumulator = ori_c * beta + accumulator * alpha
 
-                c = accumulator.to(c_ptrs.dtype.element_ty)
+                c = accumulator.to(out_ptrs.dtype.element_ty)
                 tl.store(out_ptrs, c, boundary_check=(0, 1))
 
                 tile_idx += total_grid
@@ -529,14 +529,19 @@ def group_tf32gemm(
     d_b_ptrs,
     d_c_ptrs,
     d_output_ptrs,
-    d_g_sizes,
-    d_g_lds,
+    d_m_sizes,
+    d_n_sizes,
+    d_k_sizes,
+    d_ldas,
+    d_ldbs,
+    d_ldcs,
     group_size,
     M,
     N,
     K,
     alpha,
     beta,
+    use_small_m=False,
 ):
     NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
 
@@ -548,8 +553,12 @@ def group_tf32gemm(
         d_b_ptrs,
         d_c_ptrs,
         d_output_ptrs,
-        d_g_sizes,
-        d_g_lds,
+        d_m_sizes,
+        d_n_sizes,
+        d_k_sizes,
+        d_ldas,
+        d_ldbs,
+        d_ldcs,
         group_size,
         alpha=alpha,
         beta=beta,

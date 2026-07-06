@@ -112,8 +112,12 @@ def cublas_group_gemm(
     b_flag,
     c_flag,
     out_flag_ptrs,
-    sizes_flag,
-    lds_flag,
+    m_flag,
+    n_flag,
+    k_flag,
+    lda_flag,
+    ldb_flag,
+    ldc_flag,
     group_size,
     M,
     N,
@@ -175,8 +179,12 @@ def gems_group_gemm_wrapper(
     b_flag,
     c_flag,
     out_flag_ptrs,
-    sizes_flag,
-    lds_flag,
+    m_flag,
+    n_flag,
+    k_flag,
+    lda_flag,
+    ldb_flag,
+    ldc_flag,
     group_size,
     M,
     N,
@@ -192,14 +200,19 @@ def gems_group_gemm_wrapper(
         b_flag,
         c_flag,
         out_flag_ptrs,
-        sizes_flag,
-        lds_flag,
+        m_flag,
+        n_flag,
+        k_flag,
+        lda_flag,
+        ldb_flag,
+        ldc_flag,
         group_size,
         M,
         N,
         K,
         alpha=alpha,
         beta=beta,
+        use_small_m=kwargs.get("use_small_m", False),
     )
 
 
@@ -261,8 +274,12 @@ class GroupGemmBenchmark(Benchmark):
             flag_b_ptrs = []
             flag_c_ptrs = []
             flag_out_ptrs = []
-            flag_sizes = []
-            flag_lds = []
+            flag_m_list = []
+            flag_n_list = []
+            flag_k_list = []
+            flag_lda_list = []
+            flag_ldb_list = []
+            flag_ldc_list = []
 
             start_BT_offs = 0
             for entry in offs:
@@ -299,8 +316,12 @@ class GroupGemmBenchmark(Benchmark):
                 flag_out_ptrs.append(
                     out_flag[start_C_offs : start_C_offs + mg, :].data_ptr()
                 )
-                flag_sizes += [mg, ng, kg]
-                flag_lds += [kg, kg, ng]
+                flag_m_list.append(mg)
+                flag_n_list.append(ng)
+                flag_k_list.append(kg)
+                flag_lda_list.append(kg)
+                flag_ldb_list.append(kg)
+                flag_ldc_list.append(ng)
                 start_BT_offs += ng
 
             yield group_A, group_B, group_C, offs, {
@@ -339,11 +360,23 @@ class GroupGemmBenchmark(Benchmark):
                 "out_flag_ptrs": torch.tensor(
                     flag_out_ptrs, dtype=torch.int64, device=self.device
                 ),
-                "sizes_flag": torch.tensor(
-                    flag_sizes, dtype=torch.int32, device=self.device
+                "m_flag": torch.tensor(
+                    flag_m_list, dtype=torch.int32, device=self.device
                 ),
-                "lds_flag": torch.tensor(
-                    flag_lds, dtype=torch.int32, device=self.device
+                "n_flag": torch.tensor(
+                    flag_n_list, dtype=torch.int32, device=self.device
+                ),
+                "k_flag": torch.tensor(
+                    flag_k_list, dtype=torch.int32, device=self.device
+                ),
+                "lda_flag": torch.tensor(
+                    flag_lda_list, dtype=torch.int32, device=self.device
+                ),
+                "ldb_flag": torch.tensor(
+                    flag_ldb_list, dtype=torch.int32, device=self.device
+                ),
+                "ldc_flag": torch.tensor(
+                    flag_ldc_list, dtype=torch.int32, device=self.device
                 ),
                 "group_size": e,
                 "M": total_M,
@@ -352,6 +385,7 @@ class GroupGemmBenchmark(Benchmark):
                 "out_flag": out_flag,
                 "alpha": self.alpha,
                 "beta": self.beta,
+                "use_small_m": max(flag_m_list) <= 64,
                 "handle": handle,
             }
 
