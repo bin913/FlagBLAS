@@ -1407,3 +1407,51 @@ ops:
       - BLAS
     stages:
       - beta: '0.1'
+  - id: strmm
+    description: |
+      Single-precision BLAS Level 3 triangular matrix-matrix multiplication.
+      Computes B = alpha * op(A) * B or B = alpha * B * op(A) for a float32 triangular matrix A.
+    for:
+      - strmm
+    labels:
+      - trmm
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: dtrmm
+    description: |
+      Double-precision BLAS Level 3 triangular matrix-matrix multiplication.
+      Computes B = alpha * op(A) * B or B = alpha * B * op(A) for a float64 triangular matrix A.
+    for:
+      - dtrmm
+    labels:
+      - trmm
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: ctrmm
+    description: |
+      Single-precision complex BLAS Level 3 triangular matrix-matrix multiplication.
+      Computes B = alpha * op(A) * B or B = alpha * B * op(A) for a complex64 triangular matrix A.
+    for:
+      - ctrmm
+    labels:
+      - trmm
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: ztrmm
+    description: |
+      Double-precision complex BLAS Level 3 triangular matrix-matrix multiplication.
+      Computes B = alpha * op(A) * B or B = alpha * B * op(A) for a complex128 triangular matrix A.
+    for:
+      - ztrmm
+    labels:
+      - trmm
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'

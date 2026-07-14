@@ -57,6 +57,14 @@ from flag_blas.ops.level2.trmv import ctrmv, dtrmv, strmv, ztrmv
 from flag_blas.ops.level2.trsv import ctrsv, dtrsv, strsv, ztrsv
 from flag_blas.ops.level3.gemm import bfgemm, fp8gemm, hgemm, sgemm
 from flag_blas.ops.level3.group_gemm import group_gemm, group_mm
+from flag_blas.ops.level3.trmm import (
+    CUBLAS_SIDE_LEFT,
+    CUBLAS_SIDE_RIGHT,
+    ctrmm,
+    dtrmm,
+    strmm,
+    ztrmm,
+)
 
 __all__ = [
     # amax
@@ -195,6 +203,8 @@ __all__ = [
     "CUBLAS_OP_N",
     "CUBLAS_OP_T",
     "CUBLAS_OP_C",
+    "CUBLAS_SIDE_LEFT",
+    "CUBLAS_SIDE_RIGHT",
     # gemm
     "sgemm",
     "hgemm",
@@ -202,6 +212,10 @@ __all__ = [
     "fp8gemm",
     "group_mm",
     "group_gemm",
+    "strmm",
+    "dtrmm",
+    "ctrmm",
+    "ztrmm",
     # abs
     "sabs",
     "dabs",
