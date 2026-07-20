@@ -148,10 +148,10 @@ def _gems_wrapper(op):
     return _impl
 
 
-gems_sgbmv_wrapper = _gems_wrapper(flag_blas.ops.sgbmv)
-gems_dgbmv_wrapper = _gems_wrapper(flag_blas.ops.dgbmv)
-gems_cgbmv_wrapper = _gems_wrapper(flag_blas.ops.cgbmv)
-gems_zgbmv_wrapper = _gems_wrapper(flag_blas.ops.zgbmv)
+gems_sgbmv_wrapper = _gems_wrapper(flag_blas.sgbmv)
+gems_dgbmv_wrapper = _gems_wrapper(flag_blas.dgbmv)
+gems_cgbmv_wrapper = _gems_wrapper(flag_blas.cgbmv)
+gems_zgbmv_wrapper = _gems_wrapper(flag_blas.zgbmv)
 
 
 def _generate_banded_AB(m, n, kl, ku, lda, dtype, device):

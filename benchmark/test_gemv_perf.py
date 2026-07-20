@@ -261,7 +261,7 @@ def gems_sgemv_wrapper(
     alpha_ptr,
     beta_ptr,
 ):
-    flag_blas.ops.sgemv(trans, m, n, alpha, A_row, lda_row, x, incx, beta, y, incy)
+    flag_blas.sgemv(trans, m, n, alpha, A_row, lda_row, x, incx, beta, y, incy)
     return y
 
 
@@ -283,7 +283,7 @@ def gems_dgemv_wrapper(
     alpha_ptr,
     beta_ptr,
 ):
-    flag_blas.ops.dgemv(trans, m, n, alpha, A_row, lda_row, x, incx, beta, y, incy)
+    flag_blas.dgemv(trans, m, n, alpha, A_row, lda_row, x, incx, beta, y, incy)
     return y
 
 
@@ -305,7 +305,7 @@ def gems_cgemv_wrapper(
     alpha_ptr,
     beta_ptr,
 ):
-    flag_blas.ops.cgemv(trans, m, n, alpha, A_row, lda_row, x, incx, beta, y, incy)
+    flag_blas.cgemv(trans, m, n, alpha, A_row, lda_row, x, incx, beta, y, incy)
     return y
 
 
@@ -327,7 +327,7 @@ def gems_zgemv_wrapper(
     alpha_ptr,
     beta_ptr,
 ):
-    flag_blas.ops.zgemv(trans, m, n, alpha, A_row, lda_row, x, incx, beta, y, incy)
+    flag_blas.zgemv(trans, m, n, alpha, A_row, lda_row, x, incx, beta, y, incy)
     return y
 
 
@@ -350,7 +350,7 @@ def gems_hgemv_wrapper(
     beta_ptr,
     cuda_type=None,
 ):
-    flag_blas.ops.hgemv(trans, m, n, alpha, A_row, lda_row, x, incx, beta, y, incy)
+    flag_blas.hgemv(trans, m, n, alpha, A_row, lda_row, x, incx, beta, y, incy)
     return y
 
 
@@ -373,7 +373,7 @@ def gems_bfgemv_wrapper(
     beta_ptr,
     cuda_type=None,
 ):
-    flag_blas.ops.bfgemv(trans, m, n, alpha, A_row, lda_row, x, incx, beta, y, incy)
+    flag_blas.bfgemv(trans, m, n, alpha, A_row, lda_row, x, incx, beta, y, incy)
     return y
 
 
@@ -798,7 +798,7 @@ def gems_fp8_gemv_wrapper(
     beta_ptr,
     **kwargs,
 ):
-    flag_blas.ops.fp8_gemv(trans, m, n, alpha, A_fp8, n, x_fp8, incx, beta, y, incy)
+    flag_blas.fp8_gemv(trans, m, n, alpha, A_fp8, n, x_fp8, incx, beta, y, incy)
     return y
 
 

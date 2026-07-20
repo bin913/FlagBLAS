@@ -8,7 +8,7 @@ from scipy.linalg import blas as cpu_blas
 import flag_blas
 from flag_blas.ops import CUBLAS_FILL_MODE_LOWER, CUBLAS_FILL_MODE_UPPER
 
-from .accuracy_utils import blas_assert_close, to_reference
+from .accuracy_utils import blas_assert_close, to_cpu_blas_tensor, to_reference
 from .conftest import TO_CPU
 
 
@@ -116,17 +116,16 @@ def cublas_syr2_reference(uplo, n, alpha, x, incx, y, incy, A, lda):
 
 
 def cpu_syr2_reference(uplo, n, alpha, x, incx, y, incy, A, lda):
-    ref_A = A.detach().to("cpu").contiguous()
+    ref_A = to_cpu_blas_tensor(A)
     if n == 0:
         return ref_A
 
-    ref_x = x.detach().to("cpu").contiguous()
-    ref_y = y.detach().to("cpu").contiguous()
+    ref_x = to_cpu_blas_tensor(x)
+    ref_y = to_cpu_blas_tensor(y)
     logical_A = ref_A[:n, :n].T.numpy().copy(order="F")
     alpha = alpha.item() if isinstance(alpha, torch.Tensor) else alpha
     lower = int(uplo == CUBLAS_FILL_MODE_LOWER)
-    syr2 = cpu_blas.ssyr2 if A.dtype == torch.float32 else cpu_blas.dsyr2
-    updated = syr2(
+    updated = cpu_blas.dsyr2(
         alpha,
         ref_x.numpy(),
         ref_y.numpy(),
@@ -224,7 +223,7 @@ def create_syr2_data(n, lda, dtype, device):
 
 
 def _syr2_reduce_dim(n):
-    return max(1, n)
+    return 2
 
 
 def check_fp64_support():
@@ -260,7 +259,7 @@ def test_accuracy_ssyr2(uplo, n):
     x = torch.randn(n, dtype=dtype, device=flag_blas.device)
     y = torch.randn(n, dtype=dtype, device=flag_blas.device)
     ref_A = syr2_reference(uplo, n, alpha, x, 1, y, 1, A, lda)
-    flag_blas.ops.ssyr2(uplo, n, alpha, x, 1, y, 1, A, lda)
+    flag_blas.ssyr2(uplo, n, alpha, x, 1, y, 1, A, lda)
 
     blas_assert_close(A, ref_A, dtype, reduce_dim=_syr2_reduce_dim(n))
 
@@ -276,7 +275,7 @@ def test_accuracy_ssyr2_sizes(n, uplo):
     x = torch.randn(max(1, n), dtype=dtype, device=flag_blas.device)
     y = torch.randn(max(1, n), dtype=dtype, device=flag_blas.device)
     ref_A = syr2_reference(uplo, n, alpha, x, 1, y, 1, A, lda)
-    flag_blas.ops.ssyr2(uplo, n, alpha, x, 1, y, 1, A, lda)
+    flag_blas.ssyr2(uplo, n, alpha, x, 1, y, 1, A, lda)
 
     blas_assert_close(A, ref_A, dtype, reduce_dim=_syr2_reduce_dim(n))
 
@@ -293,7 +292,7 @@ def test_accuracy_ssyr2_stride(n, uplo, incx, incy):
     x = torch.randn(1 + (n - 1) * incx, dtype=dtype, device=flag_blas.device)
     y = torch.randn(1 + (n - 1) * incy, dtype=dtype, device=flag_blas.device)
     ref_A = syr2_reference(uplo, n, alpha, x, incx, y, incy, A, lda)
-    flag_blas.ops.ssyr2(uplo, n, alpha, x, incx, y, incy, A, lda)
+    flag_blas.ssyr2(uplo, n, alpha, x, incx, y, incy, A, lda)
 
     blas_assert_close(A, ref_A, dtype, reduce_dim=_syr2_reduce_dim(n))
 
@@ -308,7 +307,7 @@ def test_ssyr2_alpha_zero():
     y = torch.randn(n, dtype=dtype, device=flag_blas.device)
 
     ref_A = syr2_reference(CUBLAS_FILL_MODE_UPPER, n, 0.0, x, 1, y, 1, A, lda)
-    flag_blas.ops.ssyr2(CUBLAS_FILL_MODE_UPPER, n, 0.0, x, 1, y, 1, A, lda)
+    flag_blas.ssyr2(CUBLAS_FILL_MODE_UPPER, n, 0.0, x, 1, y, 1, A, lda)
 
     blas_assert_close(A, ref_A, dtype, reduce_dim=_syr2_reduce_dim(n))
     blas_assert_close(A, to_reference(A_orig, upcast=TO_CPU), dtype)
@@ -321,7 +320,7 @@ def test_ssyr2_n_zero():
     x = torch.empty((0,), dtype=dtype, device=flag_blas.device)
     y = torch.empty((0,), dtype=dtype, device=flag_blas.device)
 
-    flag_blas.ops.ssyr2(CUBLAS_FILL_MODE_LOWER, 0, 1.0, x, 1, y, 1, A, 1)
+    flag_blas.ssyr2(CUBLAS_FILL_MODE_LOWER, 0, 1.0, x, 1, y, 1, A, 1)
     assert A.numel() == 0
 
 
@@ -340,7 +339,7 @@ def test_accuracy_dsyr2(uplo, n):
     x = torch.randn(n, dtype=dtype, device=flag_blas.device)
     y = torch.randn(n, dtype=dtype, device=flag_blas.device)
     ref_A = syr2_reference(uplo, n, alpha, x, 1, y, 1, A, lda)
-    flag_blas.ops.dsyr2(uplo, n, alpha, x, 1, y, 1, A, lda)
+    flag_blas.dsyr2(uplo, n, alpha, x, 1, y, 1, A, lda)
 
     blas_assert_close(A, ref_A, dtype, reduce_dim=_syr2_reduce_dim(n))
 
@@ -349,7 +348,7 @@ def test_accuracy_dsyr2(uplo, n):
     "op,dtype,alpha",
     [
         pytest.param(
-            flag_blas.ops.dsyr2,
+            flag_blas.dsyr2,
             torch.float64,
             -0.75,
             marks=pytest.mark.dsyr2,
@@ -365,7 +364,7 @@ def test_accuracy_syr2_variants_sizes(op, dtype, alpha, n, uplo):
 @pytest.mark.parametrize(
     "op,dtype,alpha",
     [
-        pytest.param(flag_blas.ops.dsyr2, torch.float64, 2.0, marks=pytest.mark.dsyr2),
+        pytest.param(flag_blas.dsyr2, torch.float64, 2.0, marks=pytest.mark.dsyr2),
     ],
 )
 @pytest.mark.parametrize("n", SYR2_STRIDE_SIZES)
@@ -379,7 +378,7 @@ def test_accuracy_syr2_variants_stride(op, dtype, alpha, n, uplo, incx, incy):
     "op,dtype,alpha,uplo",
     [
         pytest.param(
-            flag_blas.ops.dsyr2,
+            flag_blas.dsyr2,
             torch.float64,
             0.0,
             CUBLAS_FILL_MODE_UPPER,
@@ -394,7 +393,7 @@ def test_syr2_variants_alpha_zero(op, dtype, alpha, uplo):
 @pytest.mark.parametrize(
     "op,dtype,alpha",
     [
-        pytest.param(flag_blas.ops.dsyr2, torch.float64, 1.0, marks=pytest.mark.dsyr2),
+        pytest.param(flag_blas.dsyr2, torch.float64, 1.0, marks=pytest.mark.dsyr2),
     ],
 )
 def test_syr2_variants_n_zero(op, dtype, alpha):

@@ -83,12 +83,6 @@ def check_fp64_support():
         pytest.skip("No FP64 support on this device")
 
 
-def _packed_offset(i, j, n, uplo):
-    if uplo == CUBLAS_FILL_MODE_UPPER:
-        return j * (j + 1) // 2 + i
-    return i + j * (2 * n - j - 1) // 2
-
-
 def cublas_hpr_reference(uplo, n, alpha, x, incx, AP):
     if n == 0:
         return
@@ -116,8 +110,7 @@ def cpu_hpr_reference(uplo, n, alpha, x, incx, AP):
         return ref_AP
     ref_x = to_cpu_blas_tensor(x)
     alpha = alpha.item() if isinstance(alpha, torch.Tensor) else alpha
-    hpr = cpu_blas.chpr if AP.dtype == torch.complex64 else cpu_blas.zhpr
-    updated = hpr(
+    updated = cpu_blas.zhpr(
         n,
         alpha,
         ref_x.numpy(),
@@ -177,12 +170,22 @@ FILL_MODES = [CUBLAS_FILL_MODE_LOWER, CUBLAS_FILL_MODE_UPPER]
 STRIDES = [1, 2, 3]
 
 
+def hpr_randn(*shape, dtype, device):
+    if flag_blas.vendor_name == "ascend" and dtype == torch.complex64:
+        values = torch.randn((*shape, 2), dtype=torch.float32, device=device)
+        return torch.view_as_complex(values)
+    return torch.randn(shape, dtype=dtype, device=device)
+
+
 def make_hermitian_packed(n, dtype, device, uplo):
-    AP = torch.randn(n * (n + 1) // 2, dtype=dtype, device=device)
+    AP = hpr_randn(n * (n + 1) // 2, dtype=dtype, device=device)
     if n > 0:
-        diag = [_packed_offset(i, i, n, uplo) for i in range(n)]
-        diag_t = torch.tensor(diag, dtype=torch.long, device=device)
-        AP[diag_t] = AP[diag_t].real.to(dtype)
+        diag = torch.arange(n, dtype=torch.long, device=device)
+        if uplo == CUBLAS_FILL_MODE_UPPER:
+            diag = diag * (diag + 1) // 2 + diag
+        else:
+            diag = diag + diag * (2 * n - diag - 1) // 2
+        torch.view_as_real(AP)[diag, 1] = 0
     return AP
 
 
@@ -190,17 +193,17 @@ def _run_hpr_case(op, dtype, alpha, uplo, n, incx=1):
     if dtype == torch.complex128:
         check_fp64_support()
     AP = make_hermitian_packed(n, dtype, flag_blas.device, uplo)
-    x = torch.randn(1 + max(0, n - 1) * incx, dtype=dtype, device=flag_blas.device)
+    x = hpr_randn(1 + max(0, n - 1) * incx, dtype=dtype, device=flag_blas.device)
     ref_AP = hpr_reference(uplo, n, alpha, x, incx, AP)
     op(uplo, n, alpha, x, incx, AP)
-    blas_assert_close(AP, ref_AP, dtype, reduce_dim=max(1, n))
+    blas_assert_close(AP, ref_AP, dtype, reduce_dim=1)
 
 
 @pytest.mark.chpr
 @pytest.mark.parametrize("n", HPR_SIZES)
 @pytest.mark.parametrize("uplo", FILL_MODES)
 def test_accuracy_chpr_sizes(n, uplo):
-    _run_hpr_case(flag_blas.ops.chpr, torch.complex64, 1.5, uplo, n)
+    _run_hpr_case(flag_blas.chpr, torch.complex64, 1.5, uplo, n)
 
 
 @pytest.mark.chpr
@@ -208,14 +211,14 @@ def test_accuracy_chpr_sizes(n, uplo):
 @pytest.mark.parametrize("uplo", FILL_MODES)
 @pytest.mark.parametrize("incx", STRIDES)
 def test_accuracy_chpr_stride(n, uplo, incx):
-    _run_hpr_case(flag_blas.ops.chpr, torch.complex64, -0.75, uplo, n, incx)
+    _run_hpr_case(flag_blas.chpr, torch.complex64, -0.75, uplo, n, incx)
 
 
 @pytest.mark.zhpr
 @pytest.mark.parametrize("n", HPR_SIZES)
 @pytest.mark.parametrize("uplo", FILL_MODES)
 def test_accuracy_zhpr_sizes(n, uplo):
-    _run_hpr_case(flag_blas.ops.zhpr, torch.complex128, 1.5, uplo, n)
+    _run_hpr_case(flag_blas.zhpr, torch.complex128, 1.5, uplo, n)
 
 
 @pytest.mark.zhpr
@@ -223,14 +226,14 @@ def test_accuracy_zhpr_sizes(n, uplo):
 @pytest.mark.parametrize("uplo", FILL_MODES)
 @pytest.mark.parametrize("incx", STRIDES)
 def test_accuracy_zhpr_stride(n, uplo, incx):
-    _run_hpr_case(flag_blas.ops.zhpr, torch.complex128, -0.75, uplo, n, incx)
+    _run_hpr_case(flag_blas.zhpr, torch.complex128, -0.75, uplo, n, incx)
 
 
 @pytest.mark.parametrize(
     "dtype,op,alpha",
     [
-        (torch.complex64, flag_blas.ops.chpr, 1.0),
-        (torch.complex128, flag_blas.ops.zhpr, 1.0),
+        (torch.complex64, flag_blas.chpr, 1.0),
+        (torch.complex128, flag_blas.zhpr, 1.0),
     ],
 )
 def test_hpr_n_zero(dtype, op, alpha):

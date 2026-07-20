@@ -132,8 +132,7 @@ def cpu_her2_reference(uplo, n, alpha, x, incx, y, incy, A, lda):
     ref_y = to_cpu_blas_tensor(y)
     logical_A = np.array(ref_A[:n, :n].T.numpy(), order="F", copy=True)
     alpha = alpha.item() if isinstance(alpha, torch.Tensor) else alpha
-    her2 = cpu_blas.cher2 if A.dtype == torch.complex64 else cpu_blas.zher2
-    updated = her2(
+    updated = cpu_blas.zher2(
         alpha,
         ref_x.numpy(),
         ref_y.numpy(),
@@ -196,12 +195,19 @@ FILL_MODES = [CUBLAS_FILL_MODE_LOWER, CUBLAS_FILL_MODE_UPPER]
 STRIDES = [(1, 1), (2, 1), (1, 2), (2, 2)]
 
 
+def her2_randn(*shape, dtype, device):
+    if flag_blas.vendor_name == "ascend" and dtype == torch.complex64:
+        values = torch.randn((*shape, 2), dtype=torch.float32, device=device)
+        return torch.view_as_complex(values)
+    return torch.randn(shape, dtype=dtype, device=device)
+
+
 def create_hermitian_data(n, lda, dtype, device):
     A = torch.zeros((n, lda), dtype=dtype, device=device)
     if n > 0:
-        data = torch.randn(n, n, dtype=dtype, device=device)
-        diag_real = data.diagonal().real.clone()
-        data.diagonal().copy_(diag_real.to(dtype))
+        data = her2_randn(n, n, dtype=dtype, device=device)
+        diag = torch.arange(n, device=device)
+        torch.view_as_real(data)[diag, diag, 1] = 0
         A[:, :n] = data
     return A.contiguous()
 
@@ -211,18 +217,18 @@ def _run_her2_case(op, dtype, alpha, uplo, n, incx=1, incy=1, lda_extra=2):
         check_fp64_support()
     lda = max(1, n) + lda_extra
     A = create_hermitian_data(n, lda, dtype, flag_blas.device)
-    x = torch.randn(1 + max(0, n - 1) * incx, dtype=dtype, device=flag_blas.device)
-    y = torch.randn(1 + max(0, n - 1) * incy, dtype=dtype, device=flag_blas.device)
+    x = her2_randn(1 + max(0, n - 1) * incx, dtype=dtype, device=flag_blas.device)
+    y = her2_randn(1 + max(0, n - 1) * incy, dtype=dtype, device=flag_blas.device)
     ref_A = her2_reference(uplo, n, alpha, x, incx, y, incy, A, lda)
     op(uplo, n, alpha, x, incx, y, incy, A, lda)
-    blas_assert_close(A, ref_A, dtype, reduce_dim=max(1, n))
+    blas_assert_close(A, ref_A, dtype, reduce_dim=2)
 
 
 @pytest.mark.cher2
 @pytest.mark.parametrize("n", HER2_SIZES)
 @pytest.mark.parametrize("uplo", FILL_MODES)
 def test_accuracy_cher2_sizes(n, uplo):
-    _run_her2_case(flag_blas.ops.cher2, torch.complex64, 1.5 + 0.5j, uplo, n)
+    _run_her2_case(flag_blas.cher2, torch.complex64, 1.5 + 0.5j, uplo, n)
 
 
 @pytest.mark.cher2
@@ -230,16 +236,14 @@ def test_accuracy_cher2_sizes(n, uplo):
 @pytest.mark.parametrize("uplo", FILL_MODES)
 @pytest.mark.parametrize("incx,incy", STRIDES)
 def test_accuracy_cher2_stride(n, uplo, incx, incy):
-    _run_her2_case(
-        flag_blas.ops.cher2, torch.complex64, -0.75 + 0.25j, uplo, n, incx, incy
-    )
+    _run_her2_case(flag_blas.cher2, torch.complex64, -0.75 + 0.25j, uplo, n, incx, incy)
 
 
 @pytest.mark.zher2
 @pytest.mark.parametrize("n", HER2_SIZES)
 @pytest.mark.parametrize("uplo", FILL_MODES)
 def test_accuracy_zher2_sizes(n, uplo):
-    _run_her2_case(flag_blas.ops.zher2, torch.complex128, 1.5 + 0.5j, uplo, n)
+    _run_her2_case(flag_blas.zher2, torch.complex128, 1.5 + 0.5j, uplo, n)
 
 
 @pytest.mark.zher2
@@ -248,15 +252,15 @@ def test_accuracy_zher2_sizes(n, uplo):
 @pytest.mark.parametrize("incx,incy", STRIDES)
 def test_accuracy_zher2_stride(n, uplo, incx, incy):
     _run_her2_case(
-        flag_blas.ops.zher2, torch.complex128, -0.75 + 0.25j, uplo, n, incx, incy
+        flag_blas.zher2, torch.complex128, -0.75 + 0.25j, uplo, n, incx, incy
     )
 
 
 @pytest.mark.parametrize(
     "dtype,op,alpha",
     [
-        (torch.complex64, flag_blas.ops.cher2, 1.0 + 0.5j),
-        (torch.complex128, flag_blas.ops.zher2, 1.0 + 0.5j),
+        (torch.complex64, flag_blas.cher2, 1.0 + 0.5j),
+        (torch.complex128, flag_blas.zher2, 1.0 + 0.5j),
     ],
 )
 def test_her2_n_zero(dtype, op, alpha):

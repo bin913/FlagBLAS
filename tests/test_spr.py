@@ -105,8 +105,7 @@ def cpu_spr_reference(uplo, n, alpha, x, incx, AP):
         return ref_AP
     ref_x = to_cpu_blas_tensor(x)
     alpha = alpha.item() if isinstance(alpha, torch.Tensor) else alpha
-    spr = cpu_blas.sspr if AP.dtype == torch.float32 else cpu_blas.dspr
-    updated = spr(
+    updated = cpu_blas.dspr(
         n,
         alpha,
         ref_x.numpy(),
@@ -126,7 +125,7 @@ def spr_reference(uplo, n, alpha, x, incx, AP):
     return ref_AP
 
 
-SPR_SIZES = [
+SPR_EDGE_SIZES = [
     1,
     2,
     3,
@@ -142,31 +141,83 @@ SPR_SIZES = [
     47,
     48,
     49,
-    63,
+]
+SPR_PERF_SIZES = [
     64,
-    65,
-    95,
     96,
-    97,
     127,
     128,
     129,
+    160,
     191,
     192,
     193,
+    224,
     255,
     256,
     257,
+    320,
     383,
     384,
     385,
+    448,
     511,
     512,
     513,
+    640,
     767,
     768,
     769,
+    896,
+    1023,
+    1024,
+    1025,
+    1280,
+    1535,
+    1536,
+    1537,
+    1792,
+    2047,
+    2048,
+    2049,
+    2304,
+    2559,
+    2560,
+    2561,
+    2816,
+    3071,
+    3072,
+    3073,
+    3328,
+    3583,
+    3584,
+    3585,
+    3840,
+    4095,
+    4096,
+    4607,
+    4608,
+    4609,
+    5119,
+    5120,
+    5121,
+    5632,
+    6143,
+    6144,
+    6145,
+    7167,
+    7168,
+    7169,
+    8191,
+    8192,
+    9215,
+    9216,
+    9217,
+    10239,
+    10240,
+    10241,
 ]
+SPR_SIZES = sorted(set(SPR_EDGE_SIZES + SPR_PERF_SIZES))
 SPR_STRIDE_SIZES = [
     15,
     16,
@@ -207,14 +258,14 @@ def _run_spr_case(op, dtype, alpha, uplo, n, incx=1):
     x = torch.randn(1 + max(0, n - 1) * incx, dtype=dtype, device=flag_blas.device)
     ref_AP = spr_reference(uplo, n, alpha, x, incx, AP)
     op(uplo, n, alpha, x, incx, AP)
-    blas_assert_close(AP, ref_AP, dtype, reduce_dim=max(1, n))
+    blas_assert_close(AP, ref_AP, dtype, reduce_dim=1)
 
 
 @pytest.mark.sspr
 @pytest.mark.parametrize("n", SPR_SIZES)
 @pytest.mark.parametrize("uplo", FILL_MODES)
 def test_accuracy_sspr_sizes(n, uplo):
-    _run_spr_case(flag_blas.ops.sspr, torch.float32, 1.5, uplo, n)
+    _run_spr_case(flag_blas.sspr, torch.float32, 1.5, uplo, n)
 
 
 @pytest.mark.sspr
@@ -222,19 +273,19 @@ def test_accuracy_sspr_sizes(n, uplo):
 @pytest.mark.parametrize("uplo", FILL_MODES)
 @pytest.mark.parametrize("incx", STRIDES)
 def test_accuracy_sspr_stride(n, uplo, incx):
-    _run_spr_case(flag_blas.ops.sspr, torch.float32, -0.75, uplo, n, incx=incx)
+    _run_spr_case(flag_blas.sspr, torch.float32, -0.75, uplo, n, incx=incx)
 
 
 @pytest.mark.sspr
 def test_sspr_alpha_zero():
-    _run_spr_case(flag_blas.ops.sspr, torch.float32, 0.0, CUBLAS_FILL_MODE_UPPER, 128)
+    _run_spr_case(flag_blas.sspr, torch.float32, 0.0, CUBLAS_FILL_MODE_UPPER, 128)
 
 
 @pytest.mark.dspr
 @pytest.mark.parametrize("n", SPR_SIZES)
 @pytest.mark.parametrize("uplo", FILL_MODES)
 def test_accuracy_dspr_sizes(n, uplo):
-    _run_spr_case(flag_blas.ops.dspr, torch.float64, 1.5, uplo, n)
+    _run_spr_case(flag_blas.dspr, torch.float64, 1.5, uplo, n)
 
 
 @pytest.mark.dspr
@@ -242,19 +293,19 @@ def test_accuracy_dspr_sizes(n, uplo):
 @pytest.mark.parametrize("uplo", FILL_MODES)
 @pytest.mark.parametrize("incx", STRIDES)
 def test_accuracy_dspr_stride(n, uplo, incx):
-    _run_spr_case(flag_blas.ops.dspr, torch.float64, -0.75, uplo, n, incx=incx)
+    _run_spr_case(flag_blas.dspr, torch.float64, -0.75, uplo, n, incx=incx)
 
 
 @pytest.mark.dspr
 def test_dspr_alpha_zero():
-    _run_spr_case(flag_blas.ops.dspr, torch.float64, 0.0, CUBLAS_FILL_MODE_LOWER, 128)
+    _run_spr_case(flag_blas.dspr, torch.float64, 0.0, CUBLAS_FILL_MODE_LOWER, 128)
 
 
 @pytest.mark.parametrize(
     "dtype, op, alpha",
     [
-        (torch.float32, flag_blas.ops.sspr, 1.5),
-        (torch.float64, flag_blas.ops.dspr, 1.5),
+        (torch.float32, flag_blas.sspr, 1.5),
+        (torch.float64, flag_blas.dspr, 1.5),
     ],
 )
 def test_spr_n_zero(dtype, op, alpha):

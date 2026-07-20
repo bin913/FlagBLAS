@@ -1,23 +1,24 @@
-import cupy as cp
 import numpy as np
 import pytest
 import torch
-from cupy_backends.cuda.libs import cublas
 from scipy.linalg import blas as cpu_blas
 
 import flag_blas
 
+if flag_blas.vendor_name != "ascend":
+    import cupy as cp
+    from cupy_backends.cuda.libs import cublas
+
 from .accuracy_utils import blas_assert_close, to_cpu_blas_tensor, to_reference
 from .conftest import TO_CPU
 
-
 GER_OPS = {
-    "sger": (torch.float32, cublas.sger, np.float32, 1.5),
-    "dger": (torch.float64, cublas.dger, np.float64, 1.5),
-    "cgeru": (torch.complex64, cublas.cgeru, np.complex64, 1.5 - 0.5j),
-    "cgerc": (torch.complex64, cublas.cgerc, np.complex64, 1.5 - 0.5j),
-    "zgeru": (torch.complex128, cublas.zgeru, np.complex128, 1.5 - 0.5j),
-    "zgerc": (torch.complex128, cublas.zgerc, np.complex128, 1.5 - 0.5j),
+    "sger": (torch.float32, np.float32, 1.5),
+    "dger": (torch.float64, np.float64, 1.5),
+    "cgeru": (torch.complex64, np.complex64, 1.5 - 0.5j),
+    "cgerc": (torch.complex64, np.complex64, 1.5 - 0.5j),
+    "zgeru": (torch.complex128, np.complex128, 1.5 - 0.5j),
+    "zgerc": (torch.complex128, np.complex128, 1.5 - 0.5j),
 }
 
 GER_PERF_SHAPES = [
@@ -48,6 +49,13 @@ STRIDE_SHAPES = [(64, 128), (127, 65), (1, 256), (256, 1)]
 STRIDES = [(1, 1), (2, 1), (1, 2), (2, 3)]
 
 
+def ger_randn(*shape, dtype, device):
+    if flag_blas.vendor_name == "ascend" and dtype == torch.complex64:
+        values = torch.randn((*shape, 2), dtype=torch.float32, device=device)
+        return torch.view_as_complex(values)
+    return torch.randn(shape, dtype=dtype, device=device)
+
+
 def _skip_if_unsupported(dtype):
     if dtype in (torch.float64, torch.complex128):
         if not flag_blas.runtime.device.support_fp64:
@@ -58,7 +66,8 @@ def cublas_ger_reference(op_name, m, n, alpha, x, incx, y, incy, A, lda):
     if m == 0 or n == 0:
         return
 
-    _, func, np_dtype, _ = GER_OPS[op_name]
+    _, np_dtype, _ = GER_OPS[op_name]
+    func = getattr(cublas, op_name)
     handle = cp.cuda.device.get_cublas_handle()
     cublas.setPointerMode(handle, cublas.CUBLAS_POINTER_MODE_HOST)
     alpha_np = np.asarray(alpha, dtype=np_dtype)
@@ -83,7 +92,15 @@ def cpu_ger_reference(op_name, m, n, alpha, x, incx, y, incy, A, lda):
     ref_A = to_cpu_blas_tensor(A)
     ref_x = to_cpu_blas_tensor(x)[::incx][:m].contiguous()
     ref_y = to_cpu_blas_tensor(y)[::incy][:n].contiguous()
-    func = getattr(cpu_blas, op_name)
+    cpu_op_name = {
+        "sger": "dger",
+        "dger": "dger",
+        "cgeru": "zgeru",
+        "zgeru": "zgeru",
+        "cgerc": "zgerc",
+        "zgerc": "zgerc",
+    }[op_name]
+    func = getattr(cpu_blas, cpu_op_name)
     out = func(
         alpha,
         ref_x.numpy(),
@@ -109,13 +126,13 @@ def run_ger_case(op_name, m, n, alpha, incx=1, incy=1):
     dtype = GER_OPS[op_name][0]
     _skip_if_unsupported(dtype)
 
-    A_col = torch.randn(n, m, dtype=dtype, device=flag_blas.device).t()
+    A_col = ger_randn(n, m, dtype=dtype, device=flag_blas.device).t()
     A_row = A_col.contiguous()
-    x = torch.randn(max(1, m) * incx, dtype=dtype, device=flag_blas.device)
-    y = torch.randn(max(1, n) * incy, dtype=dtype, device=flag_blas.device)
+    x = ger_randn(max(1, m) * incx, dtype=dtype, device=flag_blas.device)
+    y = ger_randn(max(1, n) * incy, dtype=dtype, device=flag_blas.device)
 
     ref_A = ger_reference(op_name, m, n, alpha, x, incx, y, incy, A_col, m)
-    getattr(flag_blas.ops, op_name)(m, n, alpha, x, incx, y, incy, A_row, n)
+    getattr(flag_blas, op_name)(m, n, alpha, x, incx, y, incy, A_row, n)
 
     blas_assert_close(A_row, ref_A.contiguous(), dtype)
 
@@ -125,14 +142,15 @@ def run_ger_case(op_name, m, n, alpha, incx=1, incy=1):
 def test_ger_exports(op_name):
     assert hasattr(flag_blas.ops, op_name)
     assert hasattr(flag_blas, op_name)
-    assert getattr(flag_blas, op_name) is getattr(flag_blas.ops, op_name)
+    if flag_blas.vendor_name != "ascend":
+        assert getattr(flag_blas, op_name) is getattr(flag_blas.ops, op_name)
 
 
 @pytest.mark.ger
 @pytest.mark.parametrize("op_name", GER_OPS)
 @pytest.mark.parametrize("m,n", GER_SHAPES)
 def test_accuracy_ger(op_name, m, n):
-    alpha = GER_OPS[op_name][3]
+    alpha = GER_OPS[op_name][2]
     run_ger_case(op_name, m, n, alpha=alpha)
 
 
@@ -141,7 +159,7 @@ def test_accuracy_ger(op_name, m, n):
 @pytest.mark.parametrize("m,n", STRIDE_SHAPES)
 @pytest.mark.parametrize("incx,incy", STRIDES)
 def test_accuracy_ger_stride(op_name, m, n, incx, incy):
-    alpha = GER_OPS[op_name][3]
+    alpha = GER_OPS[op_name][2]
     run_ger_case(op_name, m, n, alpha=alpha, incx=incx, incy=incy)
 
 
@@ -163,16 +181,26 @@ def test_accuracy_ger_alpha_zero(op_name, m, n):
 def test_accuracy_ger_conjugate_difference(op_u, op_c, dtype, alpha):
     _skip_if_unsupported(dtype)
     m, n = 5, 7
-    x = torch.randn(m, dtype=dtype, device=flag_blas.device)
-    y = torch.randn(n, dtype=dtype, device=flag_blas.device)
-    A_u = torch.randn(m, n, dtype=dtype, device=flag_blas.device)
+    x = ger_randn(m, dtype=dtype, device=flag_blas.device)
+    y = ger_randn(n, dtype=dtype, device=flag_blas.device)
+    A_u = ger_randn(m, n, dtype=dtype, device=flag_blas.device)
     A_c = A_u.clone()
-    ref_u = A_u + alpha * x[:, None] * y[None, :]
-    ref_c = A_c + alpha * x[:, None] * y.conj()[None, :]
+    if TO_CPU:
+        ref_x = to_cpu_blas_tensor(x)
+        ref_y = to_cpu_blas_tensor(y)
+        ref_u = to_cpu_blas_tensor(A_u) + alpha * ref_x[:, None] * ref_y[None, :]
+        ref_c = to_cpu_blas_tensor(A_c) + alpha * ref_x[:, None] * ref_y.conj()[None, :]
+    else:
+        ref_u = A_u + alpha * x[:, None] * y[None, :]
+        ref_c = A_c + alpha * x[:, None] * y.conj()[None, :]
 
-    getattr(flag_blas.ops, op_u)(m, n, alpha, x, 1, y, 1, A_u, n)
-    getattr(flag_blas.ops, op_c)(m, n, alpha, x, 1, y, 1, A_c, n)
+    getattr(flag_blas, op_u)(m, n, alpha, x, 1, y, 1, A_u, n)
+    getattr(flag_blas, op_c)(m, n, alpha, x, 1, y, 1, A_c, n)
 
     blas_assert_close(A_u, to_reference(ref_u), dtype)
     blas_assert_close(A_c, to_reference(ref_c), dtype)
-    assert not torch.equal(A_u, A_c)
+    if flag_blas.vendor_name == "ascend":
+        # torch.equal does not support complex tensors on Ascend.
+        assert not torch.equal(torch.view_as_real(A_u), torch.view_as_real(A_c))
+    else:
+        assert not torch.equal(A_u, A_c)

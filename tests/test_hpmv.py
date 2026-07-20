@@ -1,12 +1,14 @@
 import ctypes
 import ctypes.util
 
-import cupy as cp
 import pytest
 import torch
 from scipy.linalg import blas as cpu_blas
 
 import flag_blas
+
+if flag_blas.vendor_name != "ascend":
+    import cupy as cp
 from flag_blas.ops import CUBLAS_FILL_MODE_LOWER, CUBLAS_FILL_MODE_UPPER
 
 from .accuracy_utils import blas_assert_close, to_cpu_blas_tensor, to_reference
@@ -27,7 +29,7 @@ def load_cublas():
     raise RuntimeError("Unable to find libcublas.so on this system")
 
 
-_cublas = load_cublas()
+_cublas = None if flag_blas.vendor_name == "ascend" else load_cublas()
 
 
 class cuComplex(ctypes.Structure):
@@ -135,8 +137,20 @@ FILL_MODES = [CUBLAS_FILL_MODE_UPPER, CUBLAS_FILL_MODE_LOWER]
 STRIDES = [(1, 1), (2, 1), (1, 2), (2, 2)]
 
 
+def hpmv_randn(*shape, dtype, device):
+    if flag_blas.vendor_name == "ascend" and dtype == torch.complex64:
+        normalized = (
+            tuple(shape[0])
+            if len(shape) == 1 and isinstance(shape[0], (tuple, torch.Size))
+            else shape
+        )
+        values = torch.randn((*normalized, 2), dtype=torch.float32, device=device)
+        return torch.view_as_complex(values)
+    return torch.randn(*shape, dtype=dtype, device=device)
+
+
 def make_hermitian_packed(n, dtype, device):
-    return torch.randn(n * (n + 1) // 2, dtype=dtype, device=device)
+    return hpmv_randn(n * (n + 1) // 2, dtype=dtype, device=device)
 
 
 def _diag_packed_offsets(n, uplo, device):
@@ -163,10 +177,10 @@ def test_accuracy_chpmv(n, uplo, beta):
     dtype, alpha = torch.complex64, 1.5 + 0.5j
 
     AP = make_hermitian_packed(n, dtype, flag_blas.device)
-    x = torch.randn(n, dtype=dtype, device=flag_blas.device)
-    y = torch.randn(n, dtype=dtype, device=flag_blas.device)
+    x = hpmv_randn(n, dtype=dtype, device=flag_blas.device)
+    y = hpmv_randn(n, dtype=dtype, device=flag_blas.device)
     ref_y = hpmv_reference(uplo, n, alpha, AP, x, 1, beta, y, 1)
-    flag_blas.ops.chpmv(uplo, n, alpha, AP, x, 1, beta, y, 1)
+    flag_blas.chpmv(uplo, n, alpha, AP, x, 1, beta, y, 1)
 
     blas_assert_close(y, ref_y, dtype, reduce_dim=_hpmv_reduce_dim(n))
 
@@ -179,10 +193,10 @@ def test_accuracy_chpmv_stride(n, uplo, incx, incy):
     dtype, alpha, beta = torch.complex64, 2.0 + 0.5j, 0.5 + 0.25j
 
     AP = make_hermitian_packed(n, dtype, flag_blas.device)
-    x = torch.randn(1 + (n - 1) * incx, dtype=dtype, device=flag_blas.device)
-    y = torch.randn(1 + (n - 1) * incy, dtype=dtype, device=flag_blas.device)
+    x = hpmv_randn(1 + (n - 1) * incx, dtype=dtype, device=flag_blas.device)
+    y = hpmv_randn(1 + (n - 1) * incy, dtype=dtype, device=flag_blas.device)
     ref_y = hpmv_reference(uplo, n, alpha, AP, x, incx, beta, y, incy)
-    flag_blas.ops.chpmv(uplo, n, alpha, AP, x, incx, beta, y, incy)
+    flag_blas.chpmv(uplo, n, alpha, AP, x, incx, beta, y, incy)
 
     blas_assert_close(y, ref_y, dtype, reduce_dim=_hpmv_reduce_dim(n))
 
@@ -192,12 +206,12 @@ def test_chpmv_alpha_zero():
     n = 256
     dtype = torch.complex64
     AP = make_hermitian_packed(n, dtype, flag_blas.device)
-    x = torch.randn(n, dtype=dtype, device=flag_blas.device)
-    y = torch.randn(n, dtype=dtype, device=flag_blas.device)
+    x = hpmv_randn(n, dtype=dtype, device=flag_blas.device)
+    y = hpmv_randn(n, dtype=dtype, device=flag_blas.device)
     y_orig = y.clone()
 
     y_ref = hpmv_reference(CUBLAS_FILL_MODE_UPPER, n, 0.0j, AP, x, 1, 2.0 + 1.0j, y, 1)
-    flag_blas.ops.chpmv(CUBLAS_FILL_MODE_UPPER, n, 0.0j, AP, x, 1, 2.0 + 1.0j, y, 1)
+    flag_blas.chpmv(CUBLAS_FILL_MODE_UPPER, n, 0.0j, AP, x, 1, 2.0 + 1.0j, y, 1)
     blas_assert_close(y, y_ref, dtype, reduce_dim=_hpmv_reduce_dim(n))
     blas_assert_close(y, to_reference(y_orig * (2.0 + 1.0j)), dtype)
 
@@ -207,17 +221,15 @@ def test_chpmv_beta_zero():
     n = 256
     dtype = torch.complex64
     AP = make_hermitian_packed(n, dtype, flag_blas.device)
-    x = torch.randn(n, dtype=dtype, device=flag_blas.device)
+    x = hpmv_randn(n, dtype=dtype, device=flag_blas.device)
 
     y_nan = torch.full((n,), float("nan"), dtype=dtype, device=flag_blas.device)
     y_zero = torch.zeros(n, dtype=dtype, device=flag_blas.device)
     ref_y_nan = hpmv_reference(
         CUBLAS_FILL_MODE_LOWER, n, 1.0 + 0.5j, AP, x, 1, 0.0j, y_nan, 1
     )
-    flag_blas.ops.chpmv(CUBLAS_FILL_MODE_LOWER, n, 1.0 + 0.5j, AP, x, 1, 0.0j, y_nan, 1)
-    flag_blas.ops.chpmv(
-        CUBLAS_FILL_MODE_LOWER, n, 1.0 + 0.5j, AP, x, 1, 0.0j, y_zero, 1
-    )
+    flag_blas.chpmv(CUBLAS_FILL_MODE_LOWER, n, 1.0 + 0.5j, AP, x, 1, 0.0j, y_nan, 1)
+    flag_blas.chpmv(CUBLAS_FILL_MODE_LOWER, n, 1.0 + 0.5j, AP, x, 1, 0.0j, y_zero, 1)
     blas_assert_close(y_nan, ref_y_nan, dtype, reduce_dim=_hpmv_reduce_dim(n))
     blas_assert_close(
         y_nan, to_reference(y_zero), dtype, reduce_dim=_hpmv_reduce_dim(n)
@@ -233,10 +245,10 @@ def test_accuracy_zhpmv(n, uplo, beta):
     dtype, alpha = torch.complex128, 1.5 + 0.5j
 
     AP = make_hermitian_packed(n, dtype, flag_blas.device)
-    x = torch.randn(n, dtype=dtype, device=flag_blas.device)
-    y = torch.randn(n, dtype=dtype, device=flag_blas.device)
+    x = hpmv_randn(n, dtype=dtype, device=flag_blas.device)
+    y = hpmv_randn(n, dtype=dtype, device=flag_blas.device)
     ref_y = hpmv_reference(uplo, n, alpha, AP, x, 1, beta, y, 1)
-    flag_blas.ops.zhpmv(uplo, n, alpha, AP, x, 1, beta, y, 1)
+    flag_blas.zhpmv(uplo, n, alpha, AP, x, 1, beta, y, 1)
 
     blas_assert_close(y, ref_y, dtype, reduce_dim=_hpmv_reduce_dim(n))
 
@@ -250,10 +262,10 @@ def test_accuracy_zhpmv_stride(n, uplo, incx, incy):
     dtype, alpha, beta = torch.complex128, 2.0 + 0.5j, 0.5 + 0.25j
 
     AP = make_hermitian_packed(n, dtype, flag_blas.device)
-    x = torch.randn(1 + (n - 1) * incx, dtype=dtype, device=flag_blas.device)
-    y = torch.randn(1 + (n - 1) * incy, dtype=dtype, device=flag_blas.device)
+    x = hpmv_randn(1 + (n - 1) * incx, dtype=dtype, device=flag_blas.device)
+    y = hpmv_randn(1 + (n - 1) * incy, dtype=dtype, device=flag_blas.device)
     ref_y = hpmv_reference(uplo, n, alpha, AP, x, incx, beta, y, incy)
-    flag_blas.ops.zhpmv(uplo, n, alpha, AP, x, incx, beta, y, incy)
+    flag_blas.zhpmv(uplo, n, alpha, AP, x, incx, beta, y, incy)
 
     blas_assert_close(y, ref_y, dtype, reduce_dim=_hpmv_reduce_dim(n))
 
@@ -264,12 +276,12 @@ def test_zhpmv_alpha_zero():
     n = 256
     dtype = torch.complex128
     AP = make_hermitian_packed(n, dtype, flag_blas.device)
-    x = torch.randn(n, dtype=dtype, device=flag_blas.device)
-    y = torch.randn(n, dtype=dtype, device=flag_blas.device)
+    x = hpmv_randn(n, dtype=dtype, device=flag_blas.device)
+    y = hpmv_randn(n, dtype=dtype, device=flag_blas.device)
     y_orig = y.clone()
 
     y_ref = hpmv_reference(CUBLAS_FILL_MODE_UPPER, n, 0.0j, AP, x, 1, 2.0 + 1.0j, y, 1)
-    flag_blas.ops.zhpmv(CUBLAS_FILL_MODE_UPPER, n, 0.0j, AP, x, 1, 2.0 + 1.0j, y, 1)
+    flag_blas.zhpmv(CUBLAS_FILL_MODE_UPPER, n, 0.0j, AP, x, 1, 2.0 + 1.0j, y, 1)
     blas_assert_close(y, y_ref, dtype, reduce_dim=_hpmv_reduce_dim(n))
     blas_assert_close(y, to_reference(y_orig * (2.0 + 1.0j)), dtype)
 
@@ -280,17 +292,15 @@ def test_zhpmv_beta_zero():
     n = 256
     dtype = torch.complex128
     AP = make_hermitian_packed(n, dtype, flag_blas.device)
-    x = torch.randn(n, dtype=dtype, device=flag_blas.device)
+    x = hpmv_randn(n, dtype=dtype, device=flag_blas.device)
 
     y_nan = torch.full((n,), float("nan"), dtype=dtype, device=flag_blas.device)
     y_zero = torch.zeros(n, dtype=dtype, device=flag_blas.device)
     ref_y_nan = hpmv_reference(
         CUBLAS_FILL_MODE_LOWER, n, 1.0 + 0.5j, AP, x, 1, 0.0j, y_nan, 1
     )
-    flag_blas.ops.zhpmv(CUBLAS_FILL_MODE_LOWER, n, 1.0 + 0.5j, AP, x, 1, 0.0j, y_nan, 1)
-    flag_blas.ops.zhpmv(
-        CUBLAS_FILL_MODE_LOWER, n, 1.0 + 0.5j, AP, x, 1, 0.0j, y_zero, 1
-    )
+    flag_blas.zhpmv(CUBLAS_FILL_MODE_LOWER, n, 1.0 + 0.5j, AP, x, 1, 0.0j, y_nan, 1)
+    flag_blas.zhpmv(CUBLAS_FILL_MODE_LOWER, n, 1.0 + 0.5j, AP, x, 1, 0.0j, y_zero, 1)
     blas_assert_close(y_nan, ref_y_nan, dtype, reduce_dim=_hpmv_reduce_dim(n))
     blas_assert_close(
         y_nan, to_reference(y_zero), dtype, reduce_dim=_hpmv_reduce_dim(n)
@@ -300,8 +310,8 @@ def test_zhpmv_beta_zero():
 @pytest.mark.parametrize(
     "dtype, op, alpha, beta",
     [
-        (torch.complex64, flag_blas.ops.chpmv, 1.5 + 0.5j, 0.5 + 0.25j),
-        (torch.complex128, flag_blas.ops.zhpmv, 1.5 + 0.5j, 0.5 + 0.25j),
+        (torch.complex64, flag_blas.chpmv, 1.5 + 0.5j, 0.5 + 0.25j),
+        (torch.complex128, flag_blas.zhpmv, 1.5 + 0.5j, 0.5 + 0.25j),
     ],
 )
 def test_hpmv_n_zero(dtype, op, alpha, beta):
@@ -319,11 +329,11 @@ def test_hpmv_n_zero(dtype, op, alpha, beta):
 @pytest.mark.parametrize(
     "dtype, op, alpha, beta, uplo",
     [
-        (torch.complex64, flag_blas.ops.chpmv, 1.25 + 0.5j, 0.5 + 0.25j, m)
+        (torch.complex64, flag_blas.chpmv, 1.25 + 0.5j, 0.5 + 0.25j, m)
         for m in FILL_MODES
     ]
     + [
-        (torch.complex128, flag_blas.ops.zhpmv, 1.25 + 0.5j, 0.5 + 0.25j, m)
+        (torch.complex128, flag_blas.zhpmv, 1.25 + 0.5j, 0.5 + 0.25j, m)
         for m in FILL_MODES
     ],
 )
@@ -334,18 +344,21 @@ def test_hpmv_diagonal_imag_ignored(dtype, op, alpha, beta, uplo):
     n = 128
     AP_clean = make_hermitian_packed(n, dtype, flag_blas.device)
     diag_off = _diag_packed_offsets(n, uplo, flag_blas.device)
-    real_part = AP_clean[diag_off].real.clone()
-    AP_clean[diag_off] = real_part.to(dtype)
+    AP_clean_parts = torch.view_as_real(AP_clean)
+    real_part = AP_clean_parts[diag_off, 0].clone()
+    AP_clean_parts[diag_off, 1].zero_()
 
     AP_dirty = AP_clean.clone()
-    diag_imag_noise = torch.randn(n, dtype=dtype, device=flag_blas.device).imag
-    AP_dirty[diag_off] = (real_part + 1j * diag_imag_noise).to(dtype)
+    diag_imag_noise = hpmv_randn(n, dtype=dtype, device=flag_blas.device).imag
+    AP_dirty_parts = torch.view_as_real(AP_dirty)
+    AP_dirty_parts[diag_off, 0] = real_part
+    AP_dirty_parts[diag_off, 1] = diag_imag_noise
 
-    x = torch.randn(n, dtype=dtype, device=flag_blas.device)
-    y_clean = torch.randn(n, dtype=dtype, device=flag_blas.device)
+    x = hpmv_randn(n, dtype=dtype, device=flag_blas.device)
+    y_clean = hpmv_randn(n, dtype=dtype, device=flag_blas.device)
     y_dirty = y_clean.clone()
 
     op(uplo, n, alpha, AP_clean, x, 1, beta, y_clean, 1)
     op(uplo, n, alpha, AP_dirty, x, 1, beta, y_dirty, 1)
 
-    torch.testing.assert_close(y_dirty, y_clean)
+    blas_assert_close(y_dirty, to_reference(y_clean), dtype, reduce_dim=n)

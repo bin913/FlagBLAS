@@ -1,7 +1,3 @@
-import ctypes
-import ctypes.util
-
-import cupy as cp
 import pytest
 import torch
 from scipy.linalg import blas as cpu_blas
@@ -20,6 +16,14 @@ from flag_blas.ops import (
 from .accuracy_utils import blas_assert_close, to_cpu_blas_tensor
 from .conftest import TO_CPU
 
+IS_ASCEND = flag_blas.vendor_name == "ascend"
+
+if not IS_ASCEND:
+    import ctypes
+    import ctypes.util
+
+    import cupy as cp
+
 
 def load_cublas():
     lib_names = ["libcublas.so", "libcublas.so.12", "libcublas.so.11"]
@@ -34,7 +38,7 @@ def load_cublas():
     raise RuntimeError("Unable to find libcublas.so on this system")
 
 
-_cublas = load_cublas()
+_cublas = None if IS_ASCEND else load_cublas()
 
 
 def cublas_trsv_reference(uplo, trans, diag, n, A, lda, x, incx):
@@ -96,6 +100,95 @@ def trsv_reference(uplo, trans, diag, n, A, lda, x, incx):
     return ref_x
 
 
+@pytest.mark.parametrize(
+    "uplo,trans,diag,dtype,incx",
+    [
+        (
+            CUBLAS_FILL_MODE_LOWER,
+            CUBLAS_OP_N,
+            CUBLAS_DIAG_NON_UNIT,
+            torch.float32,
+            1,
+        ),
+        (
+            CUBLAS_FILL_MODE_UPPER,
+            CUBLAS_OP_T,
+            CUBLAS_DIAG_UNIT,
+            torch.float32,
+            2,
+        ),
+        (
+            CUBLAS_FILL_MODE_LOWER,
+            CUBLAS_OP_T,
+            CUBLAS_DIAG_UNIT,
+            torch.float32,
+            3,
+        ),
+        (
+            CUBLAS_FILL_MODE_LOWER,
+            CUBLAS_OP_N,
+            CUBLAS_DIAG_NON_UNIT,
+            torch.complex64,
+            2,
+        ),
+        (
+            CUBLAS_FILL_MODE_UPPER,
+            CUBLAS_OP_T,
+            CUBLAS_DIAG_UNIT,
+            torch.complex64,
+            3,
+        ),
+        (
+            CUBLAS_FILL_MODE_LOWER,
+            CUBLAS_OP_C,
+            CUBLAS_DIAG_NON_UNIT,
+            torch.complex64,
+            2,
+        ),
+    ],
+)
+def test_cpu_trsv_reference(uplo, trans, diag, dtype, incx):
+    n, lda = 3, 5
+    dense_dtype = torch.complex128 if dtype.is_complex else torch.float64
+    values = torch.tensor(
+        [[3.0, 0.5, -0.25], [0.75, 4.0, 0.4], [-0.5, 0.2, 5.0]],
+        dtype=dense_dtype,
+    )
+    if dtype.is_complex:
+        values = values + 1j * torch.tensor(
+            [[0.25, -0.5, 0.1], [0.3, -0.2, 0.6], [-0.4, 0.15, 0.5]],
+            dtype=torch.float64,
+        )
+    matrix = (
+        torch.triu(values) if uplo == CUBLAS_FILL_MODE_UPPER else torch.tril(values)
+    )
+    physical = torch.full((n, lda), float("nan"), dtype=dtype)
+    physical[:, :n] = matrix.T.to(dtype)
+    if diag == CUBLAS_DIAG_UNIT:
+        physical.diagonal().fill_(float("nan"))
+
+    x = torch.full((1 + (n - 1) * incx,), 99, dtype=dtype)
+    logical_x = torch.tensor([1.0, -2.0, 0.75], dtype=dense_dtype)
+    if dtype.is_complex:
+        logical_x = logical_x + 1j * torch.tensor(
+            [0.5, -0.25, 1.25], dtype=torch.float64
+        )
+    x[::incx] = logical_x.to(dtype)
+
+    actual = cpu_trsv_reference(uplo, trans, diag, n, physical, lda, x, incx)
+    effective = physical[:, :n].T.to(dense_dtype)
+    if diag == CUBLAS_DIAG_UNIT:
+        effective.diagonal().fill_(1)
+    if trans == CUBLAS_OP_T:
+        effective = effective.T
+    elif trans == CUBLAS_OP_C:
+        effective = effective.mH
+    expected = x.to(dense_dtype)
+    expected[::incx] = torch.linalg.solve(effective, x[::incx].to(dense_dtype))
+
+    torch.testing.assert_close(actual, expected, rtol=1e-12, atol=1e-12)
+
+
 TRSV_CASES = [
     (0, 0),
     (1, 0),
@@ -117,6 +210,13 @@ REAL_TRANS = [CUBLAS_OP_N, CUBLAS_OP_T]
 COMPLEX_TRANS = [CUBLAS_OP_N, CUBLAS_OP_T, CUBLAS_OP_C]
 
 
+def trsv_randn(shape, dtype, device):
+    if IS_ASCEND and dtype == torch.complex64:
+        values = torch.randn((*shape, 2), dtype=torch.float32, device=device)
+        return torch.view_as_complex(values)
+    return torch.randn(shape, dtype=dtype, device=device)
+
+
 def make_triangular(n, lda, uplo, diag, dtype, device):
     if n == 0:
         return torch.zeros((n, lda), dtype=dtype, device=device).contiguous()
@@ -125,7 +225,7 @@ def make_triangular(n, lda, uplo, diag, dtype, device):
         torch.view_as_real(A).fill_(float("nan"))
     else:
         A.fill_(float("nan"))
-    vals = torch.randn((n, n), dtype=dtype, device=device) * 0.02
+    vals = trsv_randn((n, n), dtype, device) * 0.02
     row_idx = torch.arange(n, device=device).view(1, n)
     col_idx = torch.arange(n, device=device).view(n, 1)
     if uplo == CUBLAS_FILL_MODE_UPPER:
@@ -134,6 +234,16 @@ def make_triangular(n, lda, uplo, diag, dtype, device):
         valid = row_idx >= col_idx
     if diag == CUBLAS_DIAG_UNIT:
         valid = valid & (row_idx != col_idx)
+    if IS_ASCEND and dtype == torch.complex64:
+        vals_real = torch.view_as_real(vals)
+        if diag == CUBLAS_DIAG_NON_UNIT:
+            diag_real = torch.diagonal(vals_real, dim1=0, dim2=1)
+            diag_real[0].add_(2.0)
+            diag_real[1].add_(0.25)
+        torch.view_as_real(A)[:, :n].copy_(
+            vals_real.masked_fill(~valid.unsqueeze(-1), float("nan"))
+        )
+        return A.contiguous()
     A[:, :n] = vals.masked_fill(~valid, float("nan"))
     if diag == CUBLAS_DIAG_NON_UNIT:
         diag_vals = torch.diagonal(vals).clone()
@@ -160,7 +270,7 @@ def test_accuracy_strsv(n, uplo, trans, diag, lda_extra):
     dtype = torch.float32
     lda = max(1, n + lda_extra)
     A = make_triangular(n, lda, uplo, diag, dtype, flag_blas.device)
-    x = torch.randn(max(n, 1), dtype=dtype, device=flag_blas.device)
+    x = trsv_randn((max(n, 1),), dtype, flag_blas.device)
     ref_x = trsv_reference(uplo, trans, diag, n, A, lda, x, 1)
     flag_blas.strsv(uplo, trans, diag, n, A, lda, x, 1)
     blas_assert_close(x, ref_x, dtype, reduce_dim=n)
@@ -176,7 +286,7 @@ def test_accuracy_strsv_stride(n, uplo, trans, diag, incx, lda_extra):
     dtype = torch.float32
     lda = n + lda_extra
     A = make_triangular(n, lda, uplo, diag, dtype, flag_blas.device)
-    x = torch.randn(1 + (n - 1) * incx, dtype=dtype, device=flag_blas.device)
+    x = trsv_randn((1 + (n - 1) * incx,), dtype, flag_blas.device)
     ref_x = trsv_reference(uplo, trans, diag, n, A, lda, x, incx)
     flag_blas.strsv(uplo, trans, diag, n, A, lda, x, incx)
     blas_assert_close(x, ref_x, dtype, reduce_dim=n)
@@ -192,7 +302,7 @@ def test_accuracy_dtrsv(n, uplo, trans, diag, lda_extra):
     dtype = torch.float64
     lda = max(1, n + lda_extra)
     A = make_triangular(n, lda, uplo, diag, dtype, flag_blas.device)
-    x = torch.randn(max(n, 1), dtype=dtype, device=flag_blas.device)
+    x = trsv_randn((max(n, 1),), dtype, flag_blas.device)
     ref_x = trsv_reference(uplo, trans, diag, n, A, lda, x, 1)
     flag_blas.dtrsv(uplo, trans, diag, n, A, lda, x, 1)
     blas_assert_close(x, ref_x, dtype, reduce_dim=n)
@@ -209,7 +319,7 @@ def test_accuracy_dtrsv_stride(n, uplo, trans, diag, incx, lda_extra):
     dtype = torch.float64
     lda = n + lda_extra
     A = make_triangular(n, lda, uplo, diag, dtype, flag_blas.device)
-    x = torch.randn(1 + (n - 1) * incx, dtype=dtype, device=flag_blas.device)
+    x = trsv_randn((1 + (n - 1) * incx,), dtype, flag_blas.device)
     ref_x = trsv_reference(uplo, trans, diag, n, A, lda, x, incx)
     flag_blas.dtrsv(uplo, trans, diag, n, A, lda, x, incx)
     blas_assert_close(x, ref_x, dtype, reduce_dim=n)
@@ -224,7 +334,7 @@ def test_accuracy_ctrsv(n, uplo, trans, diag, lda_extra):
     dtype = torch.complex64
     lda = max(1, n + lda_extra)
     A = make_triangular(n, lda, uplo, diag, dtype, flag_blas.device)
-    x = torch.randn(max(n, 1), dtype=dtype, device=flag_blas.device)
+    x = trsv_randn((max(n, 1),), dtype, flag_blas.device)
     ref_x = trsv_reference(uplo, trans, diag, n, A, lda, x, 1)
     flag_blas.ctrsv(uplo, trans, diag, n, A, lda, x, 1)
     blas_assert_close(x, ref_x, dtype, reduce_dim=n)
@@ -240,7 +350,7 @@ def test_accuracy_ctrsv_stride(n, uplo, trans, diag, incx, lda_extra):
     dtype = torch.complex64
     lda = n + lda_extra
     A = make_triangular(n, lda, uplo, diag, dtype, flag_blas.device)
-    x = torch.randn(1 + (n - 1) * incx, dtype=dtype, device=flag_blas.device)
+    x = trsv_randn((1 + (n - 1) * incx,), dtype, flag_blas.device)
     ref_x = trsv_reference(uplo, trans, diag, n, A, lda, x, incx)
     flag_blas.ctrsv(uplo, trans, diag, n, A, lda, x, incx)
     blas_assert_close(x, ref_x, dtype, reduce_dim=n)
@@ -256,7 +366,7 @@ def test_accuracy_ztrsv(n, uplo, trans, diag, lda_extra):
     dtype = torch.complex128
     lda = max(1, n + lda_extra)
     A = make_triangular(n, lda, uplo, diag, dtype, flag_blas.device)
-    x = torch.randn(max(n, 1), dtype=dtype, device=flag_blas.device)
+    x = trsv_randn((max(n, 1),), dtype, flag_blas.device)
     ref_x = trsv_reference(uplo, trans, diag, n, A, lda, x, 1)
     flag_blas.ztrsv(uplo, trans, diag, n, A, lda, x, 1)
     blas_assert_close(x, ref_x, dtype, reduce_dim=n)
@@ -273,7 +383,7 @@ def test_accuracy_ztrsv_stride(n, uplo, trans, diag, incx, lda_extra):
     dtype = torch.complex128
     lda = n + lda_extra
     A = make_triangular(n, lda, uplo, diag, dtype, flag_blas.device)
-    x = torch.randn(1 + (n - 1) * incx, dtype=dtype, device=flag_blas.device)
+    x = trsv_randn((1 + (n - 1) * incx,), dtype, flag_blas.device)
     ref_x = trsv_reference(uplo, trans, diag, n, A, lda, x, incx)
     flag_blas.ztrsv(uplo, trans, diag, n, A, lda, x, incx)
     blas_assert_close(x, ref_x, dtype, reduce_dim=n)
