@@ -12,13 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import cupy as cp
 import pytest
 import torch
-import cupy as cp
 from cupy_backends.cuda.libs import cublas
 from scipy.linalg import blas as cpu_blas
 
 import flag_blas
+
 from .accuracy_utils import DOTC_SHAPES, L1_PAIR_STRIDES
 from .conftest import TO_CPU
 
