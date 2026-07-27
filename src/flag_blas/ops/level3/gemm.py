@@ -139,7 +139,7 @@ def _sgemm_tn_kernel(
     BLOCK_K: tl.constexpr,
     GROUP_M: tl.constexpr,
 ):
-    pid = tle.program_id(0)
+    pid = tl.program_id(0)
 
     grid_m = tl.cdiv(m, BLOCK_M)
     grid_n = tl.cdiv(n, BLOCK_N)
@@ -149,48 +149,52 @@ def _sgemm_tn_kernel(
     pid_m = group_id * GROUP_M + (pid % group_size)
     pid_n = (pid % width) // group_size
 
-    offset_n = (pid_n * BLOCK_N).to(tl.int32)
+    if pid_m * BLOCK_M >= m or pid_n * BLOCK_N >= n:
+        return
+
     offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     offs_k = tl.arange(0, BLOCK_K)
 
     a_ptrs = a_ptr + (offs_m[:, None] + offs_k[None, :] * lda)
-
-    b_block_ptr = tl.make_block_ptr(
-        base=b_ptr,
-        shape=(k, n),
-        strides=(ldb, 1),
-        offsets=(0, offset_n),
-        block_shape=(BLOCK_K, BLOCK_N),
-        order=(1, 0),
-    )
+    b_ptrs = b_ptr + (offs_k[:, None] * ldb + offs_n[None, :])
 
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
 
-    for k_idx in range(0, tl.cdiv(k, BLOCK_K)):
-        offs_k_curr = k_idx * BLOCK_K + offs_k
-        a_mask = (offs_m[:, None] < m) & (offs_k_curr[None, :] < k)
-        a = tl.load(a_ptrs, mask=a_mask, other=0.0, eviction_policy="evict_last")
-        b = tl.load(b_block_ptr, boundary_check=(0, 1), eviction_policy="evict_last")
-        acc += tl.dot(a, b, out_dtype=tl.float32, allow_tf32=False)
-        a_ptrs += BLOCK_K * lda
-        b_block_ptr = tl.advance(b_block_ptr, (BLOCK_K, 0))
+    mask_m = offs_m < m
+    mask_n = offs_n < n
 
-    offset_m = (pid_m * BLOCK_M).to(tl.int32)
-    c_block_ptr = tl.make_block_ptr(
-        base=c_ptr,
-        shape=(m, n),
-        strides=(ldc, 1),
-        offsets=(offset_m, offset_n),
-        block_shape=(BLOCK_M, BLOCK_N),
-        order=(1, 0),
-    )
+    k_full_iters = k // BLOCK_K
+    k_remainder = k % BLOCK_K
+
+    for _ in range(k_full_iters):
+        a = tl.load(a_ptrs, mask=mask_m[:, None], other=0.0)
+        b = tl.load(b_ptrs, mask=mask_n[None, :], other=0.0)
+        acc = tl.dot(a, b, acc, out_dtype=tl.float32, allow_tf32=False)
+        a_ptrs += BLOCK_K * lda
+        b_ptrs += BLOCK_K * ldb
+
+    if k_remainder > 0:
+        mask_k = offs_k < k_remainder
+        a_mask_tail = mask_m[:, None] & mask_k[None, :]
+        b_mask_tail = mask_k[:, None] & mask_n[None, :]
+        a = tl.load(a_ptrs, mask=a_mask_tail, other=0.0)
+        b = tl.load(b_ptrs, mask=b_mask_tail, other=0.0)
+        acc = tl.dot(a, b, acc, out_dtype=tl.float32, allow_tf32=False)
+
+    offs_cm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_cn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    c_ptrs = c_ptr + (offs_cm[:, None] * ldc + offs_cn[None, :])
+
+    mask_m = offs_cm < m
+    mask_n = offs_cn < n
+    c_mask = mask_m[:, None] & mask_n[None, :]
 
     if BETA_IS_ZERO:
-        tl.store(c_block_ptr, alpha * acc, boundary_check=(0, 1))
+        tl.store(c_ptrs, alpha * acc, mask=c_mask)
     else:
-        c_vals = tl.load(c_block_ptr, boundary_check=(0, 1)).to(tl.float32)
-        result = acc * alpha + beta * c_vals
-        tl.store(c_block_ptr, result.to(tl.float32), boundary_check=(0, 1))
+        c_vals = tl.load(c_ptrs, mask=c_mask, other=0.0).to(tl.float32)
+        tl.store(c_ptrs, alpha * acc + beta * c_vals, mask=c_mask)
 
 
 @libentry()
