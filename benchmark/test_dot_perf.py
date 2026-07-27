@@ -61,6 +61,10 @@ class DotBenchmark(Benchmark):
         self.incx = incx
         self.incy = incy
 
+    def init_user_config(self):
+        super().init_user_config()
+        self.shapes = DEFAULT_SHAPES
+
     def set_more_metrics(self):
         return ["gbps"]
 
