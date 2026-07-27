@@ -20,7 +20,7 @@ from scipy.linalg import blas as cpu_blas
 
 import flag_blas
 
-from .accuracy_utils import DOTU_SHAPES, L1_PAIR_STRIDES
+from .accuracy_utils import DOTU_SHAPES, L1_PAIR_STRIDES, blas_assert_close
 from .conftest import TO_CPU
 
 
@@ -102,7 +102,7 @@ def test_accuracy_dotu_complex(dtype, shape, incx, incy):
         flag_blas.ops.zdotu(n, x, incx, y, incy, result)
 
     rtol, atol = _dotu_tolerances(dtype)
-    torch.testing.assert_close(result, ref_result, rtol=rtol, atol=atol)
+    blas_assert_close(result, ref_result, dtype, reduce_dim=n)
 
 
 @pytest.mark.dotu
@@ -152,4 +152,4 @@ def test_accuracy_dotu_different_n(dtype, n, vec_size):
         flag_blas.ops.zdotu(n, x, 1, y, 1, result)
 
     rtol, atol = _dotu_tolerances(dtype)
-    torch.testing.assert_close(result, ref_result, rtol=rtol, atol=atol)
+    blas_assert_close(result, ref_result, dtype, reduce_dim=n)
