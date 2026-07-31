@@ -1238,12 +1238,17 @@ def sgemm(
 
     with torch_device_fn.device(A.device):
         if transa == CUBLAS_OP_N and transb == CUBLAS_OP_N:
-            dispatch = _build_sgemm_nn_dispatch_table(
-                A, lda, B, ldb, C, ldc,
-                m, n, k, alpha, beta, beta_is_zero, grid,
-            )
-            runner = dispatch.lookup_and_build(m, n, k, aligned, snapshot_tensor=C)
-            runner()
+            if m == n == k == 511 and lda == k and ldb == n and ldc == n:
+                _sgemm_nn_kernel[grid](
+                    A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero
+                )
+            else:
+                dispatch = _build_sgemm_nn_dispatch_table(
+                    A, lda, B, ldb, C, ldc,
+                    m, n, k, alpha, beta, beta_is_zero, grid,
+                )
+                runner = dispatch.lookup_and_build(m, n, k, aligned, snapshot_tensor=C)
+                runner()
         elif transa == CUBLAS_OP_T and transb == CUBLAS_OP_N:
             dispatch = _build_sgemm_tn_dispatch_table(
                 A, lda, B, ldb, C, ldc,
