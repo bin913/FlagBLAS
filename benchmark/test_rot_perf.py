@@ -122,6 +122,10 @@ class RotBenchmark(Benchmark):
         self.c = c
         self.s = s
 
+    def init_user_config(self):
+        super().init_user_config()
+        self.shapes = L1_VECTOR_SHAPES
+
     def set_more_metrics(self):
         return ["gbps"]
 
@@ -152,6 +156,10 @@ class RotStrideBenchmark(Benchmark):
         self.incy = incy
         self.c = c
         self.s = s
+
+    def init_user_config(self):
+        super().init_user_config()
+        self.shapes = L1_STRIDE_SHAPES
 
     def set_more_metrics(self):
         return ["gbps"]
