@@ -60,7 +60,6 @@ from flag_blas.ops.level2.trmv import ctrmv, dtrmv, strmv, ztrmv
 from flag_blas.ops.level3.bfgemm import bfgemm
 from flag_blas.ops.level3.cgemm import cgemm
 from flag_blas.ops.level3.dgemm import dgemm
-from flag_blas.ops.level3.fp8gemm import fp8gemm
 from flag_blas.ops.level3.group_gemm import group_gemm, group_mm
 from flag_blas.ops.level3.hgemm import hgemm
 from flag_blas.ops.level3.sgemm import sgemm
@@ -172,7 +171,6 @@ __all__ = [
     "zgemm",
     "hgemm",
     "bfgemm",
-    "fp8gemm",
     "group_mm",
     "group_gemm",
     # abs

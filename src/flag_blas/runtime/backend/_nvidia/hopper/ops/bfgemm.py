@@ -24,7 +24,6 @@ from flag_blas.ops.level3.bfgemm import (
     _BFGEMM_KEY,
     CUBLAS_OP_N,
     CUBLAS_OP_T,
-    ScalarType,
     _bfgemm_nn_kernel,
     _bfgemm_nt_kernel,
     _bfgemm_tn_kernel,
@@ -32,9 +31,8 @@ from flag_blas.ops.level3.bfgemm import (
 )
 from flag_blas.runtime import torch_device_fn
 from flag_blas.runtime.backend._nvidia.hopper.ops.sgemm import _is_gemm_aligned
-from flag_blas.runtime.dispatch import SizeAutoDispatch, StaticDispatch
+from flag_blas.runtime.dispatch import StaticDispatch
 from flag_blas.utils import libentry, libtuner
-from flag_blas.utils.libentry import libcache
 
 logger = logging.getLogger(__name__)
 

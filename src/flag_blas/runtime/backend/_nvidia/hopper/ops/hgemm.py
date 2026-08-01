@@ -32,9 +32,8 @@ from flag_blas.ops.level3.hgemm import (
 )
 from flag_blas.runtime import torch_device_fn
 from flag_blas.runtime.backend._nvidia.hopper.ops.sgemm import _is_gemm_aligned
-from flag_blas.runtime.dispatch import SizeAutoDispatch, StaticDispatch
+from flag_blas.runtime.dispatch import StaticDispatch
 from flag_blas.utils import libentry, libtuner
-from flag_blas.utils.libentry import libcache
 
 logger = logging.getLogger(__name__)
 
@@ -2330,10 +2329,6 @@ def hgemm(
     assert C.numel() >= m * ldc
 
     beta_is_zero = beta == 0.0
-
-    grid = lambda meta: (
-        triton.cdiv(m, meta["BLOCK_M"]) * triton.cdiv(n, meta["BLOCK_N"]),
-    )
 
     aligned = _is_gemm_aligned(A, lda, B, ldb, C, ldc)
     with torch_device_fn.device(A.device):

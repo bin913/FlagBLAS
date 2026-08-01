@@ -13,10 +13,9 @@
 # limitations under the License.
 
 from flag_blas.runtime.backend._nvidia.hopper.ops.bfgemm import bfgemm
-from flag_blas.runtime.backend._nvidia.hopper.ops.fp8gemm import fp8gemm
 from flag_blas.runtime.backend._nvidia.hopper.ops.hgemm import hgemm
 from flag_blas.runtime.backend._nvidia.hopper.ops.sgemm import sgemm
 
 from .tpmv import ctpmv
 
-__all__ = ["sgemm", "hgemm", "bfgemm", "fp8gemm", "ctpmv"]
+__all__ = ["sgemm", "hgemm", "bfgemm", "ctpmv"]

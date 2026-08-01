@@ -15,7 +15,6 @@
 import cupy as cp
 import numpy as np
 import pytest
-import scipy
 import torch
 from cupy_backends.cuda.libs import cublas
 from scipy.linalg import blas

@@ -22,7 +22,7 @@ from cupy_backends.cuda.libs import cublas
 
 import flag_blas
 from benchmark.performance_utils import Benchmark
-from flag_blas.ops import CUBLAS_OP_N, CUBLAS_OP_T
+from flag_blas.ops import CUBLAS_OP_N
 from flag_blas.utils import shape_utils
 
 CUDA_R_32F = 0
@@ -405,94 +405,6 @@ def gems_bfgemm_wrapper(
     return C_row
 
 
-def cublas_fp8gemm_baseline(
-    A_col,
-    B_col,
-    C_col,
-    transa,
-    transb,
-    m,
-    n,
-    k,
-    alpha,
-    A_row,
-    B_row,
-    C_row,
-    lda_cublas,
-    ldb_cublas,
-    ldc_cublas,
-    lda_flag,
-    ldb_flag,
-    ldc_flag,
-    beta,
-    handle,
-    alpha_ptr,
-    beta_ptr,
-):
-    cublas.sgemm(
-        handle,
-        transa,
-        transb,
-        m,
-        n,
-        k,
-        alpha_ptr,
-        A_col.data_ptr(),
-        lda_cublas,
-        B_col.data_ptr(),
-        ldb_cublas,
-        beta_ptr,
-        C_col.data_ptr(),
-        ldc_cublas,
-    )
-    return C_col
-
-
-def gems_fp8gemm_wrapper(
-    A_col,
-    B_col,
-    C_col,
-    transa,
-    transb,
-    m,
-    n,
-    k,
-    alpha,
-    A_row,
-    B_row,
-    C_row,
-    lda_cublas,
-    ldb_cublas,
-    ldc_cublas,
-    lda_flag,
-    ldb_flag,
-    ldc_flag,
-    beta,
-    handle,
-    alpha_ptr,
-    beta_ptr,
-):
-    flag_blas.fp8gemm(
-        transa,
-        transb,
-        m,
-        n,
-        k,
-        alpha,
-        A_row,
-        lda_flag,
-        B_row,
-        ldb_flag,
-        beta,
-        C_row,
-        ldc_flag,
-    )
-    return C_row
-
-
-FP8_GEMM_SHAPES = [s for s in GEMM_SHAPES if all(d % 16 == 0 for d in s)]
-
-
 class GemmBenchmark(Benchmark):
     DEFAULT_SHAPE_DESC = "M, N, K"
 
@@ -536,7 +448,6 @@ class GemmBenchmark(Benchmark):
 
         for shape in self.shapes:
             m, n, k = shape
-            scale = k**-0.5
             if self.transa == CUBLAS_OP_N:
                 A_col = torch.randn(k, m, dtype=cur_dtype, device=self.device).t()
                 lda_cublas, lda_flag = m, k
@@ -617,90 +528,8 @@ class GemmBenchmark(Benchmark):
                 torch.abs((torch_cpu - gems_cpu) / (torch.abs(torch_cpu) + 1e-9))
             )
             raise AssertionError(
-                f"Results differ beyond tolerance {tolerance}:\n"
+                f"{e} Results differ beyond tolerance {tolerance}:\n"
                 f"Max absolute difference: {max_abs_diff}\n"
                 f"Max relative difference: {max_rel_diff}\n"
                 f"Shape: {torch_cpu.shape}"
             )
-
-
-class Fp8GemmBenchmark(GemmBenchmark):
-    def __init__(
-        self, *args, fp8_dtype=torch.float8_e4m3fn, out_dtype=torch.float16, **kwargs
-    ):
-        super().__init__(*args, **kwargs)
-        self.fp8_dtype = fp8_dtype
-        self.out_dtype = out_dtype
-
-    def set_more_shapes(self):
-        # FP8 requires all dimensions divisible by 16
-        filtered_model_shapes = [
-            (bs, n, k)
-            for bs, n, k in model_shapes()
-            if all(d % 16 == 0 for d in (bs, n, k))
-        ]
-        return FP8_GEMM_SHAPES + filtered_model_shapes
-
-    def get_input_iter(self, cur_dtype) -> Generator:
-        handle = cp.cuda.device.get_cublas_handle()
-        cublas.setPointerMode(handle, cublas.CUBLAS_POINTER_MODE_HOST)
-        cublas.setMathMode(handle, 0)
-        torch.backends.cuda.matmul.allow_tf32 = False
-
-        alpha_np = np.array(self.alpha, dtype=np.float32)
-        beta_np = np.array(self.beta, dtype=np.float32)
-        alpha_ptr = alpha_np.ctypes.data
-        beta_ptr = beta_np.ctypes.data
-
-        for shape in self.shapes:
-            m, n, k = shape
-
-            if self.transa == CUBLAS_OP_N:
-                A_f32_col = torch.randn(
-                    k, m, dtype=torch.float32, device=self.device
-                ).t()
-                lda_cublas, lda_flag = m, k
-            else:
-                A_f32_col = torch.randn(
-                    m, k, dtype=torch.float32, device=self.device
-                ).t()
-                lda_cublas, lda_flag = k, m
-            A_fp8_row = A_f32_col.contiguous().to(self.fp8_dtype)
-
-            if self.transb == CUBLAS_OP_N:
-                B_f32_col = torch.randn(
-                    n, k, dtype=torch.float32, device=self.device
-                ).t()
-                ldb_cublas, ldb_flag = k, n
-            else:
-                B_f32_col = torch.randn(
-                    k, n, dtype=torch.float32, device=self.device
-                ).t()
-                ldb_cublas, ldb_flag = n, k
-            B_fp8_row = B_f32_col.contiguous().to(self.fp8_dtype)
-
-            C_f32_col = torch.randn(n, m, dtype=torch.float32, device=self.device).t()
-            C_out_row = C_f32_col.contiguous().to(self.out_dtype)
-            ldc_cublas, ldc_flag = m, n
-
-            yield A_f32_col, B_f32_col, C_f32_col.clone(), {
-                "transa": self.transa,
-                "transb": self.transb,
-                "m": m,
-                "n": n,
-                "k": k,
-                "alpha": self.alpha,
-                "A_row": A_fp8_row,
-                "B_row": B_fp8_row,
-                "C_row": C_out_row,
-                "lda_cublas": lda_cublas,
-                "ldb_cublas": ldb_cublas,
-                "ldc_cublas": ldc_cublas,
-                "lda_flag": lda_flag,
-                "ldb_flag": ldb_flag,
-                "ldc_flag": ldc_flag,
-                "beta": self.beta,
-                "handle": handle,
-                "alpha_ptr": alpha_ptr,
-                "beta_ptr": beta_ptr,
-            }

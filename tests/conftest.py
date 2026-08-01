@@ -18,7 +18,6 @@ import os
 from datetime import datetime
 
 import pytest
-import torch
 
 import flag_blas
 
