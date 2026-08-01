@@ -22,6 +22,7 @@ from benchmark.gemm_perf_common import (
 )
 from flag_blas.ops import CUBLAS_OP_N, CUBLAS_OP_T
 
+
 @pytest.mark.fp8gemm
 def test_perf_fp8gemm_nn():
     bench = Fp8GemmBenchmark(

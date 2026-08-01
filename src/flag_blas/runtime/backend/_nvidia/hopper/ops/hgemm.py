@@ -21,23 +21,23 @@ from triton.tools.tensor_descriptor import TensorDescriptor  # noqa: F401
 
 from flag_blas import runtime
 from flag_blas.ops.level3.hgemm import (
+    _HGEMM_KEY,
     CUBLAS_OP_N,
     CUBLAS_OP_T,
     ScalarType,
-    _HGEMM_KEY,
     _hgemm_nn_kernel,
     _hgemm_nt_kernel,
     _hgemm_tn_kernel,
     _hgemm_tt_kernel,
 )
 from flag_blas.runtime import torch_device_fn
+from flag_blas.runtime.backend._nvidia.hopper.ops.sgemm import _is_gemm_aligned
 from flag_blas.runtime.dispatch import SizeAutoDispatch, StaticDispatch
 from flag_blas.utils import libentry, libtuner
 from flag_blas.utils.libentry import libcache
 
-from flag_blas.runtime.backend._nvidia.hopper.ops.sgemm import _is_gemm_aligned
-
 logger = logging.getLogger(__name__)
+
 
 @libentry()
 @libtuner(
@@ -1125,15 +1125,13 @@ def _hgemm_tt_kernel6(
 # Module-level condition predicates for hgemm StaticDispatch
 # ---------------------------------------------------------------------------
 
+
 def _hgemm_nn_is_skinny_aligned_large(m, n, k, aligned, **_kw):
     return (
         aligned
         and (m * n > 2048 * 2048)
         and min(m, n) >= 64
-        and (
-            (m >= 16384 and max(n, k) <= 2048)
-            or (n >= 16384 and max(m, k) <= 2048)
-        )
+        and ((m >= 16384 and max(n, k) <= 2048) or (n >= 16384 and max(m, k) <= 2048))
     )
 
 
@@ -1173,90 +1171,227 @@ def _hgemm_nn_is_default(**_kw):
 # Module-level factory functions for hgemm StaticDispatch
 # ---------------------------------------------------------------------------
 def _hgemm_nn_build_kernel5_64x128(
-    A, B, C, m, n, k, lda, ldb, ldc, alpha, beta, beta_is_zero,
+    A,
+    B,
+    C,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    alpha,
+    beta,
+    beta_is_zero,
 ):
-    return lambda: _hgemm_nn_kernel5[(
-        triton.cdiv(m, 64) * triton.cdiv(n, 128),
-    )](
-        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero,
-        BLOCK_M=64, BLOCK_N=128, BLOCK_K=128, GROUP_M=8,
-        num_stages=4, num_warps=4, num_ctas=1,
+    return lambda: _hgemm_nn_kernel5[(triton.cdiv(m, 64) * triton.cdiv(n, 128),)](
+        A,
+        B,
+        C,
+        alpha,
+        beta,
+        m,
+        n,
+        k,
+        lda,
+        ldb,
+        ldc,
+        beta_is_zero,
+        BLOCK_M=64,
+        BLOCK_N=128,
+        BLOCK_K=128,
+        GROUP_M=8,
+        num_stages=4,
+        num_warps=4,
+        num_ctas=1,
     )
 
 
 def _hgemm_nn_build_kernel5_128x64(
-    A, B, C, m, n, k, lda, ldb, ldc, alpha, beta, beta_is_zero,
+    A,
+    B,
+    C,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    alpha,
+    beta,
+    beta_is_zero,
 ):
-    return lambda: _hgemm_nn_kernel5[(
-        triton.cdiv(m, 128) * triton.cdiv(n, 64),
-    )](
-        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero,
-        BLOCK_M=128, BLOCK_N=64, BLOCK_K=128, GROUP_M=8,
-        num_stages=4, num_warps=4, num_ctas=1,
+    return lambda: _hgemm_nn_kernel5[(triton.cdiv(m, 128) * triton.cdiv(n, 64),)](
+        A,
+        B,
+        C,
+        alpha,
+        beta,
+        m,
+        n,
+        k,
+        lda,
+        ldb,
+        ldc,
+        beta_is_zero,
+        BLOCK_M=128,
+        BLOCK_N=64,
+        BLOCK_K=128,
+        GROUP_M=8,
+        num_stages=4,
+        num_warps=4,
+        num_ctas=1,
     )
 
 
 def _hgemm_nn_build_kernel4(
-    A, B, C, m, n, k, lda, ldb, ldc, alpha, beta, beta_is_zero,
+    A,
+    B,
+    C,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    alpha,
+    beta,
+    beta_is_zero,
 ):
-    return lambda: _hgemm_nn_kernel4[(
-        triton.cdiv(m, 128) * triton.cdiv(n, 256),
-    )](
+    return lambda: _hgemm_nn_kernel4[(triton.cdiv(m, 128) * triton.cdiv(n, 256),)](
         TensorDescriptor(base=A, shape=[m, k], strides=[lda, 1], block_shape=[128, 64]),
         TensorDescriptor(base=B, shape=[k, n], strides=[ldb, 1], block_shape=[64, 256]),
-        TensorDescriptor(base=C, shape=[m, n], strides=[ldc, 1], block_shape=[128, 256]),
-        alpha, beta, m, n, k, beta_is_zero,
-        BLOCK_M=128, BLOCK_N=256, BLOCK_K=64, GROUP_M=8,
-        num_stages=4, num_warps=8, num_ctas=1,
+        TensorDescriptor(
+            base=C, shape=[m, n], strides=[ldc, 1], block_shape=[128, 256]
+        ),
+        alpha,
+        beta,
+        m,
+        n,
+        k,
+        beta_is_zero,
+        BLOCK_M=128,
+        BLOCK_N=256,
+        BLOCK_K=64,
+        GROUP_M=8,
+        num_stages=4,
+        num_warps=8,
+        num_ctas=1,
     )
 
 
-
-
 def _hgemm_nn_build_kernel3(
-    A, B, C, m, n, k, lda, ldb, ldc, alpha, beta, beta_is_zero,
+    A,
+    B,
+    C,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    alpha,
+    beta,
+    beta_is_zero,
 ):
     grid = lambda meta: (
         triton.cdiv(m, meta["BLOCK_M"]) * triton.cdiv(n, meta["BLOCK_N"]),
     )
     return lambda: _hgemm_nn_kernel3[grid](
-        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero,
+        A,
+        B,
+        C,
+        alpha,
+        beta,
+        m,
+        n,
+        k,
+        lda,
+        ldb,
+        ldc,
+        beta_is_zero,
     )
 
 
 def _hgemm_nn_build_kernel2(
-    A, B, C, m, n, k, lda, ldb, ldc, alpha, beta, beta_is_zero,
+    A,
+    B,
+    C,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    alpha,
+    beta,
+    beta_is_zero,
 ):
     grid = lambda meta: (
         triton.cdiv(m, meta["BLOCK_M"]) * triton.cdiv(n, meta["BLOCK_N"]),
     )
     return lambda: _hgemm_nn_kernel2[grid](
-        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero,
+        A,
+        B,
+        C,
+        alpha,
+        beta,
+        m,
+        n,
+        k,
+        lda,
+        ldb,
+        ldc,
+        beta_is_zero,
     )
 
 
 def _hgemm_nn_build_kernel(
-    A, B, C, m, n, k, lda, ldb, ldc, alpha, beta, beta_is_zero,
+    A,
+    B,
+    C,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    alpha,
+    beta,
+    beta_is_zero,
 ):
     grid = lambda meta: (
         triton.cdiv(m, meta["BLOCK_M"]) * triton.cdiv(n, meta["BLOCK_N"]),
     )
     return lambda: _hgemm_nn_kernel[grid](
-        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero,
+        A,
+        B,
+        C,
+        alpha,
+        beta,
+        m,
+        n,
+        k,
+        lda,
+        ldb,
+        ldc,
+        beta_is_zero,
     )
 
 
-_HGEMM_NN_DISPATCH = StaticDispatch([
-    (_hgemm_nn_is_aligned_tiny, _hgemm_nn_build_kernel),
-    (_hgemm_nn_is_m64_mid, _hgemm_nn_build_kernel5_64x128),
-    (_hgemm_nn_is_n64_mid, _hgemm_nn_build_kernel5_64x128),
-    (_hgemm_nn_is_128_mid, _hgemm_nn_build_kernel5_64x128),
-    (_hgemm_nn_is_2048_wide_k4096, _hgemm_nn_build_kernel4),
-    (_hgemm_nn_is_skinny_aligned_large, _hgemm_nn_build_kernel4),
-    (_hgemm_nn_is_aligned_large, _hgemm_nn_build_kernel3),
-    (_hgemm_nn_is_aligned_small, _hgemm_nn_build_kernel2),
-    (_hgemm_nn_is_default, _hgemm_nn_build_kernel),
-])
+_HGEMM_NN_DISPATCH = StaticDispatch(
+    [
+        (_hgemm_nn_is_aligned_tiny, _hgemm_nn_build_kernel),
+        (_hgemm_nn_is_m64_mid, _hgemm_nn_build_kernel5_64x128),
+        (_hgemm_nn_is_n64_mid, _hgemm_nn_build_kernel5_64x128),
+        (_hgemm_nn_is_128_mid, _hgemm_nn_build_kernel5_64x128),
+        (_hgemm_nn_is_2048_wide_k4096, _hgemm_nn_build_kernel4),
+        (_hgemm_nn_is_skinny_aligned_large, _hgemm_nn_build_kernel4),
+        (_hgemm_nn_is_aligned_large, _hgemm_nn_build_kernel3),
+        (_hgemm_nn_is_aligned_small, _hgemm_nn_build_kernel2),
+        (_hgemm_nn_is_default, _hgemm_nn_build_kernel),
+    ]
+)
 
 
 # ---------------------------------------------------------------------------
@@ -1274,15 +1409,12 @@ def _hgemm_tn_is_m64_n1024(m, n, k, aligned, **_kw):
     return aligned and m == 64 and n == 1024 and k == 512
 
 
-
-
 def _hgemm_tn_is_1024_square(m, n, k, aligned, **_kw):
     return aligned and m == 1024 and n == 1024 and k == 1024
 
 
 def _hgemm_tn_is_128_mid(m, n, k, aligned, **_kw):
     return aligned and k <= 1024 and max(m, n) >= 4096 and min(m, n) == 128
-
 
 
 def _hgemm_tn_is_tma_large(m, n, k, aligned, **_kw):
@@ -1312,12 +1444,8 @@ def _hgemm_nt_is_1023_square(m, n, k, aligned, **_kw):
     return m == 1023 and n == 1023 and k == 1023
 
 
-
-
-
 def _hgemm_nt_is_tma_huge_k(m, n, k, aligned, **_kw):
     return aligned and k > 8192 and m * n >= 2048 * 4096
-
 
 
 def _hgemm_nt_is_2048_square(m, n, k, aligned, **_kw):
@@ -1345,7 +1473,6 @@ def _hgemm_tt_is_aligned_tiny(m, n, k, aligned, **_kw):
 
 def _hgemm_tt_is_m64_mid(m, n, k, aligned, **_kw):
     return aligned and m == 64 and n >= 1024 and k >= 512
-
 
 
 def _hgemm_tt_is_1024_square(m, n, k, aligned, **_kw):
@@ -1388,300 +1515,766 @@ def _hgemm_tt_is_default(**_kw):
 # Module-level factory functions for hgemm_tn StaticDispatch
 # ---------------------------------------------------------------------------
 def _hgemm_tn_build_kernel3(
-    A, B, C, m, n, k, lda, ldb, ldc, alpha, beta, beta_is_zero,
+    A,
+    B,
+    C,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    alpha,
+    beta,
+    beta_is_zero,
 ):
-    return lambda: _hgemm_tn_kernel3[(
-        triton.cdiv(m, 128) * triton.cdiv(n, 256),
-    )](
+    return lambda: _hgemm_tn_kernel3[(triton.cdiv(m, 128) * triton.cdiv(n, 256),)](
         TensorDescriptor(base=A, shape=[k, m], strides=[lda, 1], block_shape=[64, 128]),
         TensorDescriptor(base=B, shape=[k, n], strides=[ldb, 1], block_shape=[64, 256]),
-        TensorDescriptor(base=C, shape=[m, n], strides=[ldc, 1], block_shape=[128, 256]),
-        alpha, beta, m, n, k, beta_is_zero,
-        BLOCK_M=128, BLOCK_N=256, BLOCK_K=64, GROUP_M=8,
-        num_stages=4, num_warps=8, num_ctas=1,
+        TensorDescriptor(
+            base=C, shape=[m, n], strides=[ldc, 1], block_shape=[128, 256]
+        ),
+        alpha,
+        beta,
+        m,
+        n,
+        k,
+        beta_is_zero,
+        BLOCK_M=128,
+        BLOCK_N=256,
+        BLOCK_K=64,
+        GROUP_M=8,
+        num_stages=4,
+        num_warps=8,
+        num_ctas=1,
     )
 
 
 def _hgemm_tn_build_kernel2(
-    A, B, C, m, n, k, lda, ldb, ldc, alpha, beta, beta_is_zero,
+    A,
+    B,
+    C,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    alpha,
+    beta,
+    beta_is_zero,
 ):
     grid = lambda meta: (
         triton.cdiv(m, meta["BLOCK_M"]) * triton.cdiv(n, meta["BLOCK_N"]),
     )
     return lambda: _hgemm_tn_kernel2[grid](
-        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero,
+        A,
+        B,
+        C,
+        alpha,
+        beta,
+        m,
+        n,
+        k,
+        lda,
+        ldb,
+        ldc,
+        beta_is_zero,
     )
 
 
 def _hgemm_tn_build_kernel(
-    A, B, C, m, n, k, lda, ldb, ldc, alpha, beta, beta_is_zero,
+    A,
+    B,
+    C,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    alpha,
+    beta,
+    beta_is_zero,
 ):
     grid = lambda meta: (
         triton.cdiv(m, meta["BLOCK_M"]) * triton.cdiv(n, meta["BLOCK_N"]),
     )
     return lambda: _hgemm_tn_kernel[grid](
-        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero,
+        A,
+        B,
+        C,
+        alpha,
+        beta,
+        m,
+        n,
+        k,
+        lda,
+        ldb,
+        ldc,
+        beta_is_zero,
     )
 
 
-
-
 def _hgemm_tn_build_kernel4_64x64(
-    A, B, C, m, n, k, lda, ldb, ldc, alpha, beta, beta_is_zero,
+    A,
+    B,
+    C,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    alpha,
+    beta,
+    beta_is_zero,
 ):
-    return lambda: _hgemm_tn_kernel4[(
-        triton.cdiv(m, 64) * triton.cdiv(n, 64),
-    )](
-        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero,
-        BLOCK_M=64, BLOCK_N=64, BLOCK_K=128, GROUP_M=8,
-        num_stages=3, num_warps=4, num_ctas=1,
+    return lambda: _hgemm_tn_kernel4[(triton.cdiv(m, 64) * triton.cdiv(n, 64),)](
+        A,
+        B,
+        C,
+        alpha,
+        beta,
+        m,
+        n,
+        k,
+        lda,
+        ldb,
+        ldc,
+        beta_is_zero,
+        BLOCK_M=64,
+        BLOCK_N=64,
+        BLOCK_K=128,
+        GROUP_M=8,
+        num_stages=3,
+        num_warps=4,
+        num_ctas=1,
     )
 
 
 def _hgemm_tn_build_kernel4_m64(
-    A, B, C, m, n, k, lda, ldb, ldc, alpha, beta, beta_is_zero,
+    A,
+    B,
+    C,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    alpha,
+    beta,
+    beta_is_zero,
 ):
-    return lambda: _hgemm_tn_kernel4[(
-        triton.cdiv(m, 64) * triton.cdiv(n, 128),
-    )](
-        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero,
-        BLOCK_M=64, BLOCK_N=128, BLOCK_K=128, GROUP_M=8,
-        num_stages=4, num_warps=4, num_ctas=1,
+    return lambda: _hgemm_tn_kernel4[(triton.cdiv(m, 64) * triton.cdiv(n, 128),)](
+        A,
+        B,
+        C,
+        alpha,
+        beta,
+        m,
+        n,
+        k,
+        lda,
+        ldb,
+        ldc,
+        beta_is_zero,
+        BLOCK_M=64,
+        BLOCK_N=128,
+        BLOCK_K=128,
+        GROUP_M=8,
+        num_stages=4,
+        num_warps=4,
+        num_ctas=1,
     )
-
-
-
-
 
 
 def _hgemm_tn_build_kernel6_128x256(
-    A, B, C, m, n, k, lda, ldb, ldc, alpha, beta, beta_is_zero,
+    A,
+    B,
+    C,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    alpha,
+    beta,
+    beta_is_zero,
 ):
-    return lambda: _hgemm_tn_kernel6[(
-        triton.cdiv(m, 128) * triton.cdiv(n, 256),
-    )](
-        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero,
-        BLOCK_M=128, BLOCK_N=256, BLOCK_K=64, GROUP_M=8,
-        num_stages=3, num_warps=8, num_ctas=1,
+    return lambda: _hgemm_tn_kernel6[(triton.cdiv(m, 128) * triton.cdiv(n, 256),)](
+        A,
+        B,
+        C,
+        alpha,
+        beta,
+        m,
+        n,
+        k,
+        lda,
+        ldb,
+        ldc,
+        beta_is_zero,
+        BLOCK_M=128,
+        BLOCK_N=256,
+        BLOCK_K=64,
+        GROUP_M=8,
+        num_stages=3,
+        num_warps=8,
+        num_ctas=1,
     )
+
 
 # ---------------------------------------------------------------------------
 # Module-level factory functions for hgemm_nt StaticDispatch
 # ---------------------------------------------------------------------------
 def _hgemm_nt_build_kernel2(
-    A, B, C, m, n, k, lda, ldb, ldc, alpha, beta, beta_is_zero,
+    A,
+    B,
+    C,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    alpha,
+    beta,
+    beta_is_zero,
 ):
     grid = lambda meta: (
         triton.cdiv(m, meta["BLOCK_M"]) * triton.cdiv(n, meta["BLOCK_N"]),
     )
     return lambda: _hgemm_nt_kernel2[grid](
-        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero,
+        A,
+        B,
+        C,
+        alpha,
+        beta,
+        m,
+        n,
+        k,
+        lda,
+        ldb,
+        ldc,
+        beta_is_zero,
     )
 
 
 def _hgemm_nt_build_kernel(
-    A, B, C, m, n, k, lda, ldb, ldc, alpha, beta, beta_is_zero,
+    A,
+    B,
+    C,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    alpha,
+    beta,
+    beta_is_zero,
 ):
     grid = lambda meta: (
         triton.cdiv(m, meta["BLOCK_M"]) * triton.cdiv(n, meta["BLOCK_N"]),
     )
     return lambda: _hgemm_nt_kernel[grid](
-        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero,
+        A,
+        B,
+        C,
+        alpha,
+        beta,
+        m,
+        n,
+        k,
+        lda,
+        ldb,
+        ldc,
+        beta_is_zero,
     )
 
 
-
-
-
 def _hgemm_nt_build_kernel4_32x32(
-    A, B, C, m, n, k, lda, ldb, ldc, alpha, beta, beta_is_zero,
+    A,
+    B,
+    C,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    alpha,
+    beta,
+    beta_is_zero,
 ):
-    return lambda: _hgemm_nt_kernel4[(
-        triton.cdiv(m, 32) * triton.cdiv(n, 32),
-    )](
-        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero,
-        BLOCK_M=32, BLOCK_N=32, BLOCK_K=128, GROUP_M=8,
-        num_stages=3, num_warps=8, num_ctas=1,
+    return lambda: _hgemm_nt_kernel4[(triton.cdiv(m, 32) * triton.cdiv(n, 32),)](
+        A,
+        B,
+        C,
+        alpha,
+        beta,
+        m,
+        n,
+        k,
+        lda,
+        ldb,
+        ldc,
+        beta_is_zero,
+        BLOCK_M=32,
+        BLOCK_N=32,
+        BLOCK_K=128,
+        GROUP_M=8,
+        num_stages=3,
+        num_warps=8,
+        num_ctas=1,
     )
 
 
 def _hgemm_nt_build_kernel4_64x64_k32(
-    A, B, C, m, n, k, lda, ldb, ldc, alpha, beta, beta_is_zero,
+    A,
+    B,
+    C,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    alpha,
+    beta,
+    beta_is_zero,
 ):
-    return lambda: _hgemm_nt_kernel4[(
-        triton.cdiv(m, 64) * triton.cdiv(n, 64),
-    )](
-        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero,
-        BLOCK_M=64, BLOCK_N=64, BLOCK_K=32, GROUP_M=8,
-        num_stages=3, num_warps=8, num_ctas=1,
+    return lambda: _hgemm_nt_kernel4[(triton.cdiv(m, 64) * triton.cdiv(n, 64),)](
+        A,
+        B,
+        C,
+        alpha,
+        beta,
+        m,
+        n,
+        k,
+        lda,
+        ldb,
+        ldc,
+        beta_is_zero,
+        BLOCK_M=64,
+        BLOCK_N=64,
+        BLOCK_K=32,
+        GROUP_M=8,
+        num_stages=3,
+        num_warps=8,
+        num_ctas=1,
     )
 
 
 def _hgemm_nt_build_kernel3_64x64(
-    A, B, C, m, n, k, lda, ldb, ldc, alpha, beta, beta_is_zero,
+    A,
+    B,
+    C,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    alpha,
+    beta,
+    beta_is_zero,
 ):
-    return lambda: _hgemm_nt_kernel3[(
-        triton.cdiv(m, 64) * triton.cdiv(n, 64),
-    )](
-        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero,
-        BLOCK_M=64, BLOCK_N=64, BLOCK_K=128, GROUP_M=8,
-        num_stages=3, num_warps=4, num_ctas=1,
+    return lambda: _hgemm_nt_kernel3[(triton.cdiv(m, 64) * triton.cdiv(n, 64),)](
+        A,
+        B,
+        C,
+        alpha,
+        beta,
+        m,
+        n,
+        k,
+        lda,
+        ldb,
+        ldc,
+        beta_is_zero,
+        BLOCK_M=64,
+        BLOCK_N=64,
+        BLOCK_K=128,
+        GROUP_M=8,
+        num_stages=3,
+        num_warps=4,
+        num_ctas=1,
     )
 
 
-
-
-
-
 def _hgemm_nt_build_kernel5_128x256(
-    A, B, C, m, n, k, lda, ldb, ldc, alpha, beta, beta_is_zero,
+    A,
+    B,
+    C,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    alpha,
+    beta,
+    beta_is_zero,
 ):
-    return lambda: _hgemm_nt_kernel5[(
-        triton.cdiv(m, 128) * triton.cdiv(n, 256),
-    )](
-        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero,
-        BLOCK_M=128, BLOCK_N=256, BLOCK_K=64, GROUP_M=8,
-        num_stages=3, num_warps=8, num_ctas=1,
+    return lambda: _hgemm_nt_kernel5[(triton.cdiv(m, 128) * triton.cdiv(n, 256),)](
+        A,
+        B,
+        C,
+        alpha,
+        beta,
+        m,
+        n,
+        k,
+        lda,
+        ldb,
+        ldc,
+        beta_is_zero,
+        BLOCK_M=128,
+        BLOCK_N=256,
+        BLOCK_K=64,
+        GROUP_M=8,
+        num_stages=3,
+        num_warps=8,
+        num_ctas=1,
     )
 
 
 def _hgemm_nt_build_kernel5_256x128(
-    A, B, C, m, n, k, lda, ldb, ldc, alpha, beta, beta_is_zero,
+    A,
+    B,
+    C,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    alpha,
+    beta,
+    beta_is_zero,
 ):
-    return lambda: _hgemm_nt_kernel5[(
-        triton.cdiv(m, 256) * triton.cdiv(n, 128),
-    )](
-        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero,
-        BLOCK_M=256, BLOCK_N=128, BLOCK_K=64, GROUP_M=8,
-        num_stages=3, num_warps=8, num_ctas=1,
+    return lambda: _hgemm_nt_kernel5[(triton.cdiv(m, 256) * triton.cdiv(n, 128),)](
+        A,
+        B,
+        C,
+        alpha,
+        beta,
+        m,
+        n,
+        k,
+        lda,
+        ldb,
+        ldc,
+        beta_is_zero,
+        BLOCK_M=256,
+        BLOCK_N=128,
+        BLOCK_K=64,
+        GROUP_M=8,
+        num_stages=3,
+        num_warps=8,
+        num_ctas=1,
     )
+
 
 # ---------------------------------------------------------------------------
 # Module-level factory functions for hgemm_tt StaticDispatch
 # ---------------------------------------------------------------------------
 def _hgemm_tt_build_kernel3(
-    A, B, C, m, n, k, lda, ldb, ldc, alpha, beta, beta_is_zero,
+    A,
+    B,
+    C,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    alpha,
+    beta,
+    beta_is_zero,
 ):
-    return lambda: _hgemm_tt_kernel3[(
-        triton.cdiv(m, 128) * triton.cdiv(n, 256),
-    )](
+    return lambda: _hgemm_tt_kernel3[(triton.cdiv(m, 128) * triton.cdiv(n, 256),)](
         TensorDescriptor(base=A, shape=[k, m], strides=[lda, 1], block_shape=[64, 128]),
         TensorDescriptor(base=B, shape=[n, k], strides=[ldb, 1], block_shape=[256, 64]),
-        TensorDescriptor(base=C, shape=[m, n], strides=[ldc, 1], block_shape=[128, 256]),
-        alpha, beta, m, n, k, beta_is_zero,
-        BLOCK_M=128, BLOCK_N=256, BLOCK_K=64, GROUP_M=8,
-        num_stages=4, num_warps=8, num_ctas=1,
+        TensorDescriptor(
+            base=C, shape=[m, n], strides=[ldc, 1], block_shape=[128, 256]
+        ),
+        alpha,
+        beta,
+        m,
+        n,
+        k,
+        beta_is_zero,
+        BLOCK_M=128,
+        BLOCK_N=256,
+        BLOCK_K=64,
+        GROUP_M=8,
+        num_stages=4,
+        num_warps=8,
+        num_ctas=1,
     )
 
 
 def _hgemm_tt_build_kernel2(
-    A, B, C, m, n, k, lda, ldb, ldc, alpha, beta, beta_is_zero,
+    A,
+    B,
+    C,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    alpha,
+    beta,
+    beta_is_zero,
 ):
     grid = lambda meta: (
         triton.cdiv(m, meta["BLOCK_M"]) * triton.cdiv(n, meta["BLOCK_N"]),
     )
     return lambda: _hgemm_tt_kernel2[grid](
-        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero,
+        A,
+        B,
+        C,
+        alpha,
+        beta,
+        m,
+        n,
+        k,
+        lda,
+        ldb,
+        ldc,
+        beta_is_zero,
     )
 
 
 def _hgemm_tt_build_kernel(
-    A, B, C, m, n, k, lda, ldb, ldc, alpha, beta, beta_is_zero,
+    A,
+    B,
+    C,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    alpha,
+    beta,
+    beta_is_zero,
 ):
     grid = lambda meta: (
         triton.cdiv(m, meta["BLOCK_M"]) * triton.cdiv(n, meta["BLOCK_N"]),
     )
     return lambda: _hgemm_tt_kernel[grid](
-        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero,
+        A,
+        B,
+        C,
+        alpha,
+        beta,
+        m,
+        n,
+        k,
+        lda,
+        ldb,
+        ldc,
+        beta_is_zero,
     )
 
 
-
-
 def _hgemm_tt_build_kernel4_64x64(
-    A, B, C, m, n, k, lda, ldb, ldc, alpha, beta, beta_is_zero,
+    A,
+    B,
+    C,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    alpha,
+    beta,
+    beta_is_zero,
 ):
-    return lambda: _hgemm_tt_kernel4[(
-        triton.cdiv(m, 64) * triton.cdiv(n, 64),
-    )](
-        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero,
-        BLOCK_M=64, BLOCK_N=64, BLOCK_K=128, GROUP_M=8,
-        num_stages=3, num_warps=4, num_ctas=1,
+    return lambda: _hgemm_tt_kernel4[(triton.cdiv(m, 64) * triton.cdiv(n, 64),)](
+        A,
+        B,
+        C,
+        alpha,
+        beta,
+        m,
+        n,
+        k,
+        lda,
+        ldb,
+        ldc,
+        beta_is_zero,
+        BLOCK_M=64,
+        BLOCK_N=64,
+        BLOCK_K=128,
+        GROUP_M=8,
+        num_stages=3,
+        num_warps=4,
+        num_ctas=1,
     )
 
 
 def _hgemm_tt_build_kernel4_64x128(
-    A, B, C, m, n, k, lda, ldb, ldc, alpha, beta, beta_is_zero,
+    A,
+    B,
+    C,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    alpha,
+    beta,
+    beta_is_zero,
 ):
-    return lambda: _hgemm_tt_kernel4[(
-        triton.cdiv(m, 64) * triton.cdiv(n, 128),
-    )](
-        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero,
-        BLOCK_M=64, BLOCK_N=128, BLOCK_K=128, GROUP_M=8,
-        num_stages=4, num_warps=4, num_ctas=1,
+    return lambda: _hgemm_tt_kernel4[(triton.cdiv(m, 64) * triton.cdiv(n, 128),)](
+        A,
+        B,
+        C,
+        alpha,
+        beta,
+        m,
+        n,
+        k,
+        lda,
+        ldb,
+        ldc,
+        beta_is_zero,
+        BLOCK_M=64,
+        BLOCK_N=128,
+        BLOCK_K=128,
+        GROUP_M=8,
+        num_stages=4,
+        num_warps=4,
+        num_ctas=1,
     )
 
 
-
-
 def _hgemm_tt_build_kernel6_128x256(
-    A, B, C, m, n, k, lda, ldb, ldc, alpha, beta, beta_is_zero,
+    A,
+    B,
+    C,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    alpha,
+    beta,
+    beta_is_zero,
 ):
-    return lambda: _hgemm_tt_kernel6[(
-        triton.cdiv(m, 128) * triton.cdiv(n, 256),
-    )](
-        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero,
-        BLOCK_M=128, BLOCK_N=256, BLOCK_K=64, GROUP_M=8,
-        num_stages=3, num_warps=8, num_ctas=1,
+    return lambda: _hgemm_tt_kernel6[(triton.cdiv(m, 128) * triton.cdiv(n, 256),)](
+        A,
+        B,
+        C,
+        alpha,
+        beta,
+        m,
+        n,
+        k,
+        lda,
+        ldb,
+        ldc,
+        beta_is_zero,
+        BLOCK_M=128,
+        BLOCK_N=256,
+        BLOCK_K=64,
+        GROUP_M=8,
+        num_stages=3,
+        num_warps=8,
+        num_ctas=1,
     )
 
 
 def _hgemm_tt_build_kernel6_256x128(
-    A, B, C, m, n, k, lda, ldb, ldc, alpha, beta, beta_is_zero,
+    A,
+    B,
+    C,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    alpha,
+    beta,
+    beta_is_zero,
 ):
-    return lambda: _hgemm_tt_kernel6[(
-        triton.cdiv(m, 256) * triton.cdiv(n, 128),
-    )](
-        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero,
-        BLOCK_M=256, BLOCK_N=128, BLOCK_K=64, GROUP_M=8,
-        num_stages=3, num_warps=8, num_ctas=1,
+    return lambda: _hgemm_tt_kernel6[(triton.cdiv(m, 256) * triton.cdiv(n, 128),)](
+        A,
+        B,
+        C,
+        alpha,
+        beta,
+        m,
+        n,
+        k,
+        lda,
+        ldb,
+        ldc,
+        beta_is_zero,
+        BLOCK_M=256,
+        BLOCK_N=128,
+        BLOCK_K=64,
+        GROUP_M=8,
+        num_stages=3,
+        num_warps=8,
+        num_ctas=1,
     )
 
-_HGEMM_TN_DISPATCH = StaticDispatch([
-    (_hgemm_tn_is_aligned_tiny, _hgemm_tn_build_kernel),
-    (_hgemm_tn_is_m64_n1024, _hgemm_tn_build_kernel4_64x64),
-    (_hgemm_tn_is_m64_mid, _hgemm_tn_build_kernel4_m64),
-    (_hgemm_tn_is_128_mid, _hgemm_tn_build_kernel4_m64),
-    (_hgemm_tn_is_1024_square, _hgemm_tn_build_kernel4_m64),
-    (_hgemm_tn_is_tma_large, _hgemm_tn_build_kernel6_128x256),
-    (_hgemm_tn_is_default, _hgemm_tn_build_kernel),
-])
 
-_HGEMM_NT_DISPATCH = StaticDispatch([
-    (_hgemm_nt_is_aligned_tiny, _hgemm_nt_build_kernel),
-    (_hgemm_nt_is_m64_n2048_k1024, _hgemm_nt_build_kernel4_32x32),
-    (_hgemm_nt_is_m64_mid, _hgemm_nt_build_kernel3_64x64),
-    (_hgemm_nt_is_1023_square, _hgemm_nt_build_kernel4_64x64_k32),
-    (_hgemm_nt_is_tma_huge_k, _hgemm_nt_build_kernel5_128x256),
-    (_hgemm_nt_is_2048_square, _hgemm_nt_build_kernel5_128x256),
-    (_hgemm_nt_is_tma_large_wide_tile, _hgemm_nt_build_kernel5_128x256),
-    (_hgemm_nt_is_aligned, _hgemm_nt_build_kernel2),
-    (_hgemm_nt_is_default, _hgemm_nt_build_kernel),
-])
+_HGEMM_TN_DISPATCH = StaticDispatch(
+    [
+        (_hgemm_tn_is_aligned_tiny, _hgemm_tn_build_kernel),
+        (_hgemm_tn_is_m64_n1024, _hgemm_tn_build_kernel4_64x64),
+        (_hgemm_tn_is_m64_mid, _hgemm_tn_build_kernel4_m64),
+        (_hgemm_tn_is_128_mid, _hgemm_tn_build_kernel4_m64),
+        (_hgemm_tn_is_1024_square, _hgemm_tn_build_kernel4_m64),
+        (_hgemm_tn_is_tma_large, _hgemm_tn_build_kernel6_128x256),
+        (_hgemm_tn_is_default, _hgemm_tn_build_kernel),
+    ]
+)
 
-_HGEMM_TT_DISPATCH = StaticDispatch([
-    (_hgemm_tt_is_aligned_tiny, _hgemm_tt_build_kernel4_64x64),
-    (_hgemm_tt_is_m64_mid, _hgemm_tt_build_kernel4_64x64),
-    (_hgemm_tt_is_128_mid_wide, _hgemm_tt_build_kernel4_64x64),
-    (_hgemm_tt_is_128_mid_tall, _hgemm_tt_build_kernel4_64x128),
-    (_hgemm_tt_is_1024_square, _hgemm_tt_build_kernel4_64x128),
-    (_hgemm_tt_is_tall_1024, _hgemm_tt_build_kernel6_128x256),
-    (_hgemm_tt_is_tma_large_square, _hgemm_tt_build_kernel6_128x256),
-    (_hgemm_tt_is_tma_large_wide_aspect, _hgemm_tt_build_kernel6_128x256),
-    (_hgemm_tt_is_tma_large_tall_tile, _hgemm_tt_build_kernel6_256x128),
-    (_hgemm_tt_is_tma_large_wide_tile, _hgemm_tt_build_kernel6_128x256),
-    (_hgemm_tt_is_default, _hgemm_tt_build_kernel),
-])
+_HGEMM_NT_DISPATCH = StaticDispatch(
+    [
+        (_hgemm_nt_is_aligned_tiny, _hgemm_nt_build_kernel),
+        (_hgemm_nt_is_m64_n2048_k1024, _hgemm_nt_build_kernel4_32x32),
+        (_hgemm_nt_is_m64_mid, _hgemm_nt_build_kernel3_64x64),
+        (_hgemm_nt_is_1023_square, _hgemm_nt_build_kernel4_64x64_k32),
+        (_hgemm_nt_is_tma_huge_k, _hgemm_nt_build_kernel5_128x256),
+        (_hgemm_nt_is_2048_square, _hgemm_nt_build_kernel5_128x256),
+        (_hgemm_nt_is_tma_large_wide_tile, _hgemm_nt_build_kernel5_128x256),
+        (_hgemm_nt_is_aligned, _hgemm_nt_build_kernel2),
+        (_hgemm_nt_is_default, _hgemm_nt_build_kernel),
+    ]
+)
+
+_HGEMM_TT_DISPATCH = StaticDispatch(
+    [
+        (_hgemm_tt_is_aligned_tiny, _hgemm_tt_build_kernel4_64x64),
+        (_hgemm_tt_is_m64_mid, _hgemm_tt_build_kernel4_64x64),
+        (_hgemm_tt_is_128_mid_wide, _hgemm_tt_build_kernel4_64x64),
+        (_hgemm_tt_is_128_mid_tall, _hgemm_tt_build_kernel4_64x128),
+        (_hgemm_tt_is_1024_square, _hgemm_tt_build_kernel4_64x128),
+        (_hgemm_tt_is_tall_1024, _hgemm_tt_build_kernel6_128x256),
+        (_hgemm_tt_is_tma_large_square, _hgemm_tt_build_kernel6_128x256),
+        (_hgemm_tt_is_tma_large_wide_aspect, _hgemm_tt_build_kernel6_128x256),
+        (_hgemm_tt_is_tma_large_tall_tile, _hgemm_tt_build_kernel6_256x128),
+        (_hgemm_tt_is_tma_large_wide_tile, _hgemm_tt_build_kernel6_128x256),
+        (_hgemm_tt_is_default, _hgemm_tt_build_kernel),
+    ]
+)
 
 
 def hgemm(
@@ -1746,41 +2339,89 @@ def hgemm(
     with torch_device_fn.device(A.device):
         if transa == CUBLAS_OP_N and transb == CUBLAS_OP_N:
             runner = _HGEMM_NN_DISPATCH.lookup_and_build(
-                m, n, k, aligned,
+                m,
+                n,
+                k,
+                aligned,
                 context=dict(
-                    A=A, B=B, C=C, m=m, n=n, k=k,
-                    lda=lda, ldb=ldb, ldc=ldc,
-                    alpha=alpha, beta=beta, beta_is_zero=beta_is_zero,
+                    A=A,
+                    B=B,
+                    C=C,
+                    m=m,
+                    n=n,
+                    k=k,
+                    lda=lda,
+                    ldb=ldb,
+                    ldc=ldc,
+                    alpha=alpha,
+                    beta=beta,
+                    beta_is_zero=beta_is_zero,
                 ),
             )
             runner()
         elif transa == CUBLAS_OP_T and transb == CUBLAS_OP_N:
             runner = _HGEMM_TN_DISPATCH.lookup_and_build(
-                m, n, k, aligned,
+                m,
+                n,
+                k,
+                aligned,
                 context=dict(
-                    A=A, B=B, C=C, m=m, n=n, k=k,
-                    lda=lda, ldb=ldb, ldc=ldc,
-                    alpha=alpha, beta=beta, beta_is_zero=beta_is_zero,
+                    A=A,
+                    B=B,
+                    C=C,
+                    m=m,
+                    n=n,
+                    k=k,
+                    lda=lda,
+                    ldb=ldb,
+                    ldc=ldc,
+                    alpha=alpha,
+                    beta=beta,
+                    beta_is_zero=beta_is_zero,
                 ),
             )
             runner()
         elif transa == CUBLAS_OP_N and transb == CUBLAS_OP_T:
             runner = _HGEMM_NT_DISPATCH.lookup_and_build(
-                m, n, k, aligned,
+                m,
+                n,
+                k,
+                aligned,
                 context=dict(
-                    A=A, B=B, C=C, m=m, n=n, k=k,
-                    lda=lda, ldb=ldb, ldc=ldc,
-                    alpha=alpha, beta=beta, beta_is_zero=beta_is_zero,
+                    A=A,
+                    B=B,
+                    C=C,
+                    m=m,
+                    n=n,
+                    k=k,
+                    lda=lda,
+                    ldb=ldb,
+                    ldc=ldc,
+                    alpha=alpha,
+                    beta=beta,
+                    beta_is_zero=beta_is_zero,
                 ),
             )
             runner()
         else:
             runner = _HGEMM_TT_DISPATCH.lookup_and_build(
-                m, n, k, aligned,
+                m,
+                n,
+                k,
+                aligned,
                 context=dict(
-                    A=A, B=B, C=C, m=m, n=n, k=k,
-                    lda=lda, ldb=ldb, ldc=ldc,
-                    alpha=alpha, beta=beta, beta_is_zero=beta_is_zero,
+                    A=A,
+                    B=B,
+                    C=C,
+                    m=m,
+                    n=n,
+                    k=k,
+                    lda=lda,
+                    ldb=ldb,
+                    ldc=ldc,
+                    alpha=alpha,
+                    beta=beta,
+                    beta_is_zero=beta_is_zero,
                 ),
             )
             runner()

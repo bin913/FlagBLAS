@@ -37,6 +37,7 @@ from flag_blas.utils.libentry import libcache
 
 logger = logging.getLogger(__name__)
 
+
 def fp8gemm(
     transa: int,
     transb: int,

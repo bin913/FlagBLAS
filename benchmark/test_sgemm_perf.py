@@ -18,6 +18,7 @@ import torch
 from benchmark.gemm_perf_common import GemmBenchmark, cublas_sgemm, gems_sgemm_wrapper
 from flag_blas.ops import CUBLAS_OP_N, CUBLAS_OP_T
 
+
 @pytest.mark.sgemm
 def test_perf_sgemm_nn():
     bench = GemmBenchmark(

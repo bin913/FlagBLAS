@@ -23,6 +23,7 @@ from benchmark.gemm_perf_common import (
 )
 from flag_blas.ops import CUBLAS_OP_N, CUBLAS_OP_T
 
+
 @pytest.mark.bfgemm
 def test_perf_bfgemm_nn():
     bench = GemmBenchmark(

@@ -21,23 +21,23 @@ from triton.tools.tensor_descriptor import TensorDescriptor  # noqa: F401
 
 from flag_blas import runtime
 from flag_blas.ops.level3.bfgemm import (
+    _BFGEMM_KEY,
     CUBLAS_OP_N,
     CUBLAS_OP_T,
     ScalarType,
-    _BFGEMM_KEY,
     _bfgemm_nn_kernel,
     _bfgemm_nt_kernel,
     _bfgemm_tn_kernel,
     _bfgemm_tt_kernel,
 )
 from flag_blas.runtime import torch_device_fn
+from flag_blas.runtime.backend._nvidia.hopper.ops.sgemm import _is_gemm_aligned
 from flag_blas.runtime.dispatch import SizeAutoDispatch, StaticDispatch
 from flag_blas.utils import libentry, libtuner
 from flag_blas.utils.libentry import libcache
 
-from flag_blas.runtime.backend._nvidia.hopper.ops.sgemm import _is_gemm_aligned
-
 logger = logging.getLogger(__name__)
+
 
 @libentry()
 @libtuner(
@@ -665,8 +665,7 @@ def _bfgemm_tn_is_8192_skinny(m, n, k, aligned, **_kw):
 
 def _bfgemm_tn_is_tma_skinny(m, n, k, aligned, **_kw):
     return aligned and (
-        (m >= 16384 and max(n, k) <= 2048)
-        or (n >= 16384 and max(m, k) <= 2048)
+        (m >= 16384 and max(n, k) <= 2048) or (n >= 16384 and max(m, k) <= 2048)
     )
 
 
@@ -679,74 +678,191 @@ def _bfgemm_tn_is_default(**_kw):
 
 
 def _bfgemm_tn_build_kernel4_64x128(
-    A, B, C, m, n, k, lda, ldb, ldc, alpha, beta, beta_is_zero,
+    A,
+    B,
+    C,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    alpha,
+    beta,
+    beta_is_zero,
 ):
-    return lambda: _bfgemm_tn_kernel4[(
-        triton.cdiv(m, 64) * triton.cdiv(n, 128),
-    )](
-        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero,
-        BLOCK_M=64, BLOCK_N=128, BLOCK_K=128, GROUP_M=8,
-        num_stages=4, num_warps=4, num_ctas=1,
+    return lambda: _bfgemm_tn_kernel4[(triton.cdiv(m, 64) * triton.cdiv(n, 128),)](
+        A,
+        B,
+        C,
+        alpha,
+        beta,
+        m,
+        n,
+        k,
+        lda,
+        ldb,
+        ldc,
+        beta_is_zero,
+        BLOCK_M=64,
+        BLOCK_N=128,
+        BLOCK_K=128,
+        GROUP_M=8,
+        num_stages=4,
+        num_warps=4,
+        num_ctas=1,
     )
 
 
 def _bfgemm_tn_build_kernel4_64x64(
-    A, B, C, m, n, k, lda, ldb, ldc, alpha, beta, beta_is_zero,
+    A,
+    B,
+    C,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    alpha,
+    beta,
+    beta_is_zero,
 ):
-    return lambda: _bfgemm_tn_kernel4[(
-        triton.cdiv(m, 64) * triton.cdiv(n, 64),
-    )](
-        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero,
-        BLOCK_M=64, BLOCK_N=64, BLOCK_K=128, GROUP_M=8,
-        num_stages=3, num_warps=4, num_ctas=1,
+    return lambda: _bfgemm_tn_kernel4[(triton.cdiv(m, 64) * triton.cdiv(n, 64),)](
+        A,
+        B,
+        C,
+        alpha,
+        beta,
+        m,
+        n,
+        k,
+        lda,
+        ldb,
+        ldc,
+        beta_is_zero,
+        BLOCK_M=64,
+        BLOCK_N=64,
+        BLOCK_K=128,
+        GROUP_M=8,
+        num_stages=3,
+        num_warps=4,
+        num_ctas=1,
     )
 
 
 def _bfgemm_tn_build_kernel3(
-    A, B, C, m, n, k, lda, ldb, ldc, alpha, beta, beta_is_zero,
+    A,
+    B,
+    C,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    alpha,
+    beta,
+    beta_is_zero,
 ):
-    return lambda: _bfgemm_tn_kernel3[(
-        triton.cdiv(m, 128) * triton.cdiv(n, 256),
-    )](
+    return lambda: _bfgemm_tn_kernel3[(triton.cdiv(m, 128) * triton.cdiv(n, 256),)](
         TensorDescriptor(base=A, shape=[k, m], strides=[lda, 1], block_shape=[64, 128]),
         TensorDescriptor(base=B, shape=[k, n], strides=[ldb, 1], block_shape=[64, 256]),
-        TensorDescriptor(base=C, shape=[m, n], strides=[ldc, 1], block_shape=[128, 256]),
-        alpha, beta, m, n, k, beta_is_zero,
-        BLOCK_M=128, BLOCK_N=256, BLOCK_K=64, GROUP_M=8,
-        num_stages=4, num_warps=8, num_ctas=1,
+        TensorDescriptor(
+            base=C, shape=[m, n], strides=[ldc, 1], block_shape=[128, 256]
+        ),
+        alpha,
+        beta,
+        m,
+        n,
+        k,
+        beta_is_zero,
+        BLOCK_M=128,
+        BLOCK_N=256,
+        BLOCK_K=64,
+        GROUP_M=8,
+        num_stages=4,
+        num_warps=8,
+        num_ctas=1,
     )
 
 
 def _bfgemm_tn_build_kernel2(
-    A, B, C, m, n, k, lda, ldb, ldc, alpha, beta, beta_is_zero,
+    A,
+    B,
+    C,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    alpha,
+    beta,
+    beta_is_zero,
 ):
     grid = lambda meta: (
         triton.cdiv(m, meta["BLOCK_M"]) * triton.cdiv(n, meta["BLOCK_N"]),
     )
     return lambda: _bfgemm_tn_kernel2[grid](
-        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero,
+        A,
+        B,
+        C,
+        alpha,
+        beta,
+        m,
+        n,
+        k,
+        lda,
+        ldb,
+        ldc,
+        beta_is_zero,
     )
 
 
 def _bfgemm_tn_build_kernel(
-    A, B, C, m, n, k, lda, ldb, ldc, alpha, beta, beta_is_zero,
+    A,
+    B,
+    C,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    alpha,
+    beta,
+    beta_is_zero,
 ):
     grid = lambda meta: (
         triton.cdiv(m, meta["BLOCK_M"]) * triton.cdiv(n, meta["BLOCK_N"]),
     )
     return lambda: _bfgemm_tn_kernel[grid](
-        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero,
+        A,
+        B,
+        C,
+        alpha,
+        beta,
+        m,
+        n,
+        k,
+        lda,
+        ldb,
+        ldc,
+        beta_is_zero,
     )
 
 
-_BFGEMM_TN_DISPATCH = StaticDispatch([
-    (_bfgemm_tn_is_m64_mid, _bfgemm_tn_build_kernel4_64x128),
-    (_bfgemm_tn_is_n64_mid, _bfgemm_tn_build_kernel4_64x128),
-    (_bfgemm_tn_is_8192_skinny, _bfgemm_tn_build_kernel4_64x128),
-    (_bfgemm_tn_is_tma_skinny, _bfgemm_tn_build_kernel3),
-    (_bfgemm_tn_is_aligned, _bfgemm_tn_build_kernel2),
-    (_bfgemm_tn_is_default, _bfgemm_tn_build_kernel),
-])
+_BFGEMM_TN_DISPATCH = StaticDispatch(
+    [
+        (_bfgemm_tn_is_m64_mid, _bfgemm_tn_build_kernel4_64x128),
+        (_bfgemm_tn_is_n64_mid, _bfgemm_tn_build_kernel4_64x128),
+        (_bfgemm_tn_is_8192_skinny, _bfgemm_tn_build_kernel4_64x128),
+        (_bfgemm_tn_is_tma_skinny, _bfgemm_tn_build_kernel3),
+        (_bfgemm_tn_is_aligned, _bfgemm_tn_build_kernel2),
+        (_bfgemm_tn_is_default, _bfgemm_tn_build_kernel),
+    ]
+)
 
 
 @libentry()
@@ -820,44 +936,115 @@ def _bfgemm_nt_is_default(**_kw):
 
 
 def _bfgemm_nt_build_kernel3_128x256(
-    A, B, C, m, n, k, lda, ldb, ldc, alpha, beta, beta_is_zero,
+    A,
+    B,
+    C,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    alpha,
+    beta,
+    beta_is_zero,
 ):
-    return lambda: _bfgemm_nt_kernel3[(
-        triton.cdiv(m, 128) * triton.cdiv(n, 256),
-    )](
-        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero,
-        BLOCK_M=128, BLOCK_N=256, BLOCK_K=64, GROUP_M=8,
-        num_stages=3, num_warps=8, num_ctas=1,
+    return lambda: _bfgemm_nt_kernel3[(triton.cdiv(m, 128) * triton.cdiv(n, 256),)](
+        A,
+        B,
+        C,
+        alpha,
+        beta,
+        m,
+        n,
+        k,
+        lda,
+        ldb,
+        ldc,
+        beta_is_zero,
+        BLOCK_M=128,
+        BLOCK_N=256,
+        BLOCK_K=64,
+        GROUP_M=8,
+        num_stages=3,
+        num_warps=8,
+        num_ctas=1,
     )
 
 
 def _bfgemm_nt_build_kernel2(
-    A, B, C, m, n, k, lda, ldb, ldc, alpha, beta, beta_is_zero,
+    A,
+    B,
+    C,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    alpha,
+    beta,
+    beta_is_zero,
 ):
     grid = lambda meta: (
         triton.cdiv(m, meta["BLOCK_M"]) * triton.cdiv(n, meta["BLOCK_N"]),
     )
     return lambda: _bfgemm_nt_kernel2[grid](
-        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero,
+        A,
+        B,
+        C,
+        alpha,
+        beta,
+        m,
+        n,
+        k,
+        lda,
+        ldb,
+        ldc,
+        beta_is_zero,
     )
 
 
 def _bfgemm_nt_build_kernel(
-    A, B, C, m, n, k, lda, ldb, ldc, alpha, beta, beta_is_zero,
+    A,
+    B,
+    C,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    alpha,
+    beta,
+    beta_is_zero,
 ):
     grid = lambda meta: (
         triton.cdiv(m, meta["BLOCK_M"]) * triton.cdiv(n, meta["BLOCK_N"]),
     )
     return lambda: _bfgemm_nt_kernel[grid](
-        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero,
+        A,
+        B,
+        C,
+        alpha,
+        beta,
+        m,
+        n,
+        k,
+        lda,
+        ldb,
+        ldc,
+        beta_is_zero,
     )
 
 
-_BFGEMM_NT_DISPATCH = StaticDispatch([
-    (_bfgemm_nt_is_tma_large, _bfgemm_nt_build_kernel3_128x256),
-    (_bfgemm_nt_is_aligned, _bfgemm_nt_build_kernel2),
-    (_bfgemm_nt_is_default, _bfgemm_nt_build_kernel),
-])
+_BFGEMM_NT_DISPATCH = StaticDispatch(
+    [
+        (_bfgemm_nt_is_tma_large, _bfgemm_nt_build_kernel3_128x256),
+        (_bfgemm_nt_is_aligned, _bfgemm_nt_build_kernel2),
+        (_bfgemm_nt_is_default, _bfgemm_nt_build_kernel),
+    ]
+)
 
 
 def bfgemm(
