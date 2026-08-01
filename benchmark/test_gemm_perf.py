@@ -310,6 +310,60 @@ def cublas_bfgemm(
     return C_col
 
 
+def cublas_bfgemm_reference(
+    A_col,
+    B_col,
+    C_col,
+    transa,
+    transb,
+    m,
+    n,
+    k,
+    alpha,
+    A_row,
+    B_row,
+    C_row,
+    lda_cublas,
+    ldb_cublas,
+    ldc_cublas,
+    lda_flag,
+    ldb_flag,
+    ldc_flag,
+    beta,
+    handle,
+    alpha_ptr,
+    beta_ptr,
+):
+    C_fp32 = torch.empty_strided(
+        C_col.shape, C_col.stride(), dtype=torch.float32, device=C_col.device
+    )
+    C_fp32.copy_(C_col)
+
+    cublas.gemmEx(
+        handle,
+        transa,
+        transb,
+        m,
+        n,
+        k,
+        alpha_ptr,
+        A_col.data_ptr(),
+        CUDA_R_16BF,
+        lda_cublas,
+        B_col.data_ptr(),
+        CUDA_R_16BF,
+        ldb_cublas,
+        beta_ptr,
+        C_fp32.data_ptr(),
+        CUDA_R_32F,
+        ldc_cublas,
+        CUDA_R_32F,
+        0,
+    )
+    C_col.copy_(C_fp32.to(torch.bfloat16))
+    return C_col
+
+
 def gems_bfgemm_wrapper(
     A_col,
     B_col,
@@ -668,7 +722,7 @@ def test_perf_hgemm_nn():
             gems_result = gems_hgemm_wrapper(A, B, C.clone(), **kwargs)
 
             k = kwargs.get("k", 0)
-            bench.validate_results(torch_result, gems_result, k, tolerance=1e-3)
+            bench.validate_results(torch_result, gems_result, k, tolerance=1e-4)
     bench.run()
 
 
@@ -688,7 +742,7 @@ def test_perf_hgemm_tn():
             torch_result = cublas_hgemm(A, B, C.clone(), **kwargs)
             gems_result = gems_hgemm_wrapper(A, B, C.clone(), **kwargs)
             k = kwargs.get("k", 0)
-            bench.validate_results(torch_result, gems_result, k, tolerance=1e-3)
+            bench.validate_results(torch_result, gems_result, k, tolerance=1e-4)
     bench.run()
 
 
@@ -708,7 +762,7 @@ def test_perf_hgemm_nt():
             torch_result = cublas_hgemm(A, B, C.clone(), **kwargs)
             gems_result = gems_hgemm_wrapper(A, B, C.clone(), **kwargs)
             k = kwargs.get("k", 0)
-            bench.validate_results(torch_result, gems_result, k, tolerance=1e-3)
+            bench.validate_results(torch_result, gems_result, k, tolerance=1e-4)
     bench.run()
 
 
@@ -728,7 +782,7 @@ def test_perf_hgemm_tt():
             torch_result = cublas_hgemm(A, B, C.clone(), **kwargs)
             gems_result = gems_hgemm_wrapper(A, B, C.clone(), **kwargs)
             k = kwargs.get("k", 0)
-            bench.validate_results(torch_result, gems_result, k, tolerance=1e-3)
+            bench.validate_results(torch_result, gems_result, k, tolerance=1e-4)
     bench.run()
 
 
@@ -745,10 +799,10 @@ def test_perf_bfgemm_nn():
     bench.init_user_config()
     for cur_dtype in bench.dtypes:
         for A, B, C, kwargs in bench.get_input_iter(cur_dtype):
-            torch_result = cublas_bfgemm(A, B, C.clone(), **kwargs)
+            torch_result = cublas_bfgemm_reference(A, B, C.clone(), **kwargs)
             gems_result = gems_bfgemm_wrapper(A, B, C.clone(), **kwargs)
             k = kwargs.get("k", 0)
-            bench.validate_results(torch_result, gems_result, k, tolerance=1e-3)
+            bench.validate_results(torch_result, gems_result, k, tolerance=1e-4)
     bench.run()
 
 
@@ -765,10 +819,10 @@ def test_perf_bfgemm_tn():
     bench.init_user_config()
     for cur_dtype in bench.dtypes:
         for A, B, C, kwargs in bench.get_input_iter(cur_dtype):
-            torch_result = cublas_bfgemm(A, B, C.clone(), **kwargs)
+            torch_result = cublas_bfgemm_reference(A, B, C.clone(), **kwargs)
             gems_result = gems_bfgemm_wrapper(A, B, C.clone(), **kwargs)
             k = kwargs.get("k", 0)
-            bench.validate_results(torch_result, gems_result, k, tolerance=1e-3)
+            bench.validate_results(torch_result, gems_result, k, tolerance=1e-4)
     bench.run()
 
 
@@ -785,7 +839,7 @@ def test_perf_bfgemm_nt():
     bench.init_user_config()
     for cur_dtype in bench.dtypes:
         for A, B, C, kwargs in bench.get_input_iter(cur_dtype):
-            torch_result = cublas_bfgemm(A, B, C.clone(), **kwargs)
+            torch_result = cublas_bfgemm_reference(A, B, C.clone(), **kwargs)
             gems_result = gems_bfgemm_wrapper(A, B, C.clone(), **kwargs)
             k = kwargs.get("k", 0)
             bench.validate_results(torch_result, gems_result, k, tolerance=1e-3)
@@ -805,7 +859,7 @@ def test_perf_bfgemm_tt():
     bench.init_user_config()
     for cur_dtype in bench.dtypes:
         for A, B, C, kwargs in bench.get_input_iter(cur_dtype):
-            torch_result = cublas_bfgemm(A, B, C.clone(), **kwargs)
+            torch_result = cublas_bfgemm_reference(A, B, C.clone(), **kwargs)
             gems_result = gems_bfgemm_wrapper(A, B, C.clone(), **kwargs)
             k = kwargs.get("k", 0)
             bench.validate_results(torch_result, gems_result, k, tolerance=1e-3)
