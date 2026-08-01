@@ -15,9 +15,12 @@
 import triton
 
 if triton.__version__ >= "3.5":
+    from .bfgemm import bfgemm  # noqa: F401
     from .cgemm import cgemm  # noqa: F401
     from .dgemm import dgemm  # noqa: F401
-    from .gemm import bfgemm, fp8gemm, hgemm, sgemm  # noqa: F401
+    from .fp8gemm import fp8gemm  # noqa: F401
+    from .hgemm import hgemm  # noqa: F401
+    from .sgemm import sgemm  # noqa: F401
     from .zgemm import zgemm  # noqa: F401
 
 __all__ = ["*"]

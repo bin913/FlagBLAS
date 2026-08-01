@@ -21,7 +21,7 @@ from cupy_backends.cuda.libs import cublas
 
 import flag_blas
 from benchmark.conftest import Config
-from benchmark.test_gemm_perf import GemmBenchmark
+from benchmark.gemm_perf_common import GemmBenchmark
 from flag_blas.ops import CUBLAS_OP_N, CUBLAS_OP_T
 
 

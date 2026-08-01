@@ -113,7 +113,7 @@ class SizeAutoDispatch:
         self._table_name = table_name
         self._build_key = build_key
         self._model = model
-        self._entries: List[_Entry] = []
+        self._entries: List["SizeAutoDispatch._Entry"] = []
         self._candidate_index: int = 0
         self._flush_buf: Optional[torch.Tensor] = None
 
@@ -153,7 +153,7 @@ class SizeAutoDispatch:
 
     def _get_entries(
         self, m: int, n: int, k: int, aligned: bool, **extra
-    ) -> List[_Entry]:
+    ) -> List["SizeAutoDispatch._Entry"]:
         result: List[SizeAutoDispatch._Entry] = []
         for entry in self._entries:
             if entry.align is not None and entry.align != aligned:
@@ -289,11 +289,11 @@ class SizeAutoDispatch:
     def _autotune(
         self,
         cache_key: tuple,
-        entries: List[_Entry],
+        entries: List["SizeAutoDispatch._Entry"],
         snapshot_tensor=None,
-    ) -> Optional[Tuple[_Entry, Callable[[], None]]]:
+    ) -> Optional[Tuple["SizeAutoDispatch._Entry", Callable[[], None]]]:
         timings: Dict[str, float] = {}
-        runners: Dict[str, Tuple[_Entry, Callable[[], None]]] = {}
+        runners: Dict[str, Tuple["SizeAutoDispatch._Entry", Callable[[], None]]] = {}
         snapshot = None
         if snapshot_tensor is not None:
             snapshot = snapshot_tensor.clone()
@@ -417,7 +417,7 @@ class StaticDispatch:
 
     def __init__(
         self,
-        table: List[_Entry],
+        table: List["StaticDispatch._Entry"],
     ):
         self._table = table
 
