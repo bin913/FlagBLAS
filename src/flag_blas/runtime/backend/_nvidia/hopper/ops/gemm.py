@@ -3698,6 +3698,280 @@ def _bfgemm_tt_kernel3(
         desc_c.store([offs_m, offs_n], result)
 
 
+@libentry()
+@triton.jit
+def _bfgemm_tn_kernel4(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    beta: tl.float32,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    BETA_IS_ZERO: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+):
+    pid = tl.program_id(0)
+
+    grid_m = tl.cdiv(m, BLOCK_M)
+    grid_n = tl.cdiv(n, BLOCK_N)
+    width = GROUP_M * grid_n
+    group_id = pid // width
+    group_size = min(grid_m - group_id * GROUP_M, GROUP_M)
+    pid_m = group_id * GROUP_M + (pid % group_size)
+    pid_n = (pid % width) // group_size
+
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_k = tl.arange(0, BLOCK_K)
+
+    a_t_ptrs = a_ptr + offs_k[:, None] * lda + offs_m[None, :]
+    b_ptrs = b_ptr + offs_k[:, None] * ldb + offs_n[None, :]
+
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+
+    for _ in range(0, tl.cdiv(k, BLOCK_K)):
+        mask_k = offs_k < k
+        a_t = tl.load(
+            a_t_ptrs,
+            mask=mask_k[:, None] & (offs_m[None, :] < m),
+            other=0.0,
+        )
+        b = tl.load(
+            b_ptrs,
+            mask=mask_k[:, None] & (offs_n[None, :] < n),
+            other=0.0,
+        )
+        acc = tl.dot(tl.trans(a_t), b, acc, out_dtype=tl.float32)
+        a_t_ptrs += BLOCK_K * lda
+        b_ptrs += BLOCK_K * ldb
+        offs_k += BLOCK_K
+
+    c_ptrs = c_ptr + offs_m[:, None] * ldc + offs_n[None, :]
+    c_mask = (offs_m[:, None] < m) & (offs_n[None, :] < n)
+    if BETA_IS_ZERO:
+        tl.store(c_ptrs, (alpha * acc).to(tl.bfloat16), mask=c_mask)
+    else:
+        c_vals = tl.load(c_ptrs, mask=c_mask).to(tl.float32)
+        tl.store(c_ptrs, (alpha * acc + beta * c_vals).to(tl.bfloat16), mask=c_mask)
+
+
+def _bfgemm_tn_is_m64_mid(m, n, k, aligned, **_kw):
+    return aligned and m == 64 and n >= 1024 and k >= 512
+
+
+def _bfgemm_tn_is_n64_mid(m, n, k, aligned, **_kw):
+    return aligned and n == 64 and m >= 1024 and k >= 512
+
+
+def _bfgemm_tn_is_8192_skinny(m, n, k, aligned, **_kw):
+    return aligned and k >= 2048 and max(m, n) >= 8192 and min(m, n) <= 256
+
+
+def _bfgemm_tn_is_tma_skinny(m, n, k, aligned, **_kw):
+    return aligned and (
+        (m >= 16384 and max(n, k) <= 2048)
+        or (n >= 16384 and max(m, k) <= 2048)
+    )
+
+
+def _bfgemm_tn_is_aligned(m, n, k, aligned, **_kw):
+    return aligned
+
+
+def _bfgemm_tn_is_default(**_kw):
+    return True
+
+
+def _bfgemm_tn_build_kernel4_64x128(
+    A, B, C, m, n, k, lda, ldb, ldc, alpha, beta, beta_is_zero,
+):
+    return lambda: _bfgemm_tn_kernel4[(
+        triton.cdiv(m, 64) * triton.cdiv(n, 128),
+    )](
+        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero,
+        BLOCK_M=64, BLOCK_N=128, BLOCK_K=128, GROUP_M=8,
+        num_stages=4, num_warps=4, num_ctas=1,
+    )
+
+
+def _bfgemm_tn_build_kernel4_64x64(
+    A, B, C, m, n, k, lda, ldb, ldc, alpha, beta, beta_is_zero,
+):
+    return lambda: _bfgemm_tn_kernel4[(
+        triton.cdiv(m, 64) * triton.cdiv(n, 64),
+    )](
+        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero,
+        BLOCK_M=64, BLOCK_N=64, BLOCK_K=128, GROUP_M=8,
+        num_stages=3, num_warps=4, num_ctas=1,
+    )
+
+
+def _bfgemm_tn_build_kernel3(
+    A, B, C, m, n, k, lda, ldb, ldc, alpha, beta, beta_is_zero,
+):
+    return lambda: _bfgemm_tn_kernel3[(
+        triton.cdiv(m, 128) * triton.cdiv(n, 256),
+    )](
+        TensorDescriptor(base=A, shape=[k, m], strides=[lda, 1], block_shape=[64, 128]),
+        TensorDescriptor(base=B, shape=[k, n], strides=[ldb, 1], block_shape=[64, 256]),
+        TensorDescriptor(base=C, shape=[m, n], strides=[ldc, 1], block_shape=[128, 256]),
+        alpha, beta, m, n, k, beta_is_zero,
+        BLOCK_M=128, BLOCK_N=256, BLOCK_K=64, GROUP_M=8,
+        num_stages=4, num_warps=8, num_ctas=1,
+    )
+
+
+def _bfgemm_tn_build_kernel2(
+    A, B, C, m, n, k, lda, ldb, ldc, alpha, beta, beta_is_zero,
+):
+    grid = lambda meta: (
+        triton.cdiv(m, meta["BLOCK_M"]) * triton.cdiv(n, meta["BLOCK_N"]),
+    )
+    return lambda: _bfgemm_tn_kernel2[grid](
+        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero,
+    )
+
+
+def _bfgemm_tn_build_kernel(
+    A, B, C, m, n, k, lda, ldb, ldc, alpha, beta, beta_is_zero,
+):
+    grid = lambda meta: (
+        triton.cdiv(m, meta["BLOCK_M"]) * triton.cdiv(n, meta["BLOCK_N"]),
+    )
+    return lambda: _bfgemm_tn_kernel[grid](
+        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero,
+    )
+
+
+_BFGEMM_TN_DISPATCH = StaticDispatch([
+    (_bfgemm_tn_is_m64_mid, _bfgemm_tn_build_kernel4_64x128),
+    (_bfgemm_tn_is_n64_mid, _bfgemm_tn_build_kernel4_64x128),
+    (_bfgemm_tn_is_8192_skinny, _bfgemm_tn_build_kernel4_64x128),
+    (_bfgemm_tn_is_tma_skinny, _bfgemm_tn_build_kernel3),
+    (_bfgemm_tn_is_aligned, _bfgemm_tn_build_kernel2),
+    (_bfgemm_tn_is_default, _bfgemm_tn_build_kernel),
+])
+
+
+@libentry()
+@triton.jit
+def _bfgemm_nt_kernel3(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    beta: tl.float32,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    BETA_IS_ZERO: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+):
+    pid = tl.program_id(0)
+
+    grid_m = tl.cdiv(m, BLOCK_M)
+    grid_n = tl.cdiv(n, BLOCK_N)
+    width = GROUP_M * grid_n
+    group_id = pid // width
+    group_size = min(grid_m - group_id * GROUP_M, GROUP_M)
+    pid_m = group_id * GROUP_M + (pid % group_size)
+    pid_n = (pid % width) // group_size
+
+    offs_m = pid_m * BLOCK_M
+    offs_n = pid_n * BLOCK_N
+
+    a_desc = tl.make_tensor_descriptor(
+        a_ptr, shape=[m, k], strides=[lda, 1], block_shape=[BLOCK_M, BLOCK_K]
+    )
+    b_desc = tl.make_tensor_descriptor(
+        b_ptr, shape=[n, k], strides=[ldb, 1], block_shape=[BLOCK_N, BLOCK_K]
+    )
+    c_desc = tl.make_tensor_descriptor(
+        c_ptr, shape=[m, n], strides=[ldc, 1], block_shape=[BLOCK_M, BLOCK_N]
+    )
+
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+
+    for i in range(0, tl.cdiv(k, BLOCK_K)):
+        offs_k = i * BLOCK_K
+        a = a_desc.load([offs_m, offs_k])
+        b_t = b_desc.load([offs_n, offs_k])
+        acc = tl.dot(a, tl.trans(b_t), acc, out_dtype=tl.float32)
+
+    if BETA_IS_ZERO:
+        c_desc.store([offs_m, offs_n], (alpha * acc).to(tl.bfloat16))
+    else:
+        c_vals = c_desc.load([offs_m, offs_n]).to(tl.float32)
+        c_desc.store([offs_m, offs_n], (alpha * acc + beta * c_vals).to(tl.bfloat16))
+
+
+def _bfgemm_nt_is_tma_large(m, n, k, aligned, **_kw):
+    return aligned and k >= 2048 and min(m, n) >= 512 and m * n >= 2048 * 2048
+
+
+def _bfgemm_nt_is_aligned(m, n, k, aligned, **_kw):
+    return aligned
+
+
+def _bfgemm_nt_is_default(**_kw):
+    return True
+
+
+def _bfgemm_nt_build_kernel3_128x256(
+    A, B, C, m, n, k, lda, ldb, ldc, alpha, beta, beta_is_zero,
+):
+    return lambda: _bfgemm_nt_kernel3[(
+        triton.cdiv(m, 128) * triton.cdiv(n, 256),
+    )](
+        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero,
+        BLOCK_M=128, BLOCK_N=256, BLOCK_K=64, GROUP_M=8,
+        num_stages=3, num_warps=8, num_ctas=1,
+    )
+
+
+def _bfgemm_nt_build_kernel2(
+    A, B, C, m, n, k, lda, ldb, ldc, alpha, beta, beta_is_zero,
+):
+    grid = lambda meta: (
+        triton.cdiv(m, meta["BLOCK_M"]) * triton.cdiv(n, meta["BLOCK_N"]),
+    )
+    return lambda: _bfgemm_nt_kernel2[grid](
+        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero,
+    )
+
+
+def _bfgemm_nt_build_kernel(
+    A, B, C, m, n, k, lda, ldb, ldc, alpha, beta, beta_is_zero,
+):
+    grid = lambda meta: (
+        triton.cdiv(m, meta["BLOCK_M"]) * triton.cdiv(n, meta["BLOCK_N"]),
+    )
+    return lambda: _bfgemm_nt_kernel[grid](
+        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero,
+    )
+
+
+_BFGEMM_NT_DISPATCH = StaticDispatch([
+    (_bfgemm_nt_is_tma_large, _bfgemm_nt_build_kernel3_128x256),
+    (_bfgemm_nt_is_aligned, _bfgemm_nt_build_kernel2),
+    (_bfgemm_nt_is_default, _bfgemm_nt_build_kernel),
+])
+
+
 def bfgemm(
     transa: int,
     transb: int,
@@ -3760,8 +4034,8 @@ def bfgemm(
     use_nn_kernel3 = aligned and (m * n > 2048 * 2048) and min(m, n) >= 64
     with torch_device_fn.device(A.device):
         if transa == CUBLAS_OP_N and transb == CUBLAS_OP_N:
-            is_skinny = (m >= 16384 and max(n, k) <= 2048) or (
-                n >= 16384 and max(m, k) <= 2048
+            is_skinny = (m >= 8192 and max(n, k) <= 2048) or (
+                n >= 8192 and max(m, k) <= 2048
             )
             if use_nn_kernel3 and is_skinny:
                 BLOCK_M = 128
@@ -3821,73 +4095,51 @@ def bfgemm(
                     A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero
                 )
         elif transa == CUBLAS_OP_T and transb == CUBLAS_OP_N:
-            is_skinny = (m >= 16384 and max(n, k) <= 2048) or (
-                n >= 16384 and max(m, k) <= 2048
+            runner = _BFGEMM_TN_DISPATCH.lookup_and_build(
+                m,
+                n,
+                k,
+                aligned,
+                context=dict(
+                    A=A,
+                    B=B,
+                    C=C,
+                    m=m,
+                    n=n,
+                    k=k,
+                    lda=lda,
+                    ldb=ldb,
+                    ldc=ldc,
+                    alpha=alpha,
+                    beta=beta,
+                    beta_is_zero=beta_is_zero,
+                ),
             )
-            if aligned and is_skinny:
-                BLOCK_M = 128
-                BLOCK_N = 256
-                BLOCK_K = 64
-                GROUP_M = 8
-                NUM_STAGES = 4
-                NUM_WARPS = 8
-                NUM_CTAS = 1
-                desc_a = TensorDescriptor(
-                    base=A,
-                    shape=[k, m],
-                    strides=[lda, 1],
-                    block_shape=[BLOCK_K, BLOCK_M],
-                )
-                desc_b = TensorDescriptor(
-                    base=B,
-                    shape=[k, n],
-                    strides=[ldb, 1],
-                    block_shape=[BLOCK_K, BLOCK_N],
-                )
-                desc_c = TensorDescriptor(
-                    base=C,
-                    shape=[m, n],
-                    strides=[ldc, 1],
-                    block_shape=[BLOCK_M, BLOCK_N],
-                )
-                grid = (triton.cdiv(m, BLOCK_M) * triton.cdiv(n, BLOCK_N),)
-                _bfgemm_tn_kernel3[grid](
-                    desc_a,
-                    desc_b,
-                    desc_c,
-                    alpha,
-                    beta,
-                    m,
-                    n,
-                    k,
-                    beta_is_zero,
-                    BLOCK_M=BLOCK_M,
-                    BLOCK_N=BLOCK_N,
-                    BLOCK_K=BLOCK_K,
-                    GROUP_M=GROUP_M,
-                    num_stages=NUM_STAGES,
-                    num_warps=NUM_WARPS,
-                    num_ctas=NUM_CTAS,
-                )
-            elif aligned:
-                _bfgemm_tn_kernel2[grid](
-                    A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero
-                )
-            else:
-                _bfgemm_tn_kernel[grid](
-                    A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero
-                )
+            runner()
         elif transa == CUBLAS_OP_N and transb == CUBLAS_OP_T:
-            if aligned:
-                _bfgemm_nt_kernel2[grid](
-                    A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero
-                )
-            else:
-                _bfgemm_nt_kernel[grid](
-                    A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero
-                )
+            runner = _BFGEMM_NT_DISPATCH.lookup_and_build(
+                m,
+                n,
+                k,
+                aligned,
+                context=dict(
+                    A=A,
+                    B=B,
+                    C=C,
+                    m=m,
+                    n=n,
+                    k=k,
+                    lda=lda,
+                    ldb=ldb,
+                    ldc=ldc,
+                    alpha=alpha,
+                    beta=beta,
+                    beta_is_zero=beta_is_zero,
+                ),
+            )
+            runner()
         else:
-            is_skinny = m >= 16384 and max(n, k) <= 2048
+            is_skinny = k >= 1024 and min(m, n) >= 512 and m * n >= 2048 * 2048
             if is_skinny and aligned:
                 BLOCK_M = 128
                 BLOCK_N = 256
