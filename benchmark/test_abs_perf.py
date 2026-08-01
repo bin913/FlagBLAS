@@ -65,6 +65,10 @@ def blas_zabs_wrapper(x, n=None, out=None):
 class AbsBenchmark(Benchmark):
     correctness_reference = "torch"
 
+    def init_user_config(self):
+        super().init_user_config()
+        self.shapes = L1_VECTOR_SHAPES
+
     def set_more_metrics(self):
         return ["gbps"]
 

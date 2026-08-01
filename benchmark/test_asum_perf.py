@@ -66,6 +66,10 @@ def blas_dzasum_wrapper(x, incx=1, n=None, handle=None, result=None):
 
 
 class AsumBenchmark(Benchmark):
+    def init_user_config(self):
+        super().init_user_config()
+        self.shapes = L1_VECTOR_SHAPES
+
     def set_more_metrics(self):
         return ["gbps"]
 
@@ -106,6 +110,10 @@ class AsumStrideBenchmark(Benchmark):
     def __init__(self, *args, incx=1, **kwargs):
         super().__init__(*args, **kwargs)
         self.incx = incx
+
+    def init_user_config(self):
+        super().init_user_config()
+        self.shapes = L1_STRIDE_SHAPES
 
     def set_more_metrics(self):
         return ["gbps"]

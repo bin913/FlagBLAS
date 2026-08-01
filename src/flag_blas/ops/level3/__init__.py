@@ -13,9 +13,9 @@
 # limitations under the License.
 from .cgemm import cgemm
 from .dgemm import dgemm
+from .gemm import bfgemm, fp8gemm, hgemm, sgemm
+from .group_gemm import group_gemm, group_mm
 from .zgemm import zgemm
-from .gemm import sgemm, hgemm, bfgemm, fp8gemm
-from .group_gemm import group_mm, group_gemm
 
 __all__ = [
     "sgemm",

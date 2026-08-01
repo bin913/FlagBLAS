@@ -492,6 +492,8 @@ class Benchmark:
             "starting performance benchmark.",
             flush=True,
         )
+        gc.collect()
+        torch_device_fn.empty_cache()
 
     def get_inputs(self, dtype):
         if self._input_iter is None:
@@ -588,6 +590,8 @@ class Benchmark:
             )
             print(result)
             emit_record_logger(result.to_json())
+        gc.collect()
+        torch_device_fn.empty_cache()
 
 
 def run_correctness_then_benchmark(bench):

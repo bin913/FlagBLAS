@@ -99,6 +99,10 @@ def blas_zcopy_wrapper(x, y, incx=1, incy=1, n=None):
 
 
 class CopyBenchmark(Benchmark):
+    def init_user_config(self):
+        super().init_user_config()
+        self.shapes = L1_VECTOR_SHAPES
+
     def set_more_metrics(self):
         return ["gbps"]
 
@@ -125,6 +129,10 @@ class CopyStrideBenchmark(Benchmark):
         super().__init__(*args, **kwargs)
         self.incx = incx
         self.incy = incy
+
+    def init_user_config(self):
+        super().init_user_config()
+        self.shapes = L1_STRIDE_SHAPES
 
     def set_more_metrics(self):
         return ["gbps"]
