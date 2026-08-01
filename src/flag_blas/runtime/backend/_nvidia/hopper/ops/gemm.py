@@ -422,6 +422,100 @@ def _sgemm_tt_kernel2(
 
 
 @libentry()
+@triton.jit
+def _sgemm_nt_1023_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    beta: tl.float32,
+    lda,
+    ldb,
+    ldc,
+    BETA_IS_ZERO: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+):
+    M: tl.constexpr = 1023
+    N: tl.constexpr = 1023
+    K: tl.constexpr = 1023
+
+    pid = tl.program_id(0)
+
+    grid_m = tl.cdiv(M, BLOCK_M)
+    grid_n = tl.cdiv(N, BLOCK_N)
+    width = GROUP_M * grid_n
+    group_id = pid // width
+    group_size = min(grid_m - group_id * GROUP_M, GROUP_M)
+    pid_m = group_id * GROUP_M + (pid % group_size)
+    pid_n = (pid % width) // group_size
+
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_k = tl.arange(0, BLOCK_K)
+
+    a_ptrs = a_ptr + offs_m[:, None] * lda + offs_k[None, :]
+    b_ptrs = b_ptr + offs_n[:, None] * ldb + offs_k[None, :]
+
+    acc_t = tl.zeros((BLOCK_N, BLOCK_M), dtype=tl.float32)
+
+    is_full_m = (pid_m * BLOCK_M + BLOCK_M) <= M
+    is_full_n = (pid_n * BLOCK_N + BLOCK_N) <= N
+    k_full_iters = K // BLOCK_K
+    k_remainder = K % BLOCK_K
+
+    if is_full_m and is_full_n:
+        for _ in range(0, k_full_iters):
+            a = tl.load(a_ptrs)
+            b = tl.load(b_ptrs)
+            acc_t = tl.dot(
+                b, tl.trans(a), acc_t, out_dtype=tl.float32, input_precision="tf32x3"
+            )
+            a_ptrs += BLOCK_K
+            b_ptrs += BLOCK_K
+
+        if k_remainder > 0:
+            mask_k = offs_k < k_remainder
+            a = tl.load(a_ptrs, mask=mask_k[None, :], other=0.0)
+            b = tl.load(b_ptrs, mask=mask_k[None, :], other=0.0)
+            acc_t = tl.dot(
+                b, tl.trans(a), acc_t, out_dtype=tl.float32, input_precision="tf32x3"
+            )
+    else:
+        mask_m = offs_m < M
+        mask_n = offs_n < N
+
+        for _ in range(0, k_full_iters):
+            a = tl.load(a_ptrs, mask=mask_m[:, None], other=0.0)
+            b = tl.load(b_ptrs, mask=mask_n[:, None], other=0.0)
+            acc_t = tl.dot(
+                b, tl.trans(a), acc_t, out_dtype=tl.float32, input_precision="tf32x3"
+            )
+            a_ptrs += BLOCK_K
+            b_ptrs += BLOCK_K
+
+        if k_remainder > 0:
+            mask_k = offs_k < k_remainder
+            a = tl.load(a_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0)
+            b = tl.load(b_ptrs, mask=mask_n[:, None] & mask_k[None, :], other=0.0)
+            acc_t = tl.dot(
+                b, tl.trans(a), acc_t, out_dtype=tl.float32, input_precision="tf32x3"
+            )
+
+    acc = tl.trans(acc_t)
+    c_ptrs = c_ptr + offs_m[:, None] * ldc + offs_n[None, :]
+    c_mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
+
+    if BETA_IS_ZERO:
+        tl.store(c_ptrs, alpha * acc, mask=c_mask)
+    else:
+        c_vals = tl.load(c_ptrs, mask=c_mask, other=0.0).to(tl.float32)
+        tl.store(c_ptrs, alpha * acc + beta * c_vals, mask=c_mask)
+
+
+@libentry()
 @libtuner(
     configs=runtime.get_tuned_config("sgemm_nn_thin"),
     key=_SGEMM_KEY,
@@ -1022,6 +1116,26 @@ def _make_sgemm_nt_kernel3_runner(
     return run
 
 
+def _make_sgemm_nt_1023_runner(
+    A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero, grid, **_kw
+):
+    return lambda: _sgemm_nt_1023_kernel[(
+        triton.cdiv(m, 64) * triton.cdiv(n, 32),
+    )](
+        A, B, C, alpha, beta, lda, ldb, ldc, beta_is_zero,
+        BLOCK_M=64, BLOCK_N=32, BLOCK_K=16, GROUP_M=4,
+        num_stages=2, num_warps=4,
+    )
+
+
+def _sgemm_nt_is_1023_square(m, n, k, **_kw):
+    return m == 1023 and n == 1023 and k == 1023
+
+
+def _sgemm_nt_is_default(**_kw):
+    return True
+
+
 def _build_sgemm_nt_dispatch_table(
     A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero, grid,
     model=libcache.model,
@@ -1067,6 +1181,21 @@ def _build_sgemm_nt_dispatch_table(
         filter=lambda m, n, k, **kw: not _is_sgemm_large(m, n, k) and not _is_sgemm_square_near_pow2(m, n, k),
     )
     return dispatch
+
+
+def _make_sgemm_nt_auto_runner(
+    A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero, grid, aligned
+):
+    dispatch = _build_sgemm_nt_dispatch_table(
+        A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero, grid
+    )
+    return dispatch.lookup_and_build(m, n, k, aligned, snapshot_tensor=C)
+
+
+_SGEMM_NT_DISPATCH = StaticDispatch([
+    (_sgemm_nt_is_1023_square, _make_sgemm_nt_1023_runner),
+    (_sgemm_nt_is_default, _make_sgemm_nt_auto_runner),
+])
 
 
 def _make_sgemm_tt_aligned_runner(
@@ -1257,11 +1386,14 @@ def sgemm(
             runner = dispatch.lookup_and_build(m, n, k, aligned, snapshot_tensor=C)
             runner()
         elif transa == CUBLAS_OP_N and transb == CUBLAS_OP_T:
-            dispatch = _build_sgemm_nt_dispatch_table(
-                A, lda, B, ldb, C, ldc,
-                m, n, k, alpha, beta, beta_is_zero, grid,
+            runner = _SGEMM_NT_DISPATCH.lookup_and_build(
+                m, n, k, aligned,
+                context=dict(
+                    A=A, lda=lda, B=B, ldb=ldb, C=C, ldc=ldc,
+                    m=m, n=n, k=k, alpha=alpha, beta=beta,
+                    beta_is_zero=beta_is_zero, grid=grid, aligned=aligned,
+                ),
             )
-            runner = dispatch.lookup_and_build(m, n, k, aligned, snapshot_tensor=C)
             runner()
         else:
             dispatch = _build_sgemm_tt_dispatch_table(
