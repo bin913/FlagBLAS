@@ -25,7 +25,7 @@ from flag_blas.ops.level3.cgemm import (
     _validate_cgemm_args,
 )
 from flag_blas.runtime import torch_device_fn
-from flag_blas.runtime.backend._nvidia.hopper.ops.gemm import sgemm as _sgemm_hopper
+from flag_blas.runtime.backend._nvidia.hopper.ops.sgemm import sgemm as _sgemm_hopper
 from flag_blas.runtime.dispatch import StaticDispatch
 
 logger = logging.getLogger(__name__)

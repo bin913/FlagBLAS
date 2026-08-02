@@ -11,10 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from .bfgemm import bfgemm
 from .cgemm import cgemm
 from .dgemm import dgemm
-from .gemm import bfgemm, fp8gemm, hgemm, sgemm
 from .group_gemm import group_gemm, group_mm
+from .hgemm import hgemm
+from .sgemm import sgemm
 from .zgemm import zgemm
 
 __all__ = [
@@ -24,7 +26,6 @@ __all__ = [
     "zgemm",
     "hgemm",
     "bfgemm",
-    "fp8gemm",
     "group_mm",
     "group_gemm",
 ]

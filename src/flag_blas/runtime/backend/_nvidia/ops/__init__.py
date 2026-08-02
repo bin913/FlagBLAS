@@ -12,7 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .gemm import bfgemm, fp8gemm, hgemm, sgemm
+from flag_blas.runtime.backend._nvidia.hopper.ops.bfgemm import bfgemm
+from flag_blas.runtime.backend._nvidia.hopper.ops.hgemm import hgemm
+from flag_blas.runtime.backend._nvidia.hopper.ops.sgemm import sgemm
+
 from .tpmv import ctpmv
 
-__all__ = ["sgemm", "hgemm", "bfgemm", "fp8gemm", "ctpmv"]
+__all__ = ["sgemm", "hgemm", "bfgemm", "ctpmv"]
