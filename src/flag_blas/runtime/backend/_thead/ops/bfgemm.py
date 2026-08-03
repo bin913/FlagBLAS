@@ -12,27 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from enum import Enum
+from flag_blas.ops.level3.bfgemm import bfgemm as _bfgemm
 
 
-class vendors(Enum):
-    NVIDIA = 0
-    CAMBRICON = 1
-    METAX = 2
-    ILUVATAR = 3
-    MTHREADS = 4
-    KUNLUNXIN = 5
-    HYGON = 6
-    AMD = 7
-    AIPU = 8
-    ASCEND = 9
-    TSINGMICRO = 10
-    SUNRISE = 11
-    THEAD = 12
+def bfgemm(*args, **kwargs):
+    return _bfgemm(*args, **kwargs)
 
-    @classmethod
-    def get_all_vendors(cls) -> dict:
-        vendorDict = {}
-        for member in cls:
-            vendorDict[member.name.lower()] = member
-        return vendorDict
+
+bgemm = bfgemm
+
+__all__ = ["bfgemm", "bgemm"]

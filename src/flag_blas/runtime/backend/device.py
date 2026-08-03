@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import os
+import shutil
 import shlex
 import subprocess
 import threading
@@ -94,6 +95,9 @@ class DeviceDetector(object):
             return self._get_vendor_from_sys()
 
     def _get_vendor_from_quick_cmd(self):
+        if shutil.which("ppu-smi") is not None:
+            return "thead"
+
         cmd = {
             "cambricon": "mlu",
             "mthreads": "musa",
