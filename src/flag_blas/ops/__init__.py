@@ -75,7 +75,6 @@ from flag_blas.ops.level3.dgemm import dgemm
 from flag_blas.ops.level3.gemm import fp8gemm
 from flag_blas.ops.level3.group_gemm import (
     group_bfgemm,
-    group_gemm,
     group_hgemm,
     group_mm,
     group_tf32gemm,
@@ -230,7 +229,6 @@ __all__ = [
     "bfgemm",
     "fp8gemm",
     "group_mm",
-    "group_gemm",
     "group_hgemm",
     "group_bfgemm",
     "group_tf32gemm",
