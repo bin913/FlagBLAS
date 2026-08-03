@@ -21,5 +21,11 @@ if triton.__version__ >= "3.5":
     from .hgemm import hgemm  # noqa: F401
     from .sgemm import sgemm  # noqa: F401
     from .zgemm import zgemm  # noqa: F401
+    from .group_gemm import (  # noqa: F401
+        group_bfgemm,
+        group_hgemm,
+        group_mm,
+        group_tf32gemm,
+    )
 
 __all__ = ["*"]

@@ -97,6 +97,42 @@ ops:
       - BLAS
     stages:
       - beta: '0.1'
+  - id: group_bfgemm
+    description: |
+      Refers to GROUP_GEMM with BF16 data type.
+      This is a simple wrapper of the existing BLAS bfloat16 `group_gemm` operator.
+    for:
+      - group_bfgemm
+    labels:
+      - gemm
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: group_hgemm
+    description: |
+      Refers to GROUP_GEMM with FP16 data type.
+      This is a simple wrapper of the existing BLAS float16 `group_gemm` operator.
+    for:
+      - group_hgemm
+    labels:
+      - gemm
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: group_tf32gemm
+    description: |
+      Refers to GROUP_GEMM with TF32 data type.
+      This is a simple wrapper of the existing BLAS tf32 `group_gemm` operator.
+    for:
+      - group_tf32gemm
+    labels:
+      - gemm
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
   - id: sabs
     description: |
       Single-precision BLAS Level 1 absolute-value operation.
