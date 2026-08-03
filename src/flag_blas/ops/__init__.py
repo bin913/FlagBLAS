@@ -27,6 +27,9 @@ from flag_blas.ops.level1.dotc import cdotc, zdotc
 from flag_blas.ops.level1.dotu import cdotu, zdotu
 from flag_blas.ops.level1.nrm2 import dnrm2, dznrm2, scnrm2, snrm2
 from flag_blas.ops.level1.rot import crot, drot, srot, zrot
+from flag_blas.ops.level1.rotg import crotg, drotg, srotg, zrotg
+from flag_blas.ops.level1.rotm import drotm, srotm
+from flag_blas.ops.level1.rotmg import drotmg, srotmg
 from flag_blas.ops.level1.scal import cscal, csscal, dscal, sscal, zdscal, zscal
 from flag_blas.ops.level1.swap import cswap, dswap, sswap, zswap
 from flag_blas.ops.level2._constants import (
@@ -48,19 +51,35 @@ from flag_blas.ops.level2.gemv import (
     sgemv,
     zgemv,
 )
+from flag_blas.ops.level2.ger import cgerc, cgeru, dger, sger, zgerc, zgeru
 from flag_blas.ops.level2.hbmv import chbmv, zhbmv
 from flag_blas.ops.level2.hemv import chemv, zhemv
+from flag_blas.ops.level2.her2 import cher2, zher2
+from flag_blas.ops.level2.hpmv import chpmv, zhpmv
+from flag_blas.ops.level2.hpr import chpr, zhpr
+from flag_blas.ops.level2.hpr2 import chpr2, zhpr2
 from flag_blas.ops.level2.sbmv import dsbmv, ssbmv
 from flag_blas.ops.level2.spmv import dspmv, sspmv
+from flag_blas.ops.level2.spr import dspr, sspr
+from flag_blas.ops.level2.spr2 import dspr2, sspr2
 from flag_blas.ops.level2.symv import csymv, dsymv, ssymv, zsymv
+from flag_blas.ops.level2.syr2 import dsyr2, ssyr2
 from flag_blas.ops.level2.tbmv import ctbmv, dtbmv, stbmv, ztbmv
 from flag_blas.ops.level2.tbsv import stbsv
 from flag_blas.ops.level2.tpmv import ctpmv, dtpmv, stpmv, ztpmv
 from flag_blas.ops.level2.trmv import ctrmv, dtrmv, strmv, ztrmv
+from flag_blas.ops.level2.trsv import ctrsv, dtrsv, strsv, ztrsv
 from flag_blas.ops.level3.bfgemm import bfgemm
 from flag_blas.ops.level3.cgemm import cgemm
 from flag_blas.ops.level3.dgemm import dgemm
-from flag_blas.ops.level3.group_gemm import group_gemm, group_mm
+from flag_blas.ops.level3.gemm import fp8gemm
+from flag_blas.ops.level3.group_gemm import (
+    group_bfgemm,
+    group_gemm,
+    group_hgemm,
+    group_mm,
+    group_tf32gemm,
+)
 from flag_blas.ops.level3.hgemm import hgemm
 from flag_blas.ops.level3.sgemm import sgemm
 from flag_blas.ops.level3.zgemm import zgemm
@@ -112,6 +131,14 @@ __all__ = [
     "drot",
     "crot",
     "zrot",
+    "srotg",
+    "drotg",
+    "crotg",
+    "zrotg",
+    "srotm",
+    "drotm",
+    "srotmg",
+    "drotmg",
     # gemv
     "sgemv",
     "dgemv",
@@ -120,6 +147,13 @@ __all__ = [
     "hgemv",
     "bfgemv",
     "fp8_gemv",
+    # ger
+    "sger",
+    "dger",
+    "cgeru",
+    "cgerc",
+    "zgeru",
+    "zgerc",
     # gbmv
     "sgbmv",
     "dgbmv",
@@ -131,6 +165,12 @@ __all__ = [
     # spmv
     "sspmv",
     "dspmv",
+    # spr
+    "sspr",
+    "dspr",
+    # spr2
+    "sspr2",
+    "dspr2",
     # hbmv
     "chbmv",
     "zhbmv",
@@ -139,6 +179,11 @@ __all__ = [
     "dsymv",
     "csymv",
     "zsymv",
+    # syr2
+    "ssyr2",
+    "dsyr2",
+    # "csyr2",  # disabled: no direct SciPy/CPU BLAS SYR2 reference
+    # "zsyr2",  # disabled: no direct SciPy/CPU BLAS SYR2 reference
     # trmv
     "strmv",
     "dtrmv",
@@ -157,6 +202,18 @@ __all__ = [
     # hemv
     "chemv",
     "zhemv",
+    # her2
+    "cher2",
+    "zher2",
+    # hpmv
+    "chpmv",
+    "zhpmv",
+    # hpr
+    "chpr",
+    "zhpr",
+    # hpr2
+    "chpr2",
+    "zhpr2",
     "CUBLAS_DIAG_NON_UNIT",
     "CUBLAS_DIAG_UNIT",
     "CUBLAS_FILL_MODE_LOWER",
@@ -171,8 +228,12 @@ __all__ = [
     "zgemm",
     "hgemm",
     "bfgemm",
+    "fp8gemm",
     "group_mm",
     "group_gemm",
+    "group_hgemm",
+    "group_bfgemm",
+    "group_tf32gemm",
     # abs
     "sabs",
     "dabs",
@@ -190,4 +251,9 @@ __all__ = [
     "zswap",
     # tbsv
     "stbsv",
+    # trsv
+    "strsv",
+    "dtrsv",
+    "ctrsv",
+    "ztrsv",
 ]

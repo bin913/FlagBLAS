@@ -14,7 +14,8 @@
 from .bfgemm import bfgemm
 from .cgemm import cgemm
 from .dgemm import dgemm
-from .group_gemm import group_gemm, group_mm
+from .gemm import fp8gemm
+from .group_gemm import group_gemm, group_mm, group_bfgemm, group_hgemm, group_tf32gemm
 from .hgemm import hgemm
 from .sgemm import sgemm
 from .zgemm import zgemm
@@ -26,6 +27,10 @@ __all__ = [
     "zgemm",
     "hgemm",
     "bfgemm",
+    "fp8gemm",
     "group_mm",
     "group_gemm",
+    "group_hgemm",
+    "group_bfgemm",
+    "group_tf32gemm",
 ]
