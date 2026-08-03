@@ -240,7 +240,7 @@ def _thead_sgemm_nn_kernel(
         a = tl.load(a_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0)
         b = tl.load(b_ptrs, mask=mask_k[:, None] & mask_n[None, :], other=0.0)
         acc_t = tl.dot(
-            tl.trans(b), tl.trans(a), acc_t, out_dtype=tl.float32, input_precision="ieee"
+            tl.trans(b), tl.trans(a), acc_t, out_dtype=tl.float32, input_precision="tf32x3"
         )
         a_ptrs += BLOCK_K
         b_ptrs += BLOCK_K * ldb
@@ -358,7 +358,7 @@ def _thead_sgemm_nn_tf32_kernel(
         for _ in range(0, k_full_iters):
             a = tl.load(a_ptrs)
             b = tl.load(b_ptrs)
-            acc = tl.dot(a, b, acc, out_dtype=tl.float32, input_precision="tf32")
+            acc = tl.dot(a, b, acc, out_dtype=tl.float32, input_precision="tf32x3")
             a_ptrs += BLOCK_K
             b_ptrs += BLOCK_K * ldb
 
@@ -366,14 +366,14 @@ def _thead_sgemm_nn_tf32_kernel(
             mask_k = offs_k < k_remainder
             a = tl.load(a_ptrs, mask=mask_k[None, :], other=0.0)
             b = tl.load(b_ptrs, mask=mask_k[:, None], other=0.0)
-            acc = tl.dot(a, b, acc, out_dtype=tl.float32, input_precision="tf32")
+            acc = tl.dot(a, b, acc, out_dtype=tl.float32, input_precision="tf32x3")
     else:
         mask_m = offs_m < m
         mask_n = offs_n < n
         for _ in range(0, k_full_iters):
             a = tl.load(a_ptrs, mask=mask_m[:, None], other=0.0)
             b = tl.load(b_ptrs, mask=mask_n[None, :], other=0.0)
-            acc = tl.dot(a, b, acc, out_dtype=tl.float32, input_precision="tf32")
+            acc = tl.dot(a, b, acc, out_dtype=tl.float32, input_precision="tf32x3")
             a_ptrs += BLOCK_K
             b_ptrs += BLOCK_K * ldb
 
@@ -381,7 +381,7 @@ def _thead_sgemm_nn_tf32_kernel(
             mask_k = offs_k < k_remainder
             a = tl.load(a_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0)
             b = tl.load(b_ptrs, mask=mask_k[:, None] & mask_n[None, :], other=0.0)
-            acc = tl.dot(a, b, acc, out_dtype=tl.float32, input_precision="tf32")
+            acc = tl.dot(a, b, acc, out_dtype=tl.float32, input_precision="tf32x3")
 
     c_ptrs = c_ptr + offs_m[:, None] * ldc + offs_n[None, :]
     if is_full_m and is_full_n:
@@ -448,7 +448,7 @@ def _thead_sgemm_nn_tf32_masked_kernel(
         mask_k = offs_k < k
         a = tl.load(a_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0)
         b = tl.load(b_ptrs, mask=mask_k[:, None] & mask_n[None, :], other=0.0)
-        acc = tl.dot(a, b, acc, out_dtype=tl.float32, input_precision="tf32")
+        acc = tl.dot(a, b, acc, out_dtype=tl.float32, input_precision="tf32x3")
         a_ptrs += BLOCK_K
         b_ptrs += BLOCK_K * ldb
         offs_k += BLOCK_K
@@ -514,7 +514,7 @@ def _thead_sgemm_tn_tf32_masked_kernel(
             a_t = tl.load(a_ptrs)
             b = tl.load(b_ptrs)
             acc_t = tl.dot(
-                tl.trans(b), a_t, acc_t, out_dtype=tl.float32, input_precision="tf32"
+                tl.trans(b), a_t, acc_t, out_dtype=tl.float32, input_precision="tf32x3"
             )
             a_ptrs += BLOCK_K * lda
             b_ptrs += BLOCK_K * ldb
@@ -524,14 +524,14 @@ def _thead_sgemm_tn_tf32_masked_kernel(
             a_t = tl.load(a_ptrs, mask=mask_k[:, None], other=0.0)
             b = tl.load(b_ptrs, mask=mask_k[:, None], other=0.0)
             acc_t = tl.dot(
-                tl.trans(b), a_t, acc_t, out_dtype=tl.float32, input_precision="tf32"
+                tl.trans(b), a_t, acc_t, out_dtype=tl.float32, input_precision="tf32x3"
             )
     else:
         for _ in range(0, k_full_iters):
             a_t = tl.load(a_ptrs, mask=mask_m[None, :], other=0.0)
             b = tl.load(b_ptrs, mask=mask_n[None, :], other=0.0)
             acc_t = tl.dot(
-                tl.trans(b), a_t, acc_t, out_dtype=tl.float32, input_precision="tf32"
+                tl.trans(b), a_t, acc_t, out_dtype=tl.float32, input_precision="tf32x3"
             )
             a_ptrs += BLOCK_K * lda
             b_ptrs += BLOCK_K * ldb
@@ -541,7 +541,7 @@ def _thead_sgemm_tn_tf32_masked_kernel(
             a_t = tl.load(a_ptrs, mask=mask_k[:, None] & mask_m[None, :], other=0.0)
             b = tl.load(b_ptrs, mask=mask_k[:, None] & mask_n[None, :], other=0.0)
             acc_t = tl.dot(
-                tl.trans(b), a_t, acc_t, out_dtype=tl.float32, input_precision="tf32"
+                tl.trans(b), a_t, acc_t, out_dtype=tl.float32, input_precision="tf32x3"
             )
 
     c_ptrs = c_ptr + offs_n[:, None] + offs_m[None, :] * ldc
@@ -605,7 +605,7 @@ def _thead_sgemm_nt_tf32_masked_kernel(
             a = tl.load(a_ptrs)
             b_t = tl.load(b_ptrs)
             acc_t = tl.dot(
-                b_t, tl.trans(a), acc_t, out_dtype=tl.float32, input_precision="tf32"
+                b_t, tl.trans(a), acc_t, out_dtype=tl.float32, input_precision="tf32x3"
             )
             a_ptrs += BLOCK_K
             b_ptrs += BLOCK_K
@@ -615,14 +615,14 @@ def _thead_sgemm_nt_tf32_masked_kernel(
             a = tl.load(a_ptrs, mask=mask_k[None, :], other=0.0)
             b_t = tl.load(b_ptrs, mask=mask_k[None, :], other=0.0)
             acc_t = tl.dot(
-                b_t, tl.trans(a), acc_t, out_dtype=tl.float32, input_precision="tf32"
+                b_t, tl.trans(a), acc_t, out_dtype=tl.float32, input_precision="tf32x3"
             )
     else:
         for _ in range(0, k_full_iters):
             a = tl.load(a_ptrs, mask=mask_m[:, None], other=0.0)
             b_t = tl.load(b_ptrs, mask=mask_n[:, None], other=0.0)
             acc_t = tl.dot(
-                b_t, tl.trans(a), acc_t, out_dtype=tl.float32, input_precision="tf32"
+                b_t, tl.trans(a), acc_t, out_dtype=tl.float32, input_precision="tf32x3"
             )
             a_ptrs += BLOCK_K
             b_ptrs += BLOCK_K
@@ -632,7 +632,7 @@ def _thead_sgemm_nt_tf32_masked_kernel(
             a = tl.load(a_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0)
             b_t = tl.load(b_ptrs, mask=mask_n[:, None] & mask_k[None, :], other=0.0)
             acc_t = tl.dot(
-                b_t, tl.trans(a), acc_t, out_dtype=tl.float32, input_precision="tf32"
+                b_t, tl.trans(a), acc_t, out_dtype=tl.float32, input_precision="tf32x3"
             )
 
     c_ptrs = c_ptr + offs_n[:, None] + offs_m[None, :] * ldc
@@ -695,7 +695,7 @@ def _thead_sgemm_tt_tf32_masked_kernel(
         for _ in range(0, k_full_iters):
             a_t = tl.load(a_ptrs)
             b_t = tl.load(b_ptrs)
-            acc_t = tl.dot(b_t, a_t, acc_t, out_dtype=tl.float32, input_precision="tf32")
+            acc_t = tl.dot(b_t, a_t, acc_t, out_dtype=tl.float32, input_precision="tf32x3")
             a_ptrs += BLOCK_K * lda
             b_ptrs += BLOCK_K
 
@@ -703,12 +703,12 @@ def _thead_sgemm_tt_tf32_masked_kernel(
             mask_k = offs_k < k_remainder
             a_t = tl.load(a_ptrs, mask=mask_k[:, None], other=0.0)
             b_t = tl.load(b_ptrs, mask=mask_k[None, :], other=0.0)
-            acc_t = tl.dot(b_t, a_t, acc_t, out_dtype=tl.float32, input_precision="tf32")
+            acc_t = tl.dot(b_t, a_t, acc_t, out_dtype=tl.float32, input_precision="tf32x3")
     else:
         for _ in range(0, k_full_iters):
             a_t = tl.load(a_ptrs, mask=mask_m[None, :], other=0.0)
             b_t = tl.load(b_ptrs, mask=mask_n[:, None], other=0.0)
-            acc_t = tl.dot(b_t, a_t, acc_t, out_dtype=tl.float32, input_precision="tf32")
+            acc_t = tl.dot(b_t, a_t, acc_t, out_dtype=tl.float32, input_precision="tf32x3")
             a_ptrs += BLOCK_K * lda
             b_ptrs += BLOCK_K
 
@@ -716,7 +716,7 @@ def _thead_sgemm_tt_tf32_masked_kernel(
             mask_k = offs_k < k_remainder
             a_t = tl.load(a_ptrs, mask=mask_k[:, None] & mask_m[None, :], other=0.0)
             b_t = tl.load(b_ptrs, mask=mask_n[:, None] & mask_k[None, :], other=0.0)
-            acc_t = tl.dot(b_t, a_t, acc_t, out_dtype=tl.float32, input_precision="tf32")
+            acc_t = tl.dot(b_t, a_t, acc_t, out_dtype=tl.float32, input_precision="tf32x3")
 
     c_ptrs = c_ptr + offs_n[:, None] + offs_m[None, :] * ldc
     c_mask = mask_n[:, None] & mask_m[None, :]
@@ -725,246 +725,6 @@ def _thead_sgemm_tt_tf32_masked_kernel(
     else:
         c_vals = tl.load(c_ptrs, mask=c_mask, other=0.0).to(tl.float32)
         tl.store(c_ptrs, alpha * acc_t + beta * c_vals, mask=c_mask)
-
-
-@libentry()
-@triton.jit
-def _thead_sgemm_tn_tf32_direct_kernel(
-    a_ptr,
-    b_ptr,
-    c_ptr,
-    alpha: tl.float32,
-    beta: tl.float32,
-    m,
-    n,
-    k,
-    lda,
-    ldb,
-    ldc,
-    BETA_IS_ZERO: tl.constexpr,
-    BLOCK_M: tl.constexpr,
-    BLOCK_N: tl.constexpr,
-    BLOCK_K: tl.constexpr,
-    GROUP_M: tl.constexpr,
-):
-    a_ptr = a_ptr.to(tl.pointer_type(tl.float32))
-    b_ptr = b_ptr.to(tl.pointer_type(tl.float32))
-    c_ptr = c_ptr.to(tl.pointer_type(tl.float32))
-
-    pid = tl.program_id(0)
-    grid_m = tl.cdiv(m, BLOCK_M)
-    grid_n = tl.cdiv(n, BLOCK_N)
-    width = GROUP_M * grid_n
-    group_id = pid // width
-    group_size = min(grid_m - group_id * GROUP_M, GROUP_M)
-    pid_m = group_id * GROUP_M + (pid % group_size)
-    pid_n = (pid % width) // group_size
-
-    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
-    offs_k = tl.arange(0, BLOCK_K)
-    mask_m = offs_m < m
-    mask_n = offs_n < n
-    a_ptrs = a_ptr + offs_k[:, None] * lda + offs_m[None, :]
-    b_ptrs = b_ptr + offs_k[:, None] * ldb + offs_n[None, :]
-    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-    is_full_m = (pid_m * BLOCK_M + BLOCK_M) <= m
-    is_full_n = (pid_n * BLOCK_N + BLOCK_N) <= n
-    k_full_iters = k // BLOCK_K
-    k_remainder = k % BLOCK_K
-
-    if is_full_m and is_full_n:
-        for _ in range(0, k_full_iters):
-            a_t = tl.load(a_ptrs)
-            b = tl.load(b_ptrs)
-            acc = tl.dot(tl.trans(a_t), b, acc, out_dtype=tl.float32, input_precision="tf32")
-            a_ptrs += BLOCK_K * lda
-            b_ptrs += BLOCK_K * ldb
-        if k_remainder > 0:
-            mask_k = offs_k < k_remainder
-            a_t = tl.load(a_ptrs, mask=mask_k[:, None], other=0.0)
-            b = tl.load(b_ptrs, mask=mask_k[:, None], other=0.0)
-            acc = tl.dot(tl.trans(a_t), b, acc, out_dtype=tl.float32, input_precision="tf32")
-    else:
-        for _ in range(0, k_full_iters):
-            a_t = tl.load(a_ptrs, mask=mask_m[None, :], other=0.0)
-            b = tl.load(b_ptrs, mask=mask_n[None, :], other=0.0)
-            acc = tl.dot(tl.trans(a_t), b, acc, out_dtype=tl.float32, input_precision="tf32")
-            a_ptrs += BLOCK_K * lda
-            b_ptrs += BLOCK_K * ldb
-        if k_remainder > 0:
-            mask_k = offs_k < k_remainder
-            a_t = tl.load(a_ptrs, mask=mask_k[:, None] & mask_m[None, :], other=0.0)
-            b = tl.load(b_ptrs, mask=mask_k[:, None] & mask_n[None, :], other=0.0)
-            acc = tl.dot(tl.trans(a_t), b, acc, out_dtype=tl.float32, input_precision="tf32")
-
-    c_ptrs = c_ptr + offs_m[:, None] * ldc + offs_n[None, :]
-    c_mask = mask_m[:, None] & mask_n[None, :]
-    if BETA_IS_ZERO:
-        tl.store(c_ptrs, alpha * acc, mask=c_mask)
-    else:
-        c_vals = tl.load(c_ptrs, mask=c_mask, other=0.0).to(tl.float32)
-        tl.store(c_ptrs, alpha * acc + beta * c_vals, mask=c_mask)
-
-
-@libentry()
-@triton.jit
-def _thead_sgemm_nt_tf32_direct_kernel(
-    a_ptr,
-    b_ptr,
-    c_ptr,
-    alpha: tl.float32,
-    beta: tl.float32,
-    m,
-    n,
-    k,
-    lda,
-    ldb,
-    ldc,
-    BETA_IS_ZERO: tl.constexpr,
-    BLOCK_M: tl.constexpr,
-    BLOCK_N: tl.constexpr,
-    BLOCK_K: tl.constexpr,
-    GROUP_M: tl.constexpr,
-):
-    a_ptr = a_ptr.to(tl.pointer_type(tl.float32))
-    b_ptr = b_ptr.to(tl.pointer_type(tl.float32))
-    c_ptr = c_ptr.to(tl.pointer_type(tl.float32))
-
-    pid = tl.program_id(0)
-    grid_m = tl.cdiv(m, BLOCK_M)
-    grid_n = tl.cdiv(n, BLOCK_N)
-    width = GROUP_M * grid_n
-    group_id = pid // width
-    group_size = min(grid_m - group_id * GROUP_M, GROUP_M)
-    pid_m = group_id * GROUP_M + (pid % group_size)
-    pid_n = (pid % width) // group_size
-
-    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
-    offs_k = tl.arange(0, BLOCK_K)
-    mask_m = offs_m < m
-    mask_n = offs_n < n
-    a_ptrs = a_ptr + offs_m[:, None] * lda + offs_k[None, :]
-    b_ptrs = b_ptr + offs_n[:, None] * ldb + offs_k[None, :]
-    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-    is_full_m = (pid_m * BLOCK_M + BLOCK_M) <= m
-    is_full_n = (pid_n * BLOCK_N + BLOCK_N) <= n
-    k_full_iters = k // BLOCK_K
-    k_remainder = k % BLOCK_K
-
-    if is_full_m and is_full_n:
-        for _ in range(0, k_full_iters):
-            a = tl.load(a_ptrs)
-            b_t = tl.load(b_ptrs)
-            acc = tl.dot(a, tl.trans(b_t), acc, out_dtype=tl.float32, input_precision="tf32")
-            a_ptrs += BLOCK_K
-            b_ptrs += BLOCK_K
-        if k_remainder > 0:
-            mask_k = offs_k < k_remainder
-            a = tl.load(a_ptrs, mask=mask_k[None, :], other=0.0)
-            b_t = tl.load(b_ptrs, mask=mask_k[None, :], other=0.0)
-            acc = tl.dot(a, tl.trans(b_t), acc, out_dtype=tl.float32, input_precision="tf32")
-    else:
-        for _ in range(0, k_full_iters):
-            a = tl.load(a_ptrs, mask=mask_m[:, None], other=0.0)
-            b_t = tl.load(b_ptrs, mask=mask_n[:, None], other=0.0)
-            acc = tl.dot(a, tl.trans(b_t), acc, out_dtype=tl.float32, input_precision="tf32")
-            a_ptrs += BLOCK_K
-            b_ptrs += BLOCK_K
-        if k_remainder > 0:
-            mask_k = offs_k < k_remainder
-            a = tl.load(a_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0)
-            b_t = tl.load(b_ptrs, mask=mask_n[:, None] & mask_k[None, :], other=0.0)
-            acc = tl.dot(a, tl.trans(b_t), acc, out_dtype=tl.float32, input_precision="tf32")
-
-    c_ptrs = c_ptr + offs_m[:, None] * ldc + offs_n[None, :]
-    c_mask = mask_m[:, None] & mask_n[None, :]
-    if BETA_IS_ZERO:
-        tl.store(c_ptrs, alpha * acc, mask=c_mask)
-    else:
-        c_vals = tl.load(c_ptrs, mask=c_mask, other=0.0).to(tl.float32)
-        tl.store(c_ptrs, alpha * acc + beta * c_vals, mask=c_mask)
-
-
-@libentry()
-@triton.jit
-def _thead_sgemm_tt_tf32_direct_kernel(
-    a_ptr,
-    b_ptr,
-    c_ptr,
-    alpha: tl.float32,
-    beta: tl.float32,
-    m,
-    n,
-    k,
-    lda,
-    ldb,
-    ldc,
-    BETA_IS_ZERO: tl.constexpr,
-    BLOCK_M: tl.constexpr,
-    BLOCK_N: tl.constexpr,
-    BLOCK_K: tl.constexpr,
-    GROUP_M: tl.constexpr,
-):
-    a_ptr = a_ptr.to(tl.pointer_type(tl.float32))
-    b_ptr = b_ptr.to(tl.pointer_type(tl.float32))
-    c_ptr = c_ptr.to(tl.pointer_type(tl.float32))
-
-    pid = tl.program_id(0)
-    grid_m = tl.cdiv(m, BLOCK_M)
-    grid_n = tl.cdiv(n, BLOCK_N)
-    width = GROUP_M * grid_n
-    group_id = pid // width
-    group_size = min(grid_m - group_id * GROUP_M, GROUP_M)
-    pid_m = group_id * GROUP_M + (pid % group_size)
-    pid_n = (pid % width) // group_size
-
-    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
-    offs_k = tl.arange(0, BLOCK_K)
-    mask_m = offs_m < m
-    mask_n = offs_n < n
-    a_ptrs = a_ptr + offs_k[:, None] * lda + offs_m[None, :]
-    b_ptrs = b_ptr + offs_n[:, None] * ldb + offs_k[None, :]
-    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-    is_full_m = (pid_m * BLOCK_M + BLOCK_M) <= m
-    is_full_n = (pid_n * BLOCK_N + BLOCK_N) <= n
-    k_full_iters = k // BLOCK_K
-    k_remainder = k % BLOCK_K
-
-    if is_full_m and is_full_n:
-        for _ in range(0, k_full_iters):
-            a_t = tl.load(a_ptrs)
-            b_t = tl.load(b_ptrs)
-            acc = tl.dot(tl.trans(a_t), tl.trans(b_t), acc, out_dtype=tl.float32, input_precision="tf32")
-            a_ptrs += BLOCK_K * lda
-            b_ptrs += BLOCK_K
-        if k_remainder > 0:
-            mask_k = offs_k < k_remainder
-            a_t = tl.load(a_ptrs, mask=mask_k[:, None], other=0.0)
-            b_t = tl.load(b_ptrs, mask=mask_k[None, :], other=0.0)
-            acc = tl.dot(tl.trans(a_t), tl.trans(b_t), acc, out_dtype=tl.float32, input_precision="tf32")
-    else:
-        for _ in range(0, k_full_iters):
-            a_t = tl.load(a_ptrs, mask=mask_m[None, :], other=0.0)
-            b_t = tl.load(b_ptrs, mask=mask_n[:, None], other=0.0)
-            acc = tl.dot(tl.trans(a_t), tl.trans(b_t), acc, out_dtype=tl.float32, input_precision="tf32")
-            a_ptrs += BLOCK_K * lda
-            b_ptrs += BLOCK_K
-        if k_remainder > 0:
-            mask_k = offs_k < k_remainder
-            a_t = tl.load(a_ptrs, mask=mask_k[:, None] & mask_m[None, :], other=0.0)
-            b_t = tl.load(b_ptrs, mask=mask_n[:, None] & mask_k[None, :], other=0.0)
-            acc = tl.dot(tl.trans(a_t), tl.trans(b_t), acc, out_dtype=tl.float32, input_precision="tf32")
-
-    c_ptrs = c_ptr + offs_m[:, None] * ldc + offs_n[None, :]
-    c_mask = mask_m[:, None] & mask_n[None, :]
-    if BETA_IS_ZERO:
-        tl.store(c_ptrs, alpha * acc, mask=c_mask)
-    else:
-        c_vals = tl.load(c_ptrs, mask=c_mask, other=0.0).to(tl.float32)
-        tl.store(c_ptrs, alpha * acc + beta * c_vals, mask=c_mask)
 
 
 @libentry()
@@ -1015,7 +775,7 @@ def _thead_sgemm_tn_square_odd_kernel(
             a_t = tl.load(a_ptrs)
             b = tl.load(b_ptrs)
             acc_t = tl.dot(
-                tl.trans(b), a_t, acc_t, out_dtype=tl.float32, input_precision="tf32"
+                tl.trans(b), a_t, acc_t, out_dtype=tl.float32, input_precision="tf32x3"
             )
             a_ptrs += BLOCK_K * lda
             b_ptrs += BLOCK_K * ldb
@@ -1024,14 +784,14 @@ def _thead_sgemm_tn_square_odd_kernel(
             a_t = tl.load(a_ptrs, mask=mask_k[:, None], other=0.0)
             b = tl.load(b_ptrs, mask=mask_k[:, None], other=0.0)
             acc_t = tl.dot(
-                tl.trans(b), a_t, acc_t, out_dtype=tl.float32, input_precision="tf32"
+                tl.trans(b), a_t, acc_t, out_dtype=tl.float32, input_precision="tf32x3"
             )
     else:
         for _ in range(0, SIZE // BLOCK_K):
             a_t = tl.load(a_ptrs, mask=mask_m[None, :], other=0.0)
             b = tl.load(b_ptrs, mask=mask_n[None, :], other=0.0)
             acc_t = tl.dot(
-                tl.trans(b), a_t, acc_t, out_dtype=tl.float32, input_precision="tf32"
+                tl.trans(b), a_t, acc_t, out_dtype=tl.float32, input_precision="tf32x3"
             )
             a_ptrs += BLOCK_K * lda
             b_ptrs += BLOCK_K * ldb
@@ -1040,7 +800,7 @@ def _thead_sgemm_tn_square_odd_kernel(
             a_t = tl.load(a_ptrs, mask=mask_k[:, None] & mask_m[None, :], other=0.0)
             b = tl.load(b_ptrs, mask=mask_k[:, None] & mask_n[None, :], other=0.0)
             acc_t = tl.dot(
-                tl.trans(b), a_t, acc_t, out_dtype=tl.float32, input_precision="tf32"
+                tl.trans(b), a_t, acc_t, out_dtype=tl.float32, input_precision="tf32x3"
             )
 
     c_ptrs = c_ptr + offs_n[:, None] + offs_m[None, :] * ldc
@@ -1100,7 +860,7 @@ def _thead_sgemm_nt_square_odd_kernel(
             a = tl.load(a_ptrs)
             b_t = tl.load(b_ptrs)
             acc_t = tl.dot(
-                b_t, tl.trans(a), acc_t, out_dtype=tl.float32, input_precision="tf32"
+                b_t, tl.trans(a), acc_t, out_dtype=tl.float32, input_precision="tf32x3"
             )
             a_ptrs += BLOCK_K
             b_ptrs += BLOCK_K
@@ -1109,14 +869,14 @@ def _thead_sgemm_nt_square_odd_kernel(
             a = tl.load(a_ptrs, mask=mask_k[None, :], other=0.0)
             b_t = tl.load(b_ptrs, mask=mask_k[None, :], other=0.0)
             acc_t = tl.dot(
-                b_t, tl.trans(a), acc_t, out_dtype=tl.float32, input_precision="tf32"
+                b_t, tl.trans(a), acc_t, out_dtype=tl.float32, input_precision="tf32x3"
             )
     else:
         for _ in range(0, SIZE // BLOCK_K):
             a = tl.load(a_ptrs, mask=mask_m[:, None], other=0.0)
             b_t = tl.load(b_ptrs, mask=mask_n[:, None], other=0.0)
             acc_t = tl.dot(
-                b_t, tl.trans(a), acc_t, out_dtype=tl.float32, input_precision="tf32"
+                b_t, tl.trans(a), acc_t, out_dtype=tl.float32, input_precision="tf32x3"
             )
             a_ptrs += BLOCK_K
             b_ptrs += BLOCK_K
@@ -1125,7 +885,7 @@ def _thead_sgemm_nt_square_odd_kernel(
             a = tl.load(a_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0)
             b_t = tl.load(b_ptrs, mask=mask_n[:, None] & mask_k[None, :], other=0.0)
             acc_t = tl.dot(
-                b_t, tl.trans(a), acc_t, out_dtype=tl.float32, input_precision="tf32"
+                b_t, tl.trans(a), acc_t, out_dtype=tl.float32, input_precision="tf32x3"
             )
 
     c_ptrs = c_ptr + offs_n[:, None] + offs_m[None, :] * ldc
@@ -1184,26 +944,26 @@ def _thead_sgemm_tt_square_odd_kernel(
         for _ in range(0, SIZE // BLOCK_K):
             a_t = tl.load(a_ptrs)
             b_t = tl.load(b_ptrs)
-            acc_t = tl.dot(b_t, a_t, acc_t, out_dtype=tl.float32, input_precision="tf32")
+            acc_t = tl.dot(b_t, a_t, acc_t, out_dtype=tl.float32, input_precision="tf32x3")
             a_ptrs += BLOCK_K * lda
             b_ptrs += BLOCK_K
         if SIZE % BLOCK_K > 0:
             mask_k = offs_k < (SIZE % BLOCK_K)
             a_t = tl.load(a_ptrs, mask=mask_k[:, None], other=0.0)
             b_t = tl.load(b_ptrs, mask=mask_k[None, :], other=0.0)
-            acc_t = tl.dot(b_t, a_t, acc_t, out_dtype=tl.float32, input_precision="tf32")
+            acc_t = tl.dot(b_t, a_t, acc_t, out_dtype=tl.float32, input_precision="tf32x3")
     else:
         for _ in range(0, SIZE // BLOCK_K):
             a_t = tl.load(a_ptrs, mask=mask_m[None, :], other=0.0)
             b_t = tl.load(b_ptrs, mask=mask_n[:, None], other=0.0)
-            acc_t = tl.dot(b_t, a_t, acc_t, out_dtype=tl.float32, input_precision="tf32")
+            acc_t = tl.dot(b_t, a_t, acc_t, out_dtype=tl.float32, input_precision="tf32x3")
             a_ptrs += BLOCK_K * lda
             b_ptrs += BLOCK_K
         if SIZE % BLOCK_K > 0:
             mask_k = offs_k < (SIZE % BLOCK_K)
             a_t = tl.load(a_ptrs, mask=mask_k[:, None] & mask_m[None, :], other=0.0)
             b_t = tl.load(b_ptrs, mask=mask_n[:, None] & mask_k[None, :], other=0.0)
-            acc_t = tl.dot(b_t, a_t, acc_t, out_dtype=tl.float32, input_precision="tf32")
+            acc_t = tl.dot(b_t, a_t, acc_t, out_dtype=tl.float32, input_precision="tf32x3")
 
     c_ptrs = c_ptr + offs_n[:, None] + offs_m[None, :] * ldc
     c_mask = mask_n[:, None] & mask_m[None, :]
@@ -1267,7 +1027,7 @@ def _sgemm_nn_kernel2(
         a_t = a_desc.load([pid_m * BLOCK_M, i * BLOCK_K])
         b_t = b_desc.load([i * BLOCK_K, pid_n * BLOCK_N])
 
-        acc = tl.dot(a_t, b_t, acc, out_dtype=tl.float32, input_precision="tf32")
+        acc = tl.dot(a_t, b_t, acc, out_dtype=tl.float32, input_precision="tf32x3")
 
     if BETA_IS_ZERO:
         result = (alpha * acc).to(tl.float32)
@@ -1346,7 +1106,7 @@ def _sgemm_tn_kernel2(
 
         a = tl.trans(a_t)
 
-        acc = tl.dot(a, b, acc, out_dtype=tl.float32, input_precision="tf32")
+        acc = tl.dot(a, b, acc, out_dtype=tl.float32, input_precision="tf32x3")
 
         a_block_ptr = tl.advance(a_block_ptr, (BLOCK_K, 0))
         b_block_ptr = tl.advance(b_block_ptr, (BLOCK_K, 0))
@@ -1414,7 +1174,7 @@ def _sgemm_nt_kernel2(
         b_t = b_desc.load([pid_n * BLOCK_N, i * BLOCK_K])
 
         acc = tl.dot(
-            a_t, tl.trans(b_t), acc, out_dtype=tl.float32, input_precision="tf32"
+            a_t, tl.trans(b_t), acc, out_dtype=tl.float32, input_precision="tf32x3"
         )
 
     if BETA_IS_ZERO:
@@ -1493,7 +1253,7 @@ def _sgemm_nt_kernel3(
         a = tl.load(a_block_ptr, boundary_check=(0, 1))
         b = tl.load(b_block_ptr, boundary_check=(0, 1))
         acc = tl.dot(
-            a, tl.trans(b), acc, out_dtype=tl.float32, input_precision="tf32"
+            a, tl.trans(b), acc, out_dtype=tl.float32, input_precision="tf32x3"
         )
         a_block_ptr = tl.advance(a_block_ptr, (0, BLOCK_K))
         b_block_ptr = tl.advance(b_block_ptr, (0, BLOCK_K))
@@ -1576,7 +1336,7 @@ def _sgemm_tt_kernel2(
     for _ in range(0, tl.cdiv(k, BLOCK_K)):
         a = tl.load(a_block_ptr, boundary_check=(0, 1))
         b = tl.load(b_block_ptr, boundary_check=(0, 1))
-        acc = tl.dot(a, b, acc, out_dtype=tl.float32, input_precision="tf32")
+        acc = tl.dot(a, b, acc, out_dtype=tl.float32, input_precision="tf32x3")
 
         a_block_ptr = tl.advance(a_block_ptr, (0, BLOCK_K))
         b_block_ptr = tl.advance(b_block_ptr, (BLOCK_K, 0))
@@ -1640,7 +1400,7 @@ def _sgemm_nt_1023_kernel(
             a = tl.load(a_ptrs)
             b = tl.load(b_ptrs)
             acc_t = tl.dot(
-                b, tl.trans(a), acc_t, out_dtype=tl.float32, input_precision="tf32"
+                b, tl.trans(a), acc_t, out_dtype=tl.float32, input_precision="tf32x3"
             )
             a_ptrs += BLOCK_K
             b_ptrs += BLOCK_K
@@ -1650,7 +1410,7 @@ def _sgemm_nt_1023_kernel(
             a = tl.load(a_ptrs, mask=mask_k[None, :], other=0.0)
             b = tl.load(b_ptrs, mask=mask_k[None, :], other=0.0)
             acc_t = tl.dot(
-                b, tl.trans(a), acc_t, out_dtype=tl.float32, input_precision="tf32"
+                b, tl.trans(a), acc_t, out_dtype=tl.float32, input_precision="tf32x3"
             )
     else:
         mask_m = offs_m < M
@@ -1660,7 +1420,7 @@ def _sgemm_nt_1023_kernel(
             a = tl.load(a_ptrs, mask=mask_m[:, None], other=0.0)
             b = tl.load(b_ptrs, mask=mask_n[:, None], other=0.0)
             acc_t = tl.dot(
-                b, tl.trans(a), acc_t, out_dtype=tl.float32, input_precision="tf32"
+                b, tl.trans(a), acc_t, out_dtype=tl.float32, input_precision="tf32x3"
             )
             a_ptrs += BLOCK_K
             b_ptrs += BLOCK_K
@@ -1670,7 +1430,7 @@ def _sgemm_nt_1023_kernel(
             a = tl.load(a_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0)
             b = tl.load(b_ptrs, mask=mask_n[:, None] & mask_k[None, :], other=0.0)
             acc_t = tl.dot(
-                b, tl.trans(a), acc_t, out_dtype=tl.float32, input_precision="tf32"
+                b, tl.trans(a), acc_t, out_dtype=tl.float32, input_precision="tf32x3"
             )
 
     acc = tl.trans(acc_t)
@@ -1748,7 +1508,7 @@ def _sgemm_nn_thin_kernel(
     for i in range(0, full_iters):
         a = tl.load(a_ptrs, mask=mask_m[:, None], other=0.0)
         b = tl.load(b_ptrs, mask=mask_n[None, :], other=0.0)
-        acc = tl.dot(a, b, acc, out_dtype=tl.float32, input_precision="tf32")
+        acc = tl.dot(a, b, acc, out_dtype=tl.float32, input_precision="tf32x3")
         a_ptrs += BLOCK_K
         b_ptrs += BLOCK_K * ldb
 
@@ -1758,7 +1518,7 @@ def _sgemm_nn_thin_kernel(
         b_mask = mask_k[:, None] & mask_n[None, :]
         a = tl.load(a_ptrs, mask=a_mask, other=0.0)
         b = tl.load(b_ptrs, mask=b_mask, other=0.0)
-        acc = tl.dot(a, b, acc, out_dtype=tl.float32, input_precision="tf32")
+        acc = tl.dot(a, b, acc, out_dtype=tl.float32, input_precision="tf32x3")
 
     offs_cm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_cn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
@@ -1832,7 +1592,7 @@ def _sgemm_nt_thin_kernel(
     for i in range(0, full_iters):
         a = tl.load(a_ptrs, mask=mask_m[:, None], other=0.0)
         b = tl.load(b_ptrs, mask=mask_n[:, None], other=0.0)
-        acc = tl.dot(a, tl.trans(b), acc, out_dtype=tl.float32, input_precision="tf32")
+        acc = tl.dot(a, tl.trans(b), acc, out_dtype=tl.float32, input_precision="tf32x3")
         a_ptrs += BLOCK_K
         b_ptrs += BLOCK_K
 
@@ -1842,7 +1602,7 @@ def _sgemm_nt_thin_kernel(
         b_mask = mask_n[:, None] & mask_k[None, :]
         a = tl.load(a_ptrs, mask=a_mask, other=0.0)
         b = tl.load(b_ptrs, mask=b_mask, other=0.0)
-        acc = tl.dot(a, tl.trans(b), acc, out_dtype=tl.float32, input_precision="tf32")
+        acc = tl.dot(a, tl.trans(b), acc, out_dtype=tl.float32, input_precision="tf32x3")
 
     offs_cm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_cn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
@@ -1915,7 +1675,7 @@ def _sgemm_tn_thin_kernel(
     for _ in range(0, full_iters):
         a_t = tl.load(a_ptrs, mask=mask_m[None, :], other=0.0)
         b = tl.load(b_ptrs, mask=mask_n[None, :], other=0.0)
-        acc_t = tl.dot(tl.trans(b), a_t, acc_t, out_dtype=tl.float32, input_precision="tf32")
+        acc_t = tl.dot(tl.trans(b), a_t, acc_t, out_dtype=tl.float32, input_precision="tf32x3")
         a_ptrs += BLOCK_K * lda
         b_ptrs += BLOCK_K * ldb
 
@@ -1923,7 +1683,7 @@ def _sgemm_tn_thin_kernel(
         mask_k = offs_k < remainder
         a_t = tl.load(a_ptrs, mask=mask_k[:, None] & mask_m[None, :], other=0.0)
         b = tl.load(b_ptrs, mask=mask_k[:, None] & mask_n[None, :], other=0.0)
-        acc_t = tl.dot(tl.trans(b), a_t, acc_t, out_dtype=tl.float32, input_precision="tf32")
+        acc_t = tl.dot(tl.trans(b), a_t, acc_t, out_dtype=tl.float32, input_precision="tf32x3")
 
     acc = tl.trans(acc_t)
     c_ptrs = c_ptr + (offs_am[:, None] * ldc + offs_bn[None, :])
@@ -1995,7 +1755,7 @@ def _sgemm_tt_thin_kernel(
     for i in range(0, full_iters):
         a = tl.load(a_ptrs, mask=mask_m[None, :], other=0.0)
         b = tl.load(b_ptrs, mask=mask_n[:, None], other=0.0)
-        acc_t = tl.dot(b, a, acc_t, out_dtype=tl.float32, input_precision="tf32")
+        acc_t = tl.dot(b, a, acc_t, out_dtype=tl.float32, input_precision="tf32x3")
         a_ptrs += BLOCK_K * lda
         b_ptrs += BLOCK_K
 
@@ -2005,7 +1765,7 @@ def _sgemm_tt_thin_kernel(
         b_mask = mask_n[:, None] & mask_k[None, :]
         a = tl.load(a_ptrs, mask=a_mask, other=0.0)
         b = tl.load(b_ptrs, mask=b_mask, other=0.0)
-        acc_t = tl.dot(b, a, acc_t, out_dtype=tl.float32, input_precision="tf32")
+        acc_t = tl.dot(b, a, acc_t, out_dtype=tl.float32, input_precision="tf32x3")
 
     acc = tl.trans(acc_t)
 
@@ -2230,31 +1990,6 @@ def _run_sgemm_nn_511(A, B, C, alpha, beta, beta_is_zero):
     )
 
 
-def _run_sgemm_tn_511(A, lda, B, ldb, C, ldc, alpha, beta, beta_is_zero):
-    _thead_sgemm_tn_tf32_direct_kernel[
-        (triton.cdiv(511, 64) * triton.cdiv(511, 64),)
-    ](
-        A,
-        B,
-        C,
-        alpha,
-        beta,
-        511,
-        511,
-        511,
-        lda,
-        ldb,
-        ldc,
-        beta_is_zero,
-        BLOCK_M=64,
-        BLOCK_N=64,
-        BLOCK_K=16,
-        GROUP_M=8,
-        num_warps=4,
-        num_stages=3,
-    )
-
-
 def _run_sgemm_tt_511(A, lda, B, ldb, C, ldc, alpha, beta, beta_is_zero):
     _thead_sgemm_tt_tf32_masked_kernel[
         (triton.cdiv(511, 64) * triton.cdiv(511, 64),)
@@ -2282,7 +2017,7 @@ def _run_sgemm_tt_511(A, lda, B, ldb, C, ldc, alpha, beta, beta_is_zero):
 
 def _run_sgemm_tn_square_odd(A, lda, B, ldb, C, ldc, size, alpha, beta, beta_is_zero):
     if size == 511:
-        block_m, block_n, block_k, num_warps, num_stages = 64, 32, 32, 4, 3
+        block_m, block_n, block_k, num_warps, num_stages = 64, 64, 32, 4, 3
     else:
         block_m, block_n, block_k, num_warps, num_stages = 128, 128, 32, 8, 4
     _thead_sgemm_tn_square_odd_kernel[
@@ -2607,52 +2342,6 @@ def _make_sgemm_tn_masked_runner(
     return run
 
 
-def _make_sgemm_tn_direct_runner(
-    A,
-    lda,
-    B,
-    ldb,
-    C,
-    ldc,
-    m,
-    n,
-    k,
-    alpha,
-    beta,
-    beta_is_zero,
-    block_m=64,
-    block_n=64,
-    block_k=32,
-    num_warps=4,
-    num_stages=3,
-):
-    def run():
-        _thead_sgemm_tn_tf32_direct_kernel[
-            (triton.cdiv(m, block_m) * triton.cdiv(n, block_n),)
-        ](
-            A,
-            B,
-            C,
-            alpha,
-            beta,
-            m,
-            n,
-            k,
-            lda,
-            ldb,
-            ldc,
-            beta_is_zero,
-            BLOCK_M=block_m,
-            BLOCK_N=block_n,
-            BLOCK_K=block_k,
-            GROUP_M=8,
-            num_warps=num_warps,
-            num_stages=num_stages,
-        )
-
-    return run
-
-
 def _make_sgemm_tn_padded_runner(
     A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero
 ):
@@ -2906,52 +2595,6 @@ def _make_sgemm_nt_masked_runner(
     return run
 
 
-def _make_sgemm_nt_direct_runner(
-    A,
-    lda,
-    B,
-    ldb,
-    C,
-    ldc,
-    m,
-    n,
-    k,
-    alpha,
-    beta,
-    beta_is_zero,
-    block_m=64,
-    block_n=64,
-    block_k=32,
-    num_warps=4,
-    num_stages=3,
-):
-    def run():
-        _thead_sgemm_nt_tf32_direct_kernel[
-            (triton.cdiv(m, block_m) * triton.cdiv(n, block_n),)
-        ](
-            A,
-            B,
-            C,
-            alpha,
-            beta,
-            m,
-            n,
-            k,
-            lda,
-            ldb,
-            ldc,
-            beta_is_zero,
-            BLOCK_M=block_m,
-            BLOCK_N=block_n,
-            BLOCK_K=block_k,
-            GROUP_M=8,
-            num_warps=num_warps,
-            num_stages=num_stages,
-        )
-
-    return run
-
-
 def _make_sgemm_nt_padded_runner(
     A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero
 ):
@@ -3093,8 +2736,8 @@ def _build_sgemm_nt_dispatch_table(
     model=libcache.model,
 ) -> SizeAutoDispatch:
     dispatch = SizeAutoDispatch(
-        table_name="thead_sgemm_nt_variant_v13",
-        build_key=lambda m, n, k, aligned, **extra: (m, n, k, int(aligned), 13),
+        table_name="thead_sgemm_nt_variant_v14",
+        build_key=lambda m, n, k, aligned, **extra: (m, n, k, int(aligned), 14),
         model=model,
     )
     dispatch.add(
@@ -3223,30 +2866,6 @@ def _build_sgemm_nt_dispatch_table(
         filter=_is_sgemm_small_odd_square,
     )
     dispatch.add(
-        lambda: _make_sgemm_nt_direct_runner(
-            A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero, 64, 64, 32, 4, 3
-        ),
-        aligned=False,
-        name="small_direct_64x64",
-        filter=_is_sgemm_small_odd_square,
-    )
-    dispatch.add(
-        lambda: _make_sgemm_nt_direct_runner(
-            A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero, 128, 128, 32, 8, 4
-        ),
-        aligned=False,
-        name="small_direct_128x128",
-        filter=_is_sgemm_small_odd_square,
-    )
-    dispatch.add(
-        lambda: _make_sgemm_nt_direct_runner(
-            A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero, 128, 256, 32, 8, 3
-        ),
-        aligned=False,
-        name="small_direct_128x256",
-        filter=_is_sgemm_small_odd_square,
-    )
-    dispatch.add(
         lambda: _make_sgemm_nt_kernel3_runner(
             A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero, grid
         ),
@@ -3305,52 +2924,6 @@ def _make_sgemm_tt_masked_runner(
 ):
     def run():
         _thead_sgemm_tt_tf32_masked_kernel[
-            (triton.cdiv(m, block_m) * triton.cdiv(n, block_n),)
-        ](
-            A,
-            B,
-            C,
-            alpha,
-            beta,
-            m,
-            n,
-            k,
-            lda,
-            ldb,
-            ldc,
-            beta_is_zero,
-            BLOCK_M=block_m,
-            BLOCK_N=block_n,
-            BLOCK_K=block_k,
-            GROUP_M=8,
-            num_warps=num_warps,
-            num_stages=num_stages,
-        )
-
-    return run
-
-
-def _make_sgemm_tt_direct_runner(
-    A,
-    lda,
-    B,
-    ldb,
-    C,
-    ldc,
-    m,
-    n,
-    k,
-    alpha,
-    beta,
-    beta_is_zero,
-    block_m=64,
-    block_n=64,
-    block_k=32,
-    num_warps=4,
-    num_stages=3,
-):
-    def run():
-        _thead_sgemm_tt_tf32_direct_kernel[
             (triton.cdiv(m, block_m) * triton.cdiv(n, block_n),)
         ](
             A,
@@ -3474,8 +3047,8 @@ def _build_sgemm_tt_dispatch_table(
     model=libcache.model,
 ) -> SizeAutoDispatch:
     dispatch = SizeAutoDispatch(
-        table_name="thead_sgemm_tt_variant_v13",
-        build_key=lambda m, n, k, aligned, **extra: (m, n, k, int(aligned), 13),
+        table_name="thead_sgemm_tt_variant_v14",
+        build_key=lambda m, n, k, aligned, **extra: (m, n, k, int(aligned), 14),
         model=model,
     )
     dispatch.add(
@@ -3604,30 +3177,6 @@ def _build_sgemm_tt_dispatch_table(
         filter=_is_sgemm_small_odd_square,
     )
     dispatch.add(
-        lambda: _make_sgemm_tt_direct_runner(
-            A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero, 64, 64, 32, 4, 3
-        ),
-        aligned=False,
-        name="small_direct_64x64",
-        filter=_is_sgemm_small_odd_square,
-    )
-    dispatch.add(
-        lambda: _make_sgemm_tt_direct_runner(
-            A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero, 128, 128, 32, 8, 4
-        ),
-        aligned=False,
-        name="small_direct_128x128",
-        filter=_is_sgemm_small_odd_square,
-    )
-    dispatch.add(
-        lambda: _make_sgemm_tt_direct_runner(
-            A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero, 128, 256, 32, 8, 3
-        ),
-        aligned=False,
-        name="small_direct_128x256",
-        filter=_is_sgemm_small_odd_square,
-    )
-    dispatch.add(
         lambda: _make_sgemm_tt_aligned_runner(
             A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero, grid
         ),
@@ -3743,7 +3292,9 @@ def sgemm(
                 runner()
         elif transa == CUBLAS_OP_T and transb == CUBLAS_OP_N:
             if m == n == k == 511:
-                _run_sgemm_tn_511(A, lda, B, ldb, C, ldc, alpha, beta, beta_is_zero)
+                _run_sgemm_tn_square_odd(
+                    A, lda, B, ldb, C, ldc, m, alpha, beta, beta_is_zero
+                )
             elif m == n == k == 1023:
                 _run_sgemm_tn_square_odd(
                     A, lda, B, ldb, C, ldc, m, alpha, beta, beta_is_zero
