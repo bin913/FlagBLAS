@@ -1,13 +1,15 @@
+import ctypes
+import ctypes.util
+
 import pytest
 import torch
 from scipy.linalg import blas as cpu_blas
 
 import flag_blas
 
-if flag_blas.vendor_name != "ascend":
-    import ctypes
-    import ctypes.util
-
+if flag_blas.vendor_name == "hygon":
+    from .hipblas_reference import check_hipblas_status, get_hipblas_context
+elif flag_blas.vendor_name != "ascend":
     import cupy as cp
 from flag_blas.ops import (
     CUBLAS_DIAG_NON_UNIT,
@@ -36,7 +38,58 @@ def load_cublas():
     raise RuntimeError("Unable to find libcublas.so on this system")
 
 
-_cublas = None if flag_blas.vendor_name == "ascend" else load_cublas()
+_cublas = None if flag_blas.vendor_name in {"ascend", "hygon"} else load_cublas()
+
+
+def hipblas_tbmv_reference(uplo, trans, diag, n, k, A, lda, x, incx):
+    if n == 0:
+        return x
+
+    if A.dtype == torch.float32:
+        symbol = "hipblasStbmv"
+    elif A.dtype == torch.float64:
+        symbol = "hipblasDtbmv"
+    elif A.dtype == torch.complex64:
+        symbol = "hipblasCtbmv_v2"
+    elif A.dtype == torch.complex128:
+        symbol = "hipblasZtbmv_v2"
+    else:
+        raise ValueError(f"Unsupported dtype for hipBLAS TBMV: {A.dtype}")
+
+    hip_uplo = 121 if uplo == CUBLAS_FILL_MODE_UPPER else 122
+    hip_trans = 111 + trans
+    hip_diag = 131 + diag
+    library, handle = get_hipblas_context(A)
+    function = getattr(library, symbol)
+    function.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_int,
+    ]
+    function.restype = ctypes.c_int
+    check_hipblas_status(
+        function(
+            handle,
+            hip_uplo,
+            hip_trans,
+            hip_diag,
+            n,
+            k,
+            ctypes.c_void_p(A.data_ptr()),
+            lda,
+            ctypes.c_void_p(x.data_ptr()),
+            incx,
+        ),
+        symbol,
+    )
+    return x
 
 
 def cublas_tbmv_reference(uplo, trans, diag, n, k, A, lda, x, incx):
@@ -167,7 +220,10 @@ def tbmv_reference(uplo, trans, diag, n, k, A, lda, x, incx):
         return npu_tbmv_reference(uplo, trans, diag, n, k, A, lda, x, incx)
 
     ref_x = x.clone()
-    cublas_tbmv_reference(uplo, trans, diag, n, k, A, lda, ref_x, incx)
+    if flag_blas.vendor_name == "hygon":
+        hipblas_tbmv_reference(uplo, trans, diag, n, k, A, lda, ref_x, incx)
+    else:
+        cublas_tbmv_reference(uplo, trans, diag, n, k, A, lda, ref_x, incx)
     return ref_x
 
 

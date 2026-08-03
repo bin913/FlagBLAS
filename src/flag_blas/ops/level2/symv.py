@@ -5,6 +5,8 @@ from typing import Union
 import torch
 import triton
 import triton.language as tl
+
+from flag_blas import runtime
 from flag_blas.ops.level2._constants import (
     CUBLAS_FILL_MODE_LOWER,
     CUBLAS_FILL_MODE_UPPER,
@@ -16,43 +18,12 @@ logger = logging.getLogger(__name__)
 ScalarType = Union[float, int, complex, torch.Tensor]
 
 
-_SSYMV_CONFIGS = [
-    triton.Config({"BLOCK_SIZE": 16}, num_warps=1, num_stages=1),
-    triton.Config({"BLOCK_SIZE": 32}, num_warps=1, num_stages=1),
-    triton.Config({"BLOCK_SIZE": 32}, num_warps=2, num_stages=2),
-    triton.Config({"BLOCK_SIZE": 64}, num_warps=2, num_stages=2),
-    triton.Config({"BLOCK_SIZE": 64}, num_warps=4, num_stages=2),
-    triton.Config({"BLOCK_SIZE": 128}, num_warps=4, num_stages=2),
-    triton.Config({"BLOCK_SIZE": 128}, num_warps=8, num_stages=2),
-]
+_SSYMV_CONFIGS = runtime.get_tuned_config("ssymv")
+_DSYMV_CONFIGS = runtime.get_tuned_config("dsymv")
+_CSYMV_CONFIGS = runtime.get_tuned_config("csymv")
+_ZSYMV_CONFIGS = runtime.get_tuned_config("zsymv")
 
-_DSYMV_CONFIGS = [
-    triton.Config({"BLOCK_SIZE": 16}, num_warps=1, num_stages=1),
-    triton.Config({"BLOCK_SIZE": 32}, num_warps=1, num_stages=1),
-    triton.Config({"BLOCK_SIZE": 32}, num_warps=2, num_stages=2),
-    triton.Config({"BLOCK_SIZE": 64}, num_warps=2, num_stages=2),
-    triton.Config({"BLOCK_SIZE": 64}, num_warps=4, num_stages=2),
-    triton.Config({"BLOCK_SIZE": 128}, num_warps=4, num_stages=2),
-]
-
-_CSYMV_CONFIGS = [
-    triton.Config({"BLOCK_SIZE": 16}, num_warps=1, num_stages=1),
-    triton.Config({"BLOCK_SIZE": 32}, num_warps=1, num_stages=1),
-    triton.Config({"BLOCK_SIZE": 32}, num_warps=2, num_stages=2),
-    triton.Config({"BLOCK_SIZE": 64}, num_warps=2, num_stages=2),
-    triton.Config({"BLOCK_SIZE": 64}, num_warps=4, num_stages=2),
-]
-
-_ZSYMV_CONFIGS = [
-    triton.Config({"BLOCK_SIZE": 8}, num_warps=1, num_stages=1),
-    triton.Config({"BLOCK_SIZE": 16}, num_warps=1, num_stages=1),
-    triton.Config({"BLOCK_SIZE": 16}, num_warps=2, num_stages=2),
-    triton.Config({"BLOCK_SIZE": 32}, num_warps=2, num_stages=2),
-    triton.Config({"BLOCK_SIZE": 32}, num_warps=4, num_stages=2),
-    triton.Config({"BLOCK_SIZE": 64}, num_warps=4, num_stages=2),
-]
-
-_SYMV_KEY = ["n"]
+_SYMV_KEY = ["n", "UPLO"] if runtime.device.vendor_name == "hygon" else ["n"]
 _RESTORE = ["y_ptr"]
 
 

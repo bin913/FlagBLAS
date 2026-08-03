@@ -1,3 +1,5 @@
+import ctypes
+
 import numpy as np
 import pytest
 import torch
@@ -10,14 +12,31 @@ from .accuracy_utils import blas_assert_close, to_cpu_blas_tensor, to_reference
 from .conftest import TO_CPU
 
 IS_ASCEND = flag_blas.vendor_name == "ascend"
+IS_HYGON = flag_blas.vendor_name == "hygon"
 
-if not IS_ASCEND:
+if IS_HYGON:
+    from .hipblas_reference import (
+        HipComplex,
+        HipDoubleComplex,
+        check_hipblas_status,
+        get_hipblas_context,
+    )
+elif not IS_ASCEND:
     import cupy as cp
     from cupy_backends.cuda.libs import cublas
 
 ASCEND_CPU_ONLY = pytest.mark.skipif(
     not IS_ASCEND or not TO_CPU,
     reason="Ascend --ref cpu vendor regression",
+)
+ASCEND_CPU_OR_HYGON = pytest.mark.skipif(
+    not ((IS_ASCEND and TO_CPU) or IS_HYGON),
+    reason="Ascend CPU-reference or Hygon regression",
+)
+HYGON_ONLY = pytest.mark.skipif(not IS_HYGON, reason="Hygon regression")
+HYGON_FP8_UNSUPPORTED = pytest.mark.skipif(
+    IS_HYGON,
+    reason="Hygon does not support FP8 GEMV",
 )
 
 
@@ -244,6 +263,332 @@ def cublas_gemv_reference(trans, m, n, alpha, A, lda, x, incx, beta, y, incy):
     )
 
 
+def hipblas_gemv_operation(trans):
+    operations = {CUBLAS_OP_N: 111, CUBLAS_OP_T: 112, CUBLAS_OP_C: 113}
+    if trans not in operations:
+        raise ValueError(f"Unsupported GEMV transpose mode: {trans}")
+    return operations[trans]
+
+
+def hipblas_sgemv_reference(
+    trans,
+    m,
+    n,
+    alpha,
+    A,
+    lda,
+    x,
+    incx,
+    beta,
+    y,
+    incy,
+):
+    if m == 0 or n == 0:
+        return y
+
+    hip_trans = hipblas_gemv_operation(trans)
+    alpha_value = ctypes.c_float(float(alpha))
+    beta_value = ctypes.c_float(float(beta))
+    library, handle = get_hipblas_context(A)
+    function = library.hipblasSgemv
+    function.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_int,
+    ]
+    function.restype = ctypes.c_int
+    check_hipblas_status(
+        function(
+            handle,
+            hip_trans,
+            m,
+            n,
+            ctypes.byref(alpha_value),
+            ctypes.c_void_p(A.data_ptr()),
+            lda,
+            ctypes.c_void_p(x.data_ptr()),
+            incx,
+            ctypes.byref(beta_value),
+            ctypes.c_void_p(y.data_ptr()),
+            incy,
+        ),
+        "hipblasSgemv",
+    )
+    return y
+
+
+def hipblas_dgemv_reference(
+    trans,
+    m,
+    n,
+    alpha,
+    A,
+    lda,
+    x,
+    incx,
+    beta,
+    y,
+    incy,
+):
+    if m == 0 or n == 0:
+        return y
+
+    hip_trans = hipblas_gemv_operation(trans)
+    alpha_value = ctypes.c_double(float(alpha))
+    beta_value = ctypes.c_double(float(beta))
+    library, handle = get_hipblas_context(A)
+    function = library.hipblasDgemv
+    function.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_int,
+    ]
+    function.restype = ctypes.c_int
+    check_hipblas_status(
+        function(
+            handle,
+            hip_trans,
+            m,
+            n,
+            ctypes.byref(alpha_value),
+            ctypes.c_void_p(A.data_ptr()),
+            lda,
+            ctypes.c_void_p(x.data_ptr()),
+            incx,
+            ctypes.byref(beta_value),
+            ctypes.c_void_p(y.data_ptr()),
+            incy,
+        ),
+        "hipblasDgemv",
+    )
+    return y
+
+
+def hipblas_cgemv_reference(
+    trans,
+    m,
+    n,
+    alpha,
+    A,
+    lda,
+    x,
+    incx,
+    beta,
+    y,
+    incy,
+):
+    if m == 0 or n == 0:
+        return y
+
+    alpha_value = HipComplex(float(alpha.real), float(alpha.imag))
+    beta_value = HipComplex(float(beta.real), float(beta.imag))
+    library, handle = get_hipblas_context(A)
+    function = library.hipblasCgemv_v2
+    function.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_int,
+    ]
+    function.restype = ctypes.c_int
+    check_hipblas_status(
+        function(
+            handle,
+            hipblas_gemv_operation(trans),
+            m,
+            n,
+            ctypes.byref(alpha_value),
+            ctypes.c_void_p(A.data_ptr()),
+            lda,
+            ctypes.c_void_p(x.data_ptr()),
+            incx,
+            ctypes.byref(beta_value),
+            ctypes.c_void_p(y.data_ptr()),
+            incy,
+        ),
+        "hipblasCgemv_v2",
+    )
+    return y
+
+
+def hipblas_zgemv_reference(
+    trans,
+    m,
+    n,
+    alpha,
+    A,
+    lda,
+    x,
+    incx,
+    beta,
+    y,
+    incy,
+):
+    if m == 0 or n == 0:
+        return y
+
+    alpha_value = HipDoubleComplex(float(alpha.real), float(alpha.imag))
+    beta_value = HipDoubleComplex(float(beta.real), float(beta.imag))
+    library, handle = get_hipblas_context(A)
+    function = library.hipblasZgemv_v2
+    function.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_int,
+    ]
+    function.restype = ctypes.c_int
+    check_hipblas_status(
+        function(
+            handle,
+            hipblas_gemv_operation(trans),
+            m,
+            n,
+            ctypes.byref(alpha_value),
+            ctypes.c_void_p(A.data_ptr()),
+            lda,
+            ctypes.c_void_p(x.data_ptr()),
+            incx,
+            ctypes.byref(beta_value),
+            ctypes.c_void_p(y.data_ptr()),
+            incy,
+        ),
+        "hipblasZgemv_v2",
+    )
+    return y
+
+
+def hipblas_low_precision_gemv_reference(
+    trans,
+    m,
+    n,
+    alpha,
+    A,
+    lda,
+    x,
+    incx,
+    beta,
+    y,
+    incy,
+):
+    if m == 0 or n == 0:
+        return y
+
+    if A.dtype == torch.float16:
+        data_type = 2
+    elif A.dtype == torch.bfloat16:
+        data_type = 14
+    else:
+        raise ValueError(f"Unsupported low-precision GEMV dtype: {A.dtype}")
+
+    assert x.dtype == A.dtype
+    assert y.dtype == A.dtype
+
+    x_len, y_len = (n, m) if trans == CUBLAS_OP_N else (m, n)
+    x_work = x[: 1 + (x_len - 1) * incx : incx].contiguous()
+    if incy == 1:
+        y_work = y
+    else:
+        y_work = y[: 1 + (y_len - 1) * incy : incy].contiguous()
+
+    library, handle = get_hipblas_context(A)
+    function = library.hipblasGemmEx_v2
+    function.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+    ]
+    function.restype = ctypes.c_int
+
+    alpha_value = ctypes.c_float(float(alpha))
+    beta_value = ctypes.c_float(float(beta))
+    if trans == CUBLAS_OP_N:
+        trans_a = 112
+        gemm_m, gemm_k = m, n
+    else:
+        trans_a = 111
+        gemm_m, gemm_k = n, m
+
+    check_hipblas_status(
+        function(
+            handle,
+            trans_a,
+            111,
+            gemm_m,
+            1,
+            gemm_k,
+            ctypes.byref(alpha_value),
+            ctypes.c_void_p(A.data_ptr()),
+            data_type,
+            lda,
+            ctypes.c_void_p(x_work.data_ptr()),
+            data_type,
+            gemm_k,
+            ctypes.byref(beta_value),
+            ctypes.c_void_p(y_work.data_ptr()),
+            data_type,
+            gemm_m,
+            2,
+            160,
+        ),
+        "hipblasGemmEx_v2",
+    )
+
+    if incy != 1:
+        y[: 1 + (y_len - 1) * incy : incy].copy_(y_work)
+    return y
+
+
 def cpu_gemv_reference(trans, m, n, alpha, A, lda, x, incx, beta, y, incy):
     if m == 0 or n == 0:
         return to_cpu_blas_tensor(y)
@@ -279,7 +624,30 @@ def gemv_reference(trans, m, n, alpha, A, lda, x, incx, beta, y, incy):
         return cpu_gemv_reference(trans, m, n, alpha, A, lda, x, incx, beta, y, incy)
 
     ref_y = y.clone()
-    if A.dtype in (torch.float16, torch.bfloat16):
+    if IS_HYGON:
+        if A.dtype == torch.float32:
+            hipblas_sgemv_reference(
+                trans, m, n, alpha, A, lda, x, incx, beta, ref_y, incy
+            )
+        elif A.dtype == torch.float64:
+            hipblas_dgemv_reference(
+                trans, m, n, alpha, A, lda, x, incx, beta, ref_y, incy
+            )
+        elif A.dtype == torch.complex64:
+            hipblas_cgemv_reference(
+                trans, m, n, alpha, A, lda, x, incx, beta, ref_y, incy
+            )
+        elif A.dtype == torch.complex128:
+            hipblas_zgemv_reference(
+                trans, m, n, alpha, A, lda, x, incx, beta, ref_y, incy
+            )
+        elif A.dtype in (torch.float16, torch.bfloat16):
+            hipblas_low_precision_gemv_reference(
+                trans, m, n, alpha, A, lda, x, incx, beta, ref_y, incy
+            )
+        else:
+            raise ValueError(f"Unsupported Hygon GEMV reference dtype: {A.dtype}")
+    elif A.dtype in (torch.float16, torch.bfloat16):
         cupy_half_gemv_reference(trans, m, n, alpha, A, lda, x, incx, beta, ref_y, incy)
     else:
         cublas_gemv_reference(trans, m, n, alpha, A, lda, x, incx, beta, ref_y, incy)
@@ -362,7 +730,7 @@ def test_sgemv_alpha_zero_stride(trans, beta):
 
 
 @pytest.mark.cgemv
-@ASCEND_CPU_ONLY
+@ASCEND_CPU_OR_HYGON
 @pytest.mark.parametrize("trans", [CUBLAS_OP_N, CUBLAS_OP_T, CUBLAS_OP_C])
 @pytest.mark.parametrize("beta", [0.0, 0.5 + 0.25j])
 def test_cgemv_alpha_zero_stride(trans, beta):
@@ -385,6 +753,41 @@ def test_cgemv_alpha_zero_stride(trans, beta):
     expected = to_reference(expected)
 
     flag_blas.cgemv(trans, m, n, 0.0, A, n, x, 1, beta, y, incy)
+
+    blas_assert_close(y, expected, dtype, reduce_dim=1)
+
+
+@pytest.mark.zgemv
+@HYGON_ONLY
+@pytest.mark.parametrize("trans", [CUBLAS_OP_N, CUBLAS_OP_T, CUBLAS_OP_C])
+@pytest.mark.parametrize("beta", [0.0, 0.5 + 0.25j])
+def test_zgemv_alpha_zero_stride(trans, beta):
+    m, n, incy = 3, 2, 3
+    dtype = torch.complex128
+    nan = complex(float("nan"), float("nan"))
+    sentinel = 41.0 + 13.0j
+    A = torch.full((m, n), nan, dtype=dtype, device=flag_blas.device)
+    len_x, len_y = (n, m) if trans == CUBLAS_OP_N else (m, n)
+    x = torch.full((len_x,), nan, dtype=dtype, device=flag_blas.device)
+    y = torch.full(
+        (1 + (len_y - 1) * incy + 2,),
+        sentinel,
+        dtype=dtype,
+        device=flag_blas.device,
+    )
+    y_values = torch.randn(len_y, dtype=dtype, device=flag_blas.device)
+    y[0 : len_y * incy : incy] = y_values
+    if beta == 0.0:
+        y[0 : len_y * incy : incy] = nan
+
+    expected = y.clone()
+    if beta == 0.0:
+        expected[0 : len_y * incy : incy] = 0.0
+    else:
+        expected[0 : len_y * incy : incy] = beta * y_values
+    expected = to_reference(expected)
+
+    flag_blas.zgemv(trans, m, n, 0.0, A, n, x, 1, beta, y, incy)
 
     blas_assert_close(y, expected, dtype, reduce_dim=1)
 
@@ -413,6 +816,100 @@ def test_sgemv_splitk_stride_tail(m, n, trans, beta):
     expected[::incy] = alpha * product + beta * old_y
 
     flag_blas.sgemv(trans, m, n, alpha, A, n, x, incx, beta, y, incy)
+
+    blas_assert_close(y, expected, dtype, reduce_dim=len_x)
+
+
+@pytest.mark.cgemv
+@HYGON_ONLY
+@pytest.mark.parametrize(
+    "m,n,trans",
+    [
+        (1, 4096, CUBLAS_OP_N),
+        (4096, 1, CUBLAS_OP_T),
+        (4096, 1, CUBLAS_OP_C),
+    ],
+)
+@pytest.mark.parametrize("beta", [0.0, 0.5 + 0.25j])
+def test_cgemv_splitk_stride_tail(m, n, trans, beta):
+    dtype, alpha, incx, incy = torch.complex64, 1.5 + 0.5j, 2, 2
+    A = torch.randn((m, n), dtype=dtype, device=flag_blas.device)
+    len_x, len_y = (n, m) if trans == CUBLAS_OP_N else (m, n)
+    x = torch.full((len_x * incx,), 37.0 + 11.0j, dtype=dtype, device=flag_blas.device)
+    x_values = torch.randn(len_x, dtype=dtype, device=flag_blas.device)
+    x[::incx] = x_values
+    y = torch.full((len_y * incy,), 41.0 + 13.0j, dtype=dtype, device=flag_blas.device)
+    y_values = torch.randn(len_y, dtype=dtype, device=flag_blas.device)
+    y[::incy] = y_values
+    if beta == 0.0:
+        y[::incy] = complex(float("nan"), float("nan"))
+
+    if trans == CUBLAS_OP_N:
+        op_A = A
+    elif trans == CUBLAS_OP_T:
+        op_A = A.T
+    else:
+        op_A = A.mH
+    expected = to_reference(y, upcast=True)
+    product = op_A.to(torch.complex128).to("cpu") @ x_values.to(torch.complex128).to(
+        "cpu"
+    )
+    old_y = y_values.to(torch.complex128).to("cpu")
+    expected[::incy] = alpha * product + beta * old_y
+
+    flag_blas.cgemv(trans, m, n, alpha, A, n, x, incx, beta, y, incy)
+
+    blas_assert_close(y, expected, dtype, reduce_dim=len_x)
+
+
+@pytest.mark.zgemv
+@HYGON_ONLY
+@pytest.mark.parametrize(
+    "m,n,trans",
+    [
+        (1, 4096, CUBLAS_OP_N),
+        (4096, 1, CUBLAS_OP_T),
+        (4096, 1, CUBLAS_OP_C),
+    ],
+)
+@pytest.mark.parametrize("beta", [0.0, 0.5 + 0.25j])
+def test_zgemv_splitk_stride_tail(m, n, trans, beta):
+    dtype, alpha, incx, incy = torch.complex128, 1.5 + 0.5j, 2, 2
+    sentinel_x = 37.0 + 11.0j
+    sentinel_y = 41.0 + 13.0j
+    A = torch.randn((m, n), dtype=dtype, device=flag_blas.device)
+    len_x, len_y = (n, m) if trans == CUBLAS_OP_N else (m, n)
+    x = torch.full(
+        (1 + (len_x - 1) * incx + 2,),
+        sentinel_x,
+        dtype=dtype,
+        device=flag_blas.device,
+    )
+    x_values = torch.randn(len_x, dtype=dtype, device=flag_blas.device)
+    x[0 : len_x * incx : incx] = x_values
+    y = torch.full(
+        (1 + (len_y - 1) * incy + 2,),
+        sentinel_y,
+        dtype=dtype,
+        device=flag_blas.device,
+    )
+    y_values = torch.randn(len_y, dtype=dtype, device=flag_blas.device)
+    y[0 : len_y * incy : incy] = y_values
+    if beta == 0.0:
+        y[0 : len_y * incy : incy] = complex(float("nan"), float("nan"))
+
+    if trans == CUBLAS_OP_N:
+        op_A = A
+    elif trans == CUBLAS_OP_T:
+        op_A = A.T
+    else:
+        op_A = A.mH
+    expected = to_reference(y.clone(), upcast=True)
+    product = op_A.to("cpu") @ x_values.to("cpu")
+    old_y = y_values.to("cpu")
+    expected[0 : len_y * incy : incy] = alpha * product + beta * old_y
+
+    flag_blas.zgemv(trans, m, n, alpha, A, n, x, incx, beta, y, incy)
 
     blas_assert_close(y, expected, dtype, reduce_dim=len_x)
 
@@ -708,12 +1205,7 @@ def test_accuracy_hgemv(m, n, trans, beta):
     ref_y = gemv_reference(trans, m, n, alpha, A, n, x, 1, beta, y, 1)
     flag_blas.hgemv(trans, m, n, alpha, A, n, x, 1, beta, y, 1)
 
-    if TO_CPU:
-        blas_assert_close(y, ref_y, dtype, reduce_dim=x_len)
-    else:
-        rtol = 1e-3
-        atol = 3e-3 * (x_len**0.5)
-        torch.testing.assert_close(y, ref_y, rtol=rtol, atol=atol)
+    blas_assert_close(y, ref_y, dtype, reduce_dim=x_len)
 
 
 @pytest.mark.hgemv
@@ -731,12 +1223,7 @@ def test_accuracy_hgemv_stride(m, n, trans, incx, incy):
     ref_y = gemv_reference(trans, m, n, alpha, A, n, x, incx, beta, y, incy)
     flag_blas.hgemv(trans, m, n, alpha, A, n, x, incx, beta, y, incy)
 
-    if TO_CPU:
-        blas_assert_close(y, ref_y, dtype, reduce_dim=x_len)
-    else:
-        rtol = 1e-3
-        atol = 3e-3 * (x_len**0.5)
-        torch.testing.assert_close(y, ref_y, rtol=rtol, atol=atol)
+    blas_assert_close(y, ref_y, dtype, reduce_dim=x_len)
 
 
 @pytest.mark.bfgemv
@@ -755,12 +1242,7 @@ def test_accuracy_bfgemv(m, n, trans, beta):
     ref_y = gemv_reference(trans, m, n, alpha, A, n, x, 1, beta, y, 1)
     flag_blas.bfgemv(trans, m, n, alpha, A, n, x, 1, beta, y, 1)
 
-    if TO_CPU:
-        blas_assert_close(y, ref_y, dtype, reduce_dim=x_len)
-    else:
-        rtol = 1.6e-2
-        atol = 3e-2 * (x_len**0.5)
-        torch.testing.assert_close(y, ref_y, rtol=rtol, atol=atol)
+    blas_assert_close(y, ref_y, dtype, reduce_dim=x_len)
 
 
 @pytest.mark.bfgemv
@@ -778,15 +1260,11 @@ def test_accuracy_bfgemv_stride(m, n, trans, incx, incy):
     ref_y = gemv_reference(trans, m, n, alpha, A, n, x, incx, beta, y, incy)
     flag_blas.bfgemv(trans, m, n, alpha, A, n, x, incx, beta, y, incy)
 
-    if TO_CPU:
-        blas_assert_close(y, ref_y, dtype, reduce_dim=x_len)
-    else:
-        rtol = 1.6e-2
-        atol = 3e-2 * (x_len**0.5)
-        torch.testing.assert_close(y, ref_y, rtol=rtol, atol=atol)
+    blas_assert_close(y, ref_y, dtype, reduce_dim=x_len)
 
 
 @pytest.mark.fp8gemv
+@HYGON_FP8_UNSUPPORTED
 @ASCEND_FP8_E4M3_REQUIRED
 @pytest.mark.parametrize("m,n", FP8_GEMV_SHAPES)
 @pytest.mark.parametrize("beta", [0.0, 0.5])
@@ -813,6 +1291,7 @@ def test_accuracy_fp8_gemv_e4m3(m, n, beta):
 
 
 @pytest.mark.fp8gemv
+@HYGON_FP8_UNSUPPORTED
 @ASCEND_FP8_E4M3_REQUIRED
 @pytest.mark.parametrize("m,n", [(64, 128), (128, 64), (256, 256)])
 @pytest.mark.parametrize("incx,incy", STRIDES)
@@ -839,6 +1318,7 @@ def test_accuracy_fp8_gemv_e4m3_stride(m, n, incx, incy):
 
 
 @pytest.mark.fp8gemv
+@HYGON_FP8_UNSUPPORTED
 @ASCEND_FP8_E5M2_REQUIRED
 @pytest.mark.parametrize("m,n", FP8_GEMV_SHAPES)
 @pytest.mark.parametrize("beta", [0.0, 0.5])
@@ -865,6 +1345,7 @@ def test_accuracy_fp8_gemv_e5m2(m, n, beta):
 
 
 @pytest.mark.fp8gemv
+@HYGON_FP8_UNSUPPORTED
 @ASCEND_FP8_E5M2_REQUIRED
 @pytest.mark.parametrize("m,n", [(64, 128), (128, 64), (256, 256)])
 @pytest.mark.parametrize("incx,incy", STRIDES)
@@ -891,6 +1372,7 @@ def test_accuracy_fp8_gemv_e5m2_stride(m, n, incx, incy):
 
 
 @pytest.mark.fp8gemv
+@HYGON_FP8_UNSUPPORTED
 @ASCEND_FP8_E4M3_REQUIRED
 @pytest.mark.parametrize("m,n", [(256, 256), (1024, 1024), (4096, 4096)])
 @pytest.mark.parametrize("y_dtype", [torch.float16, torch.bfloat16])
@@ -917,6 +1399,7 @@ def test_accuracy_fp8_gemv_output_dtype(m, n, y_dtype):
 
 
 @pytest.mark.fp8gemv
+@HYGON_FP8_UNSUPPORTED
 @ASCEND_FP8_E4M3_REQUIRED
 def test_fp8_gemv_alpha_zero():
     m, n = 128, 256
@@ -940,6 +1423,7 @@ def test_fp8_gemv_alpha_zero():
 
 
 @pytest.mark.fp8gemv
+@HYGON_FP8_UNSUPPORTED
 @ASCEND_FP8_E4M3_REQUIRED
 def test_fp8_gemv_beta_zero():
     m, n = 128, 256
@@ -971,6 +1455,7 @@ def test_fp8_gemv_beta_zero():
 
 
 @pytest.mark.fp8gemv
+@HYGON_FP8_UNSUPPORTED
 @ASCEND_FP8_E4M3_REQUIRED
 def test_fp8_gemv_empty():
     fp8_dtype = torch.float8_e4m3fn
@@ -991,6 +1476,7 @@ def test_fp8_gemv_empty():
 
 
 @pytest.mark.fp8gemv
+@HYGON_FP8_UNSUPPORTED
 @ASCEND_FP8_E4M3_REQUIRED
 @pytest.mark.parametrize("m,n", [(256, 256), (1024, 1024)])
 def test_accuracy_fp8_gemv_mixed_dtype(m, n):
