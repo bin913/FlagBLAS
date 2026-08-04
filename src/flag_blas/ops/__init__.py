@@ -51,7 +51,7 @@ from flag_blas.ops.level2.spr2 import dspr2, sspr2
 from flag_blas.ops.level2.symv import csymv, dsymv, ssymv, zsymv
 from flag_blas.ops.level2.syr2 import dsyr2, ssyr2
 from flag_blas.ops.level2.tbmv import ctbmv, dtbmv, stbmv, ztbmv
-from flag_blas.ops.level2.tbsv import stbsv
+from flag_blas.ops.level2.tbsv import ctbsv, dtbsv, stbsv, ztbsv
 from flag_blas.ops.level2.tpmv import ctpmv, dtpmv, stpmv, ztpmv
 from flag_blas.ops.level2.trmv import ctrmv, dtrmv, strmv, ztrmv
 from flag_blas.ops.level2.trsv import ctrsv, dtrsv, strsv, ztrsv
@@ -66,6 +66,9 @@ from flag_blas.ops.level3.trmm import (
     ztrmm,
 )
 
+from flag_blas.ops.level2.tpsv import ctpsv, dtpsv, stpsv, ztpsv
+from flag_blas.ops.level2.syr import csyr, dsyr, ssyr, zsyr
+from flag_blas.ops.level2.her import cher, zher
 __all__ = [
     # amax
     "samax",
@@ -238,4 +241,17 @@ __all__ = [
     "dtrsv",
     "ctrsv",
     "ztrsv",
+    "stpsv",
+    "dtpsv",
+    "ctpsv",
+    "ztpsv",
+    "dtbsv",
+    "ctbsv",
+    "ztbsv",
+    "ssyr",
+    "dsyr",
+    "csyr",
+    "zsyr",
+    "cher",
+    "zher",
 ]
