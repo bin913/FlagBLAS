@@ -307,9 +307,8 @@ def _thead_sgemm_nn_nomask_kernel(
     tl.store(c_ptrs, alpha * acc)
 
 
-@libentry()
 @triton.jit
-def _thead_sgemm_nn_fp32_kernel(
+def _thead_sgemm_nn_fp32_impl(
     a_ptr,
     b_ptr,
     c_ptr,
@@ -343,6 +342,9 @@ def _thead_sgemm_nn_fp32_kernel(
     offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     offs_k = tl.arange(0, BLOCK_K)
+    offs_m = tl.max_contiguous(tl.multiple_of(offs_m, BLOCK_M), BLOCK_M)
+    offs_n = tl.max_contiguous(tl.multiple_of(offs_n, BLOCK_N), BLOCK_N)
+    offs_k = tl.max_contiguous(tl.multiple_of(offs_k, BLOCK_K), BLOCK_K)
 
     a_ptrs = a_ptr + offs_m[:, None] * lda + offs_k[None, :]
     b_ptrs = b_ptr + offs_k[:, None] * ldb + offs_n[None, :]
@@ -398,6 +400,86 @@ def _thead_sgemm_nn_fp32_kernel(
         else:
             c_vals = tl.load(c_ptrs, mask=c_mask, other=0.0).to(tl.float32)
             tl.store(c_ptrs, alpha * acc + beta * c_vals, mask=c_mask)
+
+
+@libentry()
+@triton.jit(ppu_hint="fwd")
+def _thead_sgemm_nn_fp32_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    beta: tl.float32,
+    lda,
+    ldb,
+    ldc,
+    BETA_IS_ZERO: tl.constexpr,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+):
+    _thead_sgemm_nn_fp32_impl(
+        a_ptr,
+        b_ptr,
+        c_ptr,
+        alpha,
+        beta,
+        lda,
+        ldb,
+        ldc,
+        BETA_IS_ZERO,
+        M,
+        N,
+        K,
+        BLOCK_M,
+        BLOCK_N,
+        BLOCK_K,
+        GROUP_M,
+    )
+
+
+@libentry()
+@triton.jit(ppu_hint="bwd")
+def _thead_sgemm_nn_fp32_bwd_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    beta: tl.float32,
+    lda,
+    ldb,
+    ldc,
+    BETA_IS_ZERO: tl.constexpr,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+):
+    _thead_sgemm_nn_fp32_impl(
+        a_ptr,
+        b_ptr,
+        c_ptr,
+        alpha,
+        beta,
+        lda,
+        ldb,
+        ldc,
+        BETA_IS_ZERO,
+        M,
+        N,
+        K,
+        BLOCK_M,
+        BLOCK_N,
+        BLOCK_K,
+        GROUP_M,
+    )
 
 
 @libentry()
@@ -2021,12 +2103,37 @@ def _thead_nn_tf32_config(m: int, n: int, k: int):
             return 64, 128, 32, 8, 3
         if m > n * 2:
             return 128, 64, 32, 8, 3
-        return 128, 64, 32, 8, 3
+        return 64, 64, 32, 4, 3
 
     if min_mn >= 512:
         return 32, 32, 32, 4, 3
 
     return 64, 64, 64, 4, 3
+
+
+def _thead_nn_fp32_maxnreg(m: int, n: int, k: int) -> int:
+    if max(m, n, k) <= 256:
+        return 128
+    if max(m, n, k) <= 512:
+        return 96
+    if min(m, n) >= 2048:
+        return 160
+    return 64
+
+
+def _thead_nn_use_bwd_codegen(m: int, n: int, k: int) -> bool:
+    """Use the Zhenwu bwd scheduling hint for large aligned FP32 tiles.
+
+    On ZW810E this hint consistently helps the large, aligned transformer-like
+    SGEMM NN cases, but hurts small/thin and heavily masked odd shapes.
+    """
+    return (
+        min(m, n) >= 2048
+        and not (m > n * 3)
+        and m % 64 == 0
+        and n % 64 == 0
+        and k % 64 == 0
+    )
 
 
 def _can_use_thead_nn_large_odd(
@@ -2417,26 +2524,33 @@ def _run_sgemm_nn_padded(A, B, C, m, n, k, alpha, beta, beta_is_zero):
 
 def _run_sgemm_nn_tf32(A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero):
     block_m, block_n, block_k, num_warps, num_stages = _thead_nn_tf32_config(m, n, k)
+    maxnreg = _thead_nn_fp32_maxnreg(m, n, k)
     grid = (triton.cdiv(m, block_m) * triton.cdiv(n, block_n),)
-    _thead_sgemm_nn_tf32_kernel[grid](
+    kernel = (
+        _thead_sgemm_nn_fp32_bwd_kernel
+        if _thead_nn_use_bwd_codegen(m, n, k)
+        else _thead_sgemm_nn_fp32_kernel
+    )
+    kernel[grid](
         A,
         B,
         C,
         alpha,
         beta,
-        m,
-        n,
-        k,
         lda,
         ldb,
         ldc,
         beta_is_zero,
+        M=m,
+        N=n,
+        K=k,
         BLOCK_M=block_m,
         BLOCK_N=block_n,
         BLOCK_K=block_k,
         GROUP_M=8,
         num_warps=num_warps,
         num_stages=num_stages,
+        maxnreg=maxnreg,
     )
 
 
