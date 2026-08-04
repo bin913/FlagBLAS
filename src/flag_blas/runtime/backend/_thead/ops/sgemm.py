@@ -325,6 +325,7 @@ def _thead_sgemm_nn_fp32_impl(
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
     GROUP_M: tl.constexpr,
+    USE_TF32X3: tl.constexpr,
 ):
     a_ptr = a_ptr.to(tl.pointer_type(tl.float32))
     b_ptr = b_ptr.to(tl.pointer_type(tl.float32))
@@ -359,7 +360,10 @@ def _thead_sgemm_nn_fp32_impl(
         for _ in range(0, k_full_iters):
             a = tl.load(a_ptrs)
             b = tl.load(b_ptrs)
-            acc = tl.dot(a, b, acc, out_dtype=tl.float32, allow_tf32=False)
+            if USE_TF32X3:
+                acc = tl.dot(a, b, acc, out_dtype=tl.float32, input_precision="tf32x3")
+            else:
+                acc = tl.dot(a, b, acc, out_dtype=tl.float32, allow_tf32=False)
             a_ptrs += BLOCK_K
             b_ptrs += BLOCK_K * ldb
 
@@ -367,14 +371,20 @@ def _thead_sgemm_nn_fp32_impl(
             mask_k = offs_k < k_remainder
             a = tl.load(a_ptrs, mask=mask_k[None, :], other=0.0)
             b = tl.load(b_ptrs, mask=mask_k[:, None], other=0.0)
-            acc = tl.dot(a, b, acc, out_dtype=tl.float32, allow_tf32=False)
+            if USE_TF32X3:
+                acc = tl.dot(a, b, acc, out_dtype=tl.float32, input_precision="tf32x3")
+            else:
+                acc = tl.dot(a, b, acc, out_dtype=tl.float32, allow_tf32=False)
     else:
         mask_m = offs_m < M
         mask_n = offs_n < N
         for _ in range(0, k_full_iters):
             a = tl.load(a_ptrs, mask=mask_m[:, None], other=0.0)
             b = tl.load(b_ptrs, mask=mask_n[None, :], other=0.0)
-            acc = tl.dot(a, b, acc, out_dtype=tl.float32, allow_tf32=False)
+            if USE_TF32X3:
+                acc = tl.dot(a, b, acc, out_dtype=tl.float32, input_precision="tf32x3")
+            else:
+                acc = tl.dot(a, b, acc, out_dtype=tl.float32, allow_tf32=False)
             a_ptrs += BLOCK_K
             b_ptrs += BLOCK_K * ldb
 
@@ -382,7 +392,10 @@ def _thead_sgemm_nn_fp32_impl(
             mask_k = offs_k < k_remainder
             a = tl.load(a_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0)
             b = tl.load(b_ptrs, mask=mask_k[:, None] & mask_n[None, :], other=0.0)
-            acc = tl.dot(a, b, acc, out_dtype=tl.float32, allow_tf32=False)
+            if USE_TF32X3:
+                acc = tl.dot(a, b, acc, out_dtype=tl.float32, input_precision="tf32x3")
+            else:
+                acc = tl.dot(a, b, acc, out_dtype=tl.float32, allow_tf32=False)
 
     c_ptrs = c_ptr + offs_m[:, None] * ldc + offs_n[None, :]
     if is_full_m and is_full_n:
@@ -421,6 +434,7 @@ def _thead_sgemm_nn_fp32_kernel(
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
     GROUP_M: tl.constexpr,
+    USE_TF32X3: tl.constexpr,
 ):
     _thead_sgemm_nn_fp32_impl(
         a_ptr,
@@ -439,6 +453,7 @@ def _thead_sgemm_nn_fp32_kernel(
         BLOCK_N,
         BLOCK_K,
         GROUP_M,
+        USE_TF32X3,
     )
 
 
@@ -461,6 +476,7 @@ def _thead_sgemm_nn_fp32_bwd_kernel(
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
     GROUP_M: tl.constexpr,
+    USE_TF32X3: tl.constexpr,
 ):
     _thead_sgemm_nn_fp32_impl(
         a_ptr,
@@ -479,6 +495,7 @@ def _thead_sgemm_nn_fp32_bwd_kernel(
         BLOCK_N,
         BLOCK_K,
         GROUP_M,
+        USE_TF32X3,
     )
 
 
@@ -2066,10 +2083,9 @@ def _can_use_thead_nn_tf32(
 def _thead_nn_tf32_config(m: int, n: int, k: int):
     """Select Zhenwu FP32 SGEMM NN tile config.
 
-    Despite the historical helper name, these configs are used with
-    allow_tf32=False. They follow the FlagGems-style peeled pointer kernel:
-    small tiles keep occupancy high for small/thin shapes, while 64x64x32
-    gives the best FP32 throughput on large square ZW810E cases.
+    Despite the historical helper name, the default dot path is strict FP32.
+    A measured tf32x3 fast path is enabled only for small/thin cases where it
+    improves ZW810E throughput and still passes the SGEMM accuracy tests.
     """
     min_mn = min(m, n)
     max_mn = max(m, n)
@@ -2134,6 +2150,15 @@ def _thead_nn_use_bwd_codegen(m: int, n: int, k: int) -> bool:
         and n % 64 == 0
         and k % 64 == 0
     )
+
+
+def _thead_nn_use_tf32x3(m: int, n: int, k: int) -> bool:
+    """Use tf32x3 only where ZW810E measurements show a net win."""
+    if max(m, n, k) <= 256:
+        return True
+    if m <= 64 and k <= 512:
+        return True
+    return n <= 64 and m <= 512 and k <= 512
 
 
 def _can_use_thead_nn_large_odd(
@@ -2548,6 +2573,7 @@ def _run_sgemm_nn_tf32(A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zer
         BLOCK_N=block_n,
         BLOCK_K=block_k,
         GROUP_M=8,
+        USE_TF32X3=_thead_nn_use_tf32x3(m, n, k),
         num_warps=num_warps,
         num_stages=num_stages,
         maxnreg=maxnreg,
