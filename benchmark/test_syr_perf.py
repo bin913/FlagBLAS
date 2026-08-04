@@ -75,6 +75,12 @@ def _get_cublas_handle():
         if status != 0:
             raise RuntimeError(f"cublasCreate_v2 failed with status code: {status}")
         _cublas_handle = handle.value
+    status = _cublas.cublasSetStream_v2(
+        ctypes.c_void_p(_cublas_handle),
+        ctypes.c_void_p(torch.cuda.current_stream().cuda_stream),
+    )
+    if status != 0:
+        raise RuntimeError(f"cublasSetStream_v2 failed with status code: {status}")
     return _cublas_handle
 
 
@@ -189,58 +195,58 @@ def _run_syr(op_name, dtype, uplo, alpha):
     run_correctness_then_benchmark(bench)
 
 
-@pytest.mark.parametrize(
-    "op_name,dtype,alpha,uplo",
-    [
-        pytest.param(
-            "ssyr", torch.float32, 0.75, CUBLAS_FILL_MODE_LOWER, marks=pytest.mark.ssyr
-        ),
-        pytest.param(
-            "ssyr", torch.float32, 0.75, CUBLAS_FILL_MODE_UPPER, marks=pytest.mark.ssyr
-        ),
-        pytest.param(
-            "dsyr",
-            torch.float64,
-            0.12345678901234568,
-            CUBLAS_FILL_MODE_LOWER,
-            marks=pytest.mark.dsyr,
-        ),
-        pytest.param(
-            "dsyr",
-            torch.float64,
-            0.12345678901234568,
-            CUBLAS_FILL_MODE_UPPER,
-            marks=pytest.mark.dsyr,
-        ),
-        pytest.param(
-            "csyr",
-            torch.complex64,
-            complex(0.5, -0.25),
-            CUBLAS_FILL_MODE_LOWER,
-            marks=pytest.mark.csyr,
-        ),
-        pytest.param(
-            "csyr",
-            torch.complex64,
-            complex(0.5, -0.25),
-            CUBLAS_FILL_MODE_UPPER,
-            marks=pytest.mark.csyr,
-        ),
-        pytest.param(
-            "zsyr",
-            torch.complex128,
-            complex(0.12345678901234568, -0.2345678912345679),
-            CUBLAS_FILL_MODE_LOWER,
-            marks=pytest.mark.zsyr,
-        ),
-        pytest.param(
-            "zsyr",
-            torch.complex128,
-            complex(0.12345678901234568, -0.2345678912345679),
-            CUBLAS_FILL_MODE_UPPER,
-            marks=pytest.mark.zsyr,
-        ),
-    ],
-)
+SYR_PERF_CASES = [
+    pytest.param(
+        "ssyr", torch.float32, 0.75, CUBLAS_FILL_MODE_LOWER, marks=pytest.mark.ssyr
+    ),
+    pytest.param(
+        "ssyr", torch.float32, 0.75, CUBLAS_FILL_MODE_UPPER, marks=pytest.mark.ssyr
+    ),
+    pytest.param(
+        "dsyr",
+        torch.float64,
+        0.12345678901234568,
+        CUBLAS_FILL_MODE_LOWER,
+        marks=pytest.mark.dsyr,
+    ),
+    pytest.param(
+        "dsyr",
+        torch.float64,
+        0.12345678901234568,
+        CUBLAS_FILL_MODE_UPPER,
+        marks=pytest.mark.dsyr,
+    ),
+    pytest.param(
+        "csyr",
+        torch.complex64,
+        complex(0.5, -0.25),
+        CUBLAS_FILL_MODE_LOWER,
+        marks=pytest.mark.csyr,
+    ),
+    pytest.param(
+        "csyr",
+        torch.complex64,
+        complex(0.5, -0.25),
+        CUBLAS_FILL_MODE_UPPER,
+        marks=pytest.mark.csyr,
+    ),
+    pytest.param(
+        "zsyr",
+        torch.complex128,
+        complex(0.12345678901234568, -0.2345678912345679),
+        CUBLAS_FILL_MODE_LOWER,
+        marks=pytest.mark.zsyr,
+    ),
+    pytest.param(
+        "zsyr",
+        torch.complex128,
+        complex(0.12345678901234568, -0.2345678912345679),
+        CUBLAS_FILL_MODE_UPPER,
+        marks=pytest.mark.zsyr,
+    ),
+]
+
+
+@pytest.mark.parametrize("op_name,dtype,alpha,uplo", SYR_PERF_CASES)
 def test_perf_syr(op_name, dtype, alpha, uplo):
     _run_syr(op_name, dtype, uplo, alpha)

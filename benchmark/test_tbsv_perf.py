@@ -4,18 +4,17 @@ from typing import Generator
 
 import pytest
 import torch
-import flag_blas
 
+import flag_blas
+from benchmark.performance_utils import Benchmark, run_correctness_then_benchmark
 from flag_blas.ops import (
+    CUBLAS_DIAG_NON_UNIT,
     CUBLAS_FILL_MODE_LOWER,
     CUBLAS_FILL_MODE_UPPER,
     CUBLAS_OP_C,
     CUBLAS_OP_N,
     CUBLAS_OP_T,
-    CUBLAS_DIAG_NON_UNIT,
 )
-
-from benchmark.performance_utils import Benchmark, run_correctness_then_benchmark
 from flag_blas.utils import shape_utils
 
 STBSV_SIZES = [
@@ -57,6 +56,12 @@ def _get_cublas_handle():
         if status != 0:
             raise RuntimeError(f"cublasCreate_v2 failed with status code: {status}")
         _cublas_handle = handle.value
+    status = _cublas.cublasSetStream_v2(
+        ctypes.c_void_p(_cublas_handle),
+        ctypes.c_void_p(torch.cuda.current_stream().cuda_stream),
+    )
+    if status != 0:
+        raise RuntimeError(f"cublasSetStream_v2 failed with status code: {status}")
     return _cublas_handle
 
 
@@ -107,6 +112,7 @@ def _gems_wrapper(op):
 
 
 GEMS_TBSV_WRAPPERS = {
+    "stbsv": gems_stbsv_wrapper,
     "dtbsv": _gems_wrapper(flag_blas.dtbsv),
     "ctbsv": _gems_wrapper(flag_blas.ctbsv),
     "ztbsv": _gems_wrapper(flag_blas.ztbsv),
@@ -229,62 +235,6 @@ class StbsvBenchmark(Benchmark):
 # --------------------------------------------------------------------------
 # Top-level perf entry points
 # --------------------------------------------------------------------------
-@pytest.mark.stbsv
-def test_perf_stbsv():
-    bench = StbsvBenchmark(
-        op_name="stbsv",
-        torch_op=cublas_stbsv_baseline,
-        gems_op=gems_stbsv_wrapper,
-        dtypes=[torch.float32],
-        uplo=CUBLAS_FILL_MODE_LOWER,
-        trans=CUBLAS_OP_N,
-        diag=CUBLAS_DIAG_NON_UNIT,
-    )
-    run_correctness_then_benchmark(bench)
-
-
-@pytest.mark.stbsv
-def test_perf_stbsv_upper():
-    bench = StbsvBenchmark(
-        op_name="stbsv_upper",
-        torch_op=cublas_stbsv_baseline,
-        gems_op=gems_stbsv_wrapper,
-        dtypes=[torch.float32],
-        uplo=CUBLAS_FILL_MODE_UPPER,
-        trans=CUBLAS_OP_N,
-        diag=CUBLAS_DIAG_NON_UNIT,
-    )
-    run_correctness_then_benchmark(bench)
-
-
-@pytest.mark.stbsv
-def test_perf_stbsv_trans():
-    bench = StbsvBenchmark(
-        op_name="stbsv_trans",
-        torch_op=cublas_stbsv_baseline,
-        gems_op=gems_stbsv_wrapper,
-        dtypes=[torch.float32],
-        uplo=CUBLAS_FILL_MODE_LOWER,
-        trans=CUBLAS_OP_T,
-        diag=CUBLAS_DIAG_NON_UNIT,
-    )
-    run_correctness_then_benchmark(bench)
-
-
-@pytest.mark.stbsv
-def test_perf_stbsv_upper_trans():
-    bench = StbsvBenchmark(
-        op_name="stbsv_upper_trans",
-        torch_op=cublas_stbsv_baseline,
-        gems_op=gems_stbsv_wrapper,
-        dtypes=[torch.float32],
-        uplo=CUBLAS_FILL_MODE_UPPER,
-        trans=CUBLAS_OP_T,
-        diag=CUBLAS_DIAG_NON_UNIT,
-    )
-    run_correctness_then_benchmark(bench)
-
-
 def _run_tbsv_variant(op_name, dtype, uplo, trans):
     if (
         dtype in (torch.float64, torch.complex128)
@@ -303,108 +253,150 @@ def _run_tbsv_variant(op_name, dtype, uplo, trans):
     run_correctness_then_benchmark(bench)
 
 
-@pytest.mark.parametrize(
-    "op_name,dtype,uplo,trans",
-    [
-        pytest.param(
-            "dtbsv",
-            torch.float64,
-            CUBLAS_FILL_MODE_LOWER,
-            CUBLAS_OP_N,
-            marks=pytest.mark.dtbsv,
-        ),
-        pytest.param(
-            "dtbsv",
-            torch.float64,
-            CUBLAS_FILL_MODE_UPPER,
-            CUBLAS_OP_N,
-            marks=pytest.mark.dtbsv,
-        ),
-        pytest.param(
-            "dtbsv",
-            torch.float64,
-            CUBLAS_FILL_MODE_LOWER,
-            CUBLAS_OP_T,
-            marks=pytest.mark.dtbsv,
-        ),
-        pytest.param(
-            "dtbsv",
-            torch.float64,
-            CUBLAS_FILL_MODE_UPPER,
-            CUBLAS_OP_T,
-            marks=pytest.mark.dtbsv,
-        ),
-        pytest.param(
-            "ctbsv",
-            torch.complex64,
-            CUBLAS_FILL_MODE_LOWER,
-            CUBLAS_OP_N,
-            marks=pytest.mark.ctbsv,
-        ),
-        pytest.param(
-            "ctbsv",
-            torch.complex64,
-            CUBLAS_FILL_MODE_UPPER,
-            CUBLAS_OP_N,
-            marks=pytest.mark.ctbsv,
-        ),
-        pytest.param(
-            "ctbsv",
-            torch.complex64,
-            CUBLAS_FILL_MODE_LOWER,
-            CUBLAS_OP_T,
-            marks=pytest.mark.ctbsv,
-        ),
-        pytest.param(
-            "ctbsv",
-            torch.complex64,
-            CUBLAS_FILL_MODE_UPPER,
-            CUBLAS_OP_T,
-            marks=pytest.mark.ctbsv,
-        ),
-        pytest.param(
-            "ctbsv",
-            torch.complex64,
-            CUBLAS_FILL_MODE_LOWER,
-            CUBLAS_OP_C,
-            marks=pytest.mark.ctbsv,
-        ),
-        pytest.param(
-            "ztbsv",
-            torch.complex128,
-            CUBLAS_FILL_MODE_LOWER,
-            CUBLAS_OP_N,
-            marks=pytest.mark.ztbsv,
-        ),
-        pytest.param(
-            "ztbsv",
-            torch.complex128,
-            CUBLAS_FILL_MODE_UPPER,
-            CUBLAS_OP_N,
-            marks=pytest.mark.ztbsv,
-        ),
-        pytest.param(
-            "ztbsv",
-            torch.complex128,
-            CUBLAS_FILL_MODE_LOWER,
-            CUBLAS_OP_T,
-            marks=pytest.mark.ztbsv,
-        ),
-        pytest.param(
-            "ztbsv",
-            torch.complex128,
-            CUBLAS_FILL_MODE_UPPER,
-            CUBLAS_OP_T,
-            marks=pytest.mark.ztbsv,
-        ),
-        pytest.param(
-            "ztbsv",
-            torch.complex128,
-            CUBLAS_FILL_MODE_LOWER,
-            CUBLAS_OP_C,
-            marks=pytest.mark.ztbsv,
-        ),
-    ],
-)
-def test_perf_tbsv_variants(op_name, dtype, uplo, trans):
+TBSV_PERF_CASES = [
+    pytest.param(
+        "stbsv",
+        torch.float32,
+        CUBLAS_FILL_MODE_LOWER,
+        CUBLAS_OP_N,
+        marks=pytest.mark.stbsv,
+    ),
+    pytest.param(
+        "stbsv",
+        torch.float32,
+        CUBLAS_FILL_MODE_UPPER,
+        CUBLAS_OP_N,
+        marks=pytest.mark.stbsv,
+    ),
+    pytest.param(
+        "stbsv",
+        torch.float32,
+        CUBLAS_FILL_MODE_LOWER,
+        CUBLAS_OP_T,
+        marks=pytest.mark.stbsv,
+    ),
+    pytest.param(
+        "stbsv",
+        torch.float32,
+        CUBLAS_FILL_MODE_UPPER,
+        CUBLAS_OP_T,
+        marks=pytest.mark.stbsv,
+    ),
+    pytest.param(
+        "dtbsv",
+        torch.float64,
+        CUBLAS_FILL_MODE_LOWER,
+        CUBLAS_OP_N,
+        marks=pytest.mark.dtbsv,
+    ),
+    pytest.param(
+        "dtbsv",
+        torch.float64,
+        CUBLAS_FILL_MODE_UPPER,
+        CUBLAS_OP_N,
+        marks=pytest.mark.dtbsv,
+    ),
+    pytest.param(
+        "dtbsv",
+        torch.float64,
+        CUBLAS_FILL_MODE_LOWER,
+        CUBLAS_OP_T,
+        marks=pytest.mark.dtbsv,
+    ),
+    pytest.param(
+        "dtbsv",
+        torch.float64,
+        CUBLAS_FILL_MODE_UPPER,
+        CUBLAS_OP_T,
+        marks=pytest.mark.dtbsv,
+    ),
+    pytest.param(
+        "ctbsv",
+        torch.complex64,
+        CUBLAS_FILL_MODE_LOWER,
+        CUBLAS_OP_N,
+        marks=pytest.mark.ctbsv,
+    ),
+    pytest.param(
+        "ctbsv",
+        torch.complex64,
+        CUBLAS_FILL_MODE_UPPER,
+        CUBLAS_OP_N,
+        marks=pytest.mark.ctbsv,
+    ),
+    pytest.param(
+        "ctbsv",
+        torch.complex64,
+        CUBLAS_FILL_MODE_LOWER,
+        CUBLAS_OP_T,
+        marks=pytest.mark.ctbsv,
+    ),
+    pytest.param(
+        "ctbsv",
+        torch.complex64,
+        CUBLAS_FILL_MODE_UPPER,
+        CUBLAS_OP_T,
+        marks=pytest.mark.ctbsv,
+    ),
+    pytest.param(
+        "ctbsv",
+        torch.complex64,
+        CUBLAS_FILL_MODE_LOWER,
+        CUBLAS_OP_C,
+        marks=pytest.mark.ctbsv,
+    ),
+    pytest.param(
+        "ctbsv",
+        torch.complex64,
+        CUBLAS_FILL_MODE_UPPER,
+        CUBLAS_OP_C,
+        marks=pytest.mark.ctbsv,
+    ),
+    pytest.param(
+        "ztbsv",
+        torch.complex128,
+        CUBLAS_FILL_MODE_LOWER,
+        CUBLAS_OP_N,
+        marks=pytest.mark.ztbsv,
+    ),
+    pytest.param(
+        "ztbsv",
+        torch.complex128,
+        CUBLAS_FILL_MODE_UPPER,
+        CUBLAS_OP_N,
+        marks=pytest.mark.ztbsv,
+    ),
+    pytest.param(
+        "ztbsv",
+        torch.complex128,
+        CUBLAS_FILL_MODE_LOWER,
+        CUBLAS_OP_T,
+        marks=pytest.mark.ztbsv,
+    ),
+    pytest.param(
+        "ztbsv",
+        torch.complex128,
+        CUBLAS_FILL_MODE_UPPER,
+        CUBLAS_OP_T,
+        marks=pytest.mark.ztbsv,
+    ),
+    pytest.param(
+        "ztbsv",
+        torch.complex128,
+        CUBLAS_FILL_MODE_LOWER,
+        CUBLAS_OP_C,
+        marks=pytest.mark.ztbsv,
+    ),
+    pytest.param(
+        "ztbsv",
+        torch.complex128,
+        CUBLAS_FILL_MODE_UPPER,
+        CUBLAS_OP_C,
+        marks=pytest.mark.ztbsv,
+    ),
+]
+
+
+@pytest.mark.parametrize("op_name,dtype,uplo,trans", TBSV_PERF_CASES)
+def test_perf_tbsv(op_name, dtype, uplo, trans):
     _run_tbsv_variant(op_name, dtype, uplo, trans)

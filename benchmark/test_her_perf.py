@@ -59,6 +59,8 @@ def _configure_cublas_signatures():
     _cublas.cublasCreate_v2.restype = ctypes.c_int
     _cublas.cublasSetPointerMode_v2.argtypes = [ctypes.c_void_p, ctypes.c_int]
     _cublas.cublasSetPointerMode_v2.restype = ctypes.c_int
+    _cublas.cublasSetStream_v2.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    _cublas.cublasSetStream_v2.restype = ctypes.c_int
     for name in ("cublasCher_v2", "cublasZher_v2"):
         func = getattr(_cublas, name)
         func.argtypes = [
@@ -83,15 +85,24 @@ _CUBLAS_HER_FUNCS = {
 
 def _get_cublas_handle():
     global _cublas_handle
-    if _cublas_handle is not None:
-        return _cublas_handle
-    _cublas_handle = ctypes.c_void_p()
-    status = _cublas.cublasCreate_v2(ctypes.byref(_cublas_handle))
+    if _cublas_handle is None:
+        _cublas_handle = ctypes.c_void_p()
+        status = _cublas.cublasCreate_v2(ctypes.byref(_cublas_handle))
+        if status != 0:
+            raise RuntimeError(f"cublasCreate_v2 failed with status code: {status}")
+        status = _cublas.cublasSetPointerMode_v2(
+            _cublas_handle, CUBLAS_POINTER_MODE_HOST
+        )
+        if status != 0:
+            raise RuntimeError(
+                f"cublasSetPointerMode_v2 failed with status code: {status}"
+            )
+    status = _cublas.cublasSetStream_v2(
+        _cublas_handle,
+        ctypes.c_void_p(torch.cuda.current_stream().cuda_stream),
+    )
     if status != 0:
-        raise RuntimeError(f"cublasCreate_v2 failed with status code: {status}")
-    status = _cublas.cublasSetPointerMode_v2(_cublas_handle, CUBLAS_POINTER_MODE_HOST)
-    if status != 0:
-        raise RuntimeError(f"cublasSetPointerMode_v2 failed with status code: {status}")
+        raise RuntimeError(f"cublasSetStream_v2 failed with status code: {status}")
     return _cublas_handle
 
 
@@ -112,7 +123,6 @@ def cublas_her_baseline(
     )
     if status != 0:
         raise RuntimeError(f"cublasXher_v2 failed with status code: {status}")
-    torch.cuda.synchronize(A.device)
     return A
 
 
@@ -124,6 +134,12 @@ def gems_cher_wrapper(A, x, uplo, n, alpha, incx, lda, handle, **kwargs):
 def gems_zher_wrapper(A, x, uplo, n, alpha, incx, lda, handle, **kwargs):
     flag_blas.ops.zher(uplo, n, alpha, x, incx, A, lda)
     return A
+
+
+GEMS_HER_WRAPPERS = {
+    "cher": gems_cher_wrapper,
+    "zher": gems_zher_wrapper,
+}
 
 
 def _generate_A(n, lda, dtype, device):
@@ -187,53 +203,35 @@ class HerBenchmark(Benchmark):
         return (A.clone(), x.clone()), kwargs, (A.clone(), x.clone()), kwargs
 
 
-@pytest.mark.cher
-def test_perf_cher():
-    bench = HerBenchmark(
-        op_name="cher",
-        torch_op=cublas_her_baseline,
-        gems_op=gems_cher_wrapper,
-        dtypes=[torch.complex64],
-        uplo=CUBLAS_FILL_MODE_LOWER,
-    )
-    run_correctness_then_benchmark(bench)
-
-
-@pytest.mark.cher
-def test_perf_cher_upper():
-    bench = HerBenchmark(
-        op_name="cher_upper",
-        torch_op=cublas_her_baseline,
-        gems_op=gems_cher_wrapper,
-        dtypes=[torch.complex64],
-        uplo=CUBLAS_FILL_MODE_UPPER,
-    )
-    run_correctness_then_benchmark(bench)
-
-
-@pytest.mark.zher
-def test_perf_zher():
-    if not flag_blas.runtime.device.support_fp64:
+def _run_her(op_name, dtype, uplo):
+    if dtype == torch.complex128 and not flag_blas.runtime.device.support_fp64:
         pytest.skip("Device does not support complex128")
     bench = HerBenchmark(
-        op_name="zher",
+        op_name=f"{op_name}_{uplo}",
         torch_op=cublas_her_baseline,
-        gems_op=gems_zher_wrapper,
-        dtypes=[torch.complex128],
-        uplo=CUBLAS_FILL_MODE_LOWER,
+        gems_op=GEMS_HER_WRAPPERS[op_name],
+        dtypes=[dtype],
+        uplo=uplo,
     )
     run_correctness_then_benchmark(bench)
 
 
-@pytest.mark.zher
-def test_perf_zher_upper():
-    if not flag_blas.runtime.device.support_fp64:
-        pytest.skip("Device does not support complex128")
-    bench = HerBenchmark(
-        op_name="zher_upper",
-        torch_op=cublas_her_baseline,
-        gems_op=gems_zher_wrapper,
-        dtypes=[torch.complex128],
-        uplo=CUBLAS_FILL_MODE_UPPER,
+HER_PERF_CASES = [
+    pytest.param(
+        op_name,
+        dtype,
+        uplo,
+        marks=getattr(pytest.mark, op_name),
+        id=f"{op_name}-{uplo}",
     )
-    run_correctness_then_benchmark(bench)
+    for op_name, dtype in (
+        ("cher", torch.complex64),
+        ("zher", torch.complex128),
+    )
+    for uplo in (CUBLAS_FILL_MODE_LOWER, CUBLAS_FILL_MODE_UPPER)
+]
+
+
+@pytest.mark.parametrize("op_name,dtype,uplo", HER_PERF_CASES)
+def test_perf_her(op_name, dtype, uplo):
+    _run_her(op_name, dtype, uplo)
