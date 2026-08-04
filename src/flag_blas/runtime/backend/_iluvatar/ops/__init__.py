@@ -14,6 +14,10 @@
 
 from .nrm2 import dnrm2, dznrm2, scnrm2, snrm2
 from .tbsv import stbsv
+from .bfgemm import bgemm, bfgemm
+from .cgemm import cgemm
+from .hgemm import hgemm
+from .sgemm import sgemm
 
 __all__ = [
     "stbsv",
@@ -21,4 +25,9 @@ __all__ = [
     "dnrm2",
     "scnrm2",
     "dznrm2",
+    "sgemm",
+    "hgemm",
+    "bfgemm",
+    "bgemm",
+    "cgemm",
 ]
