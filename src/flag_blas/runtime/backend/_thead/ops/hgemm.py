@@ -617,6 +617,837 @@ def _thead_hgemm_nn_desc_bwd_kernel(
     c_desc.store([offs_m, offs_n], result.to(tl.float16))
 
 
+# ======================= hgemm_tn (A^T x B) =======================
+
+
+@triton.jit
+def _thead_hgemm_tn_impl(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    beta: tl.float32,
+    lda,
+    ldb,
+    ldc,
+    BETA_IS_ZERO: tl.constexpr,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+):
+    """Shared impl for TN: load A^T contiguous as (BLOCK_K, BLOCK_M), compute via transposed accumulator."""
+    a_ptr = a_ptr.to(tl.pointer_type(tl.float16))
+    b_ptr = b_ptr.to(tl.pointer_type(tl.float16))
+    c_ptr = c_ptr.to(tl.pointer_type(tl.float16))
+
+    pid = tl.program_id(0)
+    grid_m = tl.cdiv(M, BLOCK_M)
+    grid_n = tl.cdiv(N, BLOCK_N)
+    width = GROUP_M * grid_n
+    group_id = pid // width
+    group_size = min(grid_m - group_id * GROUP_M, GROUP_M)
+    pid_m = group_id * GROUP_M + (pid % group_size)
+    pid_n = (pid % width) // group_size
+
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_k = tl.arange(0, BLOCK_K)
+    offs_m = tl.max_contiguous(tl.multiple_of(offs_m, BLOCK_M), BLOCK_M)
+    offs_n = tl.max_contiguous(tl.multiple_of(offs_n, BLOCK_N), BLOCK_N)
+    offs_k = tl.max_contiguous(tl.multiple_of(offs_k, BLOCK_K), BLOCK_K)
+
+    # A is (K, M) row-major, lda = M. Load (BLOCK_K, BLOCK_M) contiguous.
+    a_t_ptrs = a_ptr + offs_k[:, None] * lda + offs_m[None, :]
+    # B is (K, N) row-major, ldb = N. Load (BLOCK_K, BLOCK_N) contiguous.
+    b_ptrs = b_ptr + offs_k[:, None] * ldb + offs_n[None, :]
+
+    # Use transposed accumulator to move tl.trans to the b operand.
+    # C(M,N) = A^T(M,K) x B(K,N)
+    # C^T(N,M) = B^T(N,K) x A(K,M) = tl.trans(b) * a_t
+    acc_t = tl.zeros((BLOCK_N, BLOCK_M), dtype=tl.float32)
+
+    is_full_m = (pid_m * BLOCK_M + BLOCK_M) <= M
+    is_full_n = (pid_n * BLOCK_N + BLOCK_N) <= N
+    k_full_iters = K // BLOCK_K
+    k_remainder = K % BLOCK_K
+
+    if is_full_m and is_full_n:
+        for _ in range(0, k_full_iters):
+            a_t = tl.load(a_t_ptrs)
+            b = tl.load(b_ptrs)
+            acc_t = tl.dot(tl.trans(b), a_t, acc_t, out_dtype=tl.float32)
+            a_t_ptrs += BLOCK_K * lda
+            b_ptrs += BLOCK_K * ldb
+
+        if k_remainder > 0:
+            mask_k = offs_k < k_remainder
+            a_t = tl.load(a_t_ptrs, mask=mask_k[:, None], other=0.0)
+            b = tl.load(b_ptrs, mask=mask_k[:, None], other=0.0)
+            acc_t = tl.dot(tl.trans(b), a_t, acc_t, out_dtype=tl.float32)
+    else:
+        mask_m = offs_m < M
+        mask_n = offs_n < N
+        for _ in range(0, k_full_iters):
+            a_t = tl.load(a_t_ptrs, mask=mask_m[None, :], other=0.0)
+            b = tl.load(b_ptrs, mask=mask_n[None, :], other=0.0)
+            acc_t = tl.dot(tl.trans(b), a_t, acc_t, out_dtype=tl.float32)
+            a_t_ptrs += BLOCK_K * lda
+            b_ptrs += BLOCK_K * ldb
+
+        if k_remainder > 0:
+            mask_k = offs_k < k_remainder
+            a_t = tl.load(a_t_ptrs, mask=mask_k[:, None] & mask_m[None, :], other=0.0)
+            b = tl.load(b_ptrs, mask=mask_k[:, None] & mask_n[None, :], other=0.0)
+            acc_t = tl.dot(tl.trans(b), a_t, acc_t, out_dtype=tl.float32)
+
+    # Transpose back: C = acc_t^T (BLOCK_M, BLOCK_N)
+    acc = tl.trans(acc_t)
+    c_ptrs = c_ptr + offs_m[:, None] * ldc + offs_n[None, :]
+    result = alpha * acc
+    if is_full_m and is_full_n:
+        if not BETA_IS_ZERO:
+            c_vals = tl.load(c_ptrs).to(tl.float32)
+            result += beta * c_vals
+        tl.store(c_ptrs, result.to(tl.float16))
+    else:
+        c_mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
+        if not BETA_IS_ZERO:
+            c_vals = tl.load(c_ptrs, mask=c_mask, other=0.0).to(tl.float32)
+            result += beta * c_vals
+        tl.store(c_ptrs, result.to(tl.float16), mask=c_mask)
+
+
+@libentry()
+@triton.jit(ppu_hint="fwd")
+def _thead_hgemm_tn_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    beta: tl.float32,
+    lda,
+    ldb,
+    ldc,
+    BETA_IS_ZERO: tl.constexpr,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+):
+    _thead_hgemm_tn_impl(
+        a_ptr, b_ptr, c_ptr, alpha, beta, lda, ldb, ldc,
+        BETA_IS_ZERO, M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, GROUP_M,
+    )
+
+
+@libentry()
+@triton.jit
+def _thead_hgemm_tn_desc_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    beta: tl.float32,
+    lda,
+    ldb,
+    ldc,
+    BETA_IS_ZERO: tl.constexpr,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+):
+    a_ptr = a_ptr.to(tl.pointer_type(tl.float16))
+    b_ptr = b_ptr.to(tl.pointer_type(tl.float16))
+    c_ptr = c_ptr.to(tl.pointer_type(tl.float16))
+
+    pid = tl.program_id(0)
+    grid_m = tl.cdiv(M, BLOCK_M)
+    grid_n = tl.cdiv(N, BLOCK_N)
+    width = GROUP_M * grid_n
+    group_id = pid // width
+    group_size = min(grid_m - group_id * GROUP_M, GROUP_M)
+    pid_m = group_id * GROUP_M + (pid % group_size)
+    pid_n = (pid % width) // group_size
+
+    offs_m = pid_m * BLOCK_M
+    offs_n = pid_n * BLOCK_N
+    a_desc = tl.make_tensor_descriptor(
+        a_ptr, shape=[K, M], strides=[lda, 1], block_shape=[BLOCK_K, BLOCK_M]
+    )
+    b_desc = tl.make_tensor_descriptor(
+        b_ptr, shape=[K, N], strides=[ldb, 1], block_shape=[BLOCK_K, BLOCK_N]
+    )
+    c_desc = tl.make_tensor_descriptor(
+        c_ptr, shape=[M, N], strides=[ldc, 1], block_shape=[BLOCK_M, BLOCK_N]
+    )
+
+    # C(M,N) = A^T(M,K) x B(K,N)
+    # C^T(N,M) = B^T(N,K) x A(K,M). Use transposed accumulator, tl.trans on b operand.
+    acc_t = tl.zeros((BLOCK_N, BLOCK_M), dtype=tl.float32)
+    for i in range(0, tl.cdiv(K, BLOCK_K)):
+        offs_k = i * BLOCK_K
+        a_t = a_desc.load([offs_k, offs_m])
+        b = b_desc.load([offs_k, offs_n])
+        acc_t = tl.dot(tl.trans(b), a_t, acc_t, out_dtype=tl.float32)
+
+    acc = tl.trans(acc_t)
+    result = alpha * acc
+    if not BETA_IS_ZERO:
+        c_vals = c_desc.load([offs_m, offs_n]).to(tl.float32)
+        result += beta * c_vals
+    c_desc.store([offs_m, offs_n], result.to(tl.float16))
+
+
+@libentry()
+@triton.jit(ppu_hint="bwd")
+def _thead_hgemm_tn_bwd_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    beta: tl.float32,
+    lda,
+    ldb,
+    ldc,
+    BETA_IS_ZERO: tl.constexpr,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+):
+    _thead_hgemm_tn_impl(
+        a_ptr, b_ptr, c_ptr, alpha, beta, lda, ldb, ldc,
+        BETA_IS_ZERO, M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, GROUP_M,
+    )
+
+
+@libentry()
+@triton.jit(ppu_hint="bwd")
+def _thead_hgemm_tn_desc_bwd_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    beta: tl.float32,
+    lda,
+    ldb,
+    ldc,
+    BETA_IS_ZERO: tl.constexpr,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+):
+    a_ptr = a_ptr.to(tl.pointer_type(tl.float16))
+    b_ptr = b_ptr.to(tl.pointer_type(tl.float16))
+    c_ptr = c_ptr.to(tl.pointer_type(tl.float16))
+
+    pid = tl.program_id(0)
+    grid_m = tl.cdiv(M, BLOCK_M)
+    grid_n = tl.cdiv(N, BLOCK_N)
+    width = GROUP_M * grid_n
+    group_id = pid // width
+    group_size = min(grid_m - group_id * GROUP_M, GROUP_M)
+    pid_m = group_id * GROUP_M + (pid % group_size)
+    pid_n = (pid % width) // group_size
+
+    offs_m = pid_m * BLOCK_M
+    offs_n = pid_n * BLOCK_N
+    a_desc = tl.make_tensor_descriptor(
+        a_ptr, shape=[K, M], strides=[lda, 1], block_shape=[BLOCK_K, BLOCK_M]
+    )
+    b_desc = tl.make_tensor_descriptor(
+        b_ptr, shape=[K, N], strides=[ldb, 1], block_shape=[BLOCK_K, BLOCK_N]
+    )
+    c_desc = tl.make_tensor_descriptor(
+        c_ptr, shape=[M, N], strides=[ldc, 1], block_shape=[BLOCK_M, BLOCK_N]
+    )
+
+    # C(M,N) = A^T(M,K) x B(K,N)
+    # C^T(N,M) = B^T(N,K) x A(K,M). Use transposed accumulator, tl.trans on b operand.
+    acc_t = tl.zeros((BLOCK_N, BLOCK_M), dtype=tl.float32)
+    for i in range(0, tl.cdiv(K, BLOCK_K)):
+        offs_k = i * BLOCK_K
+        a_t = a_desc.load([offs_k, offs_m])
+        b = b_desc.load([offs_k, offs_n])
+        acc_t = tl.dot(tl.trans(b), a_t, acc_t, out_dtype=tl.float32)
+
+    acc = tl.trans(acc_t)
+    result = alpha * acc
+    if not BETA_IS_ZERO:
+        c_vals = c_desc.load([offs_m, offs_n]).to(tl.float32)
+        result += beta * c_vals
+    c_desc.store([offs_m, offs_n], result.to(tl.float16))
+
+
+# ======================= hgemm_nt (A x B^T) =======================
+
+
+@triton.jit
+def _thead_hgemm_nt_impl(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    beta: tl.float32,
+    lda,
+    ldb,
+    ldc,
+    BETA_IS_ZERO: tl.constexpr,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+):
+    """Transpose-free NT: C^T(N,M) = B(N,K) x A(K,M), no tl.trans in dot."""
+    a_ptr = a_ptr.to(tl.pointer_type(tl.float16))
+    b_ptr = b_ptr.to(tl.pointer_type(tl.float16))
+    c_ptr = c_ptr.to(tl.pointer_type(tl.float16))
+
+    pid = tl.program_id(0)
+    grid_m = tl.cdiv(M, BLOCK_M)
+    grid_n = tl.cdiv(N, BLOCK_N)
+    width = GROUP_M * grid_n
+    group_id = pid // width
+    group_size = min(grid_m - group_id * GROUP_M, GROUP_M)
+    pid_m = group_id * GROUP_M + (pid % group_size)
+    pid_n = (pid % width) // group_size
+
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_k = tl.arange(0, BLOCK_K)
+    offs_m = tl.max_contiguous(tl.multiple_of(offs_m, BLOCK_M), BLOCK_M)
+    offs_n = tl.max_contiguous(tl.multiple_of(offs_n, BLOCK_N), BLOCK_N)
+    offs_k = tl.max_contiguous(tl.multiple_of(offs_k, BLOCK_K), BLOCK_K)
+
+    # A is (M, K). Load A^T(K, M): first dim K stride=1, second dim M stride=lda.
+    a_t_ptrs = a_ptr + offs_k[:, None] + offs_m[None, :] * lda
+    # B is (N, K). Load (BLOCK_N, BLOCK_K) contiguous.
+    b_ptrs = b_ptr + offs_n[:, None] * ldb + offs_k[None, :]
+
+    # C^T(N,M) = B(N,K) x A^T(K,M)
+    acc_t = tl.zeros((BLOCK_N, BLOCK_M), dtype=tl.float32)
+
+    is_full_m = (pid_m * BLOCK_M + BLOCK_M) <= M
+    is_full_n = (pid_n * BLOCK_N + BLOCK_N) <= N
+    k_full_iters = K // BLOCK_K
+    k_remainder = K % BLOCK_K
+
+    if is_full_m and is_full_n:
+        for _ in range(0, k_full_iters):
+            a_t = tl.load(a_t_ptrs)
+            b = tl.load(b_ptrs)
+            acc_t = tl.dot(b, a_t, acc_t, out_dtype=tl.float32)
+            a_t_ptrs += BLOCK_K
+            b_ptrs += BLOCK_K
+
+        if k_remainder > 0:
+            mask_k = offs_k < k_remainder
+            a_t = tl.load(a_t_ptrs, mask=mask_k[:, None], other=0.0)
+            b = tl.load(b_ptrs, mask=mask_k[None, :], other=0.0)
+            acc_t = tl.dot(b, a_t, acc_t, out_dtype=tl.float32)
+    else:
+        mask_m = offs_m < M
+        mask_n = offs_n < N
+        for _ in range(0, k_full_iters):
+            a_t = tl.load(a_t_ptrs, mask=mask_m[None, :], other=0.0)
+            b = tl.load(b_ptrs, mask=mask_n[:, None], other=0.0)
+            acc_t = tl.dot(b, a_t, acc_t, out_dtype=tl.float32)
+            a_t_ptrs += BLOCK_K
+            b_ptrs += BLOCK_K
+
+        if k_remainder > 0:
+            mask_k = offs_k < k_remainder
+            a_t = tl.load(a_t_ptrs, mask=mask_k[:, None] & mask_m[None, :], other=0.0)
+            b = tl.load(b_ptrs, mask=mask_n[:, None] & mask_k[None, :], other=0.0)
+            acc_t = tl.dot(b, a_t, acc_t, out_dtype=tl.float32)
+
+    # acc = acc_t^T (BLOCK_M, BLOCK_N)
+    acc = tl.trans(acc_t)
+    c_ptrs = c_ptr + offs_m[:, None] * ldc + offs_n[None, :]
+    result = alpha * acc
+    if is_full_m and is_full_n:
+        if not BETA_IS_ZERO:
+            c_vals = tl.load(c_ptrs).to(tl.float32)
+            result += beta * c_vals
+        tl.store(c_ptrs, result.to(tl.float16))
+    else:
+        c_mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
+        if not BETA_IS_ZERO:
+            c_vals = tl.load(c_ptrs, mask=c_mask, other=0.0).to(tl.float32)
+            result += beta * c_vals
+        tl.store(c_ptrs, result.to(tl.float16), mask=c_mask)
+
+
+@libentry()
+@triton.jit(ppu_hint="fwd")
+def _thead_hgemm_nt_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    beta: tl.float32,
+    lda,
+    ldb,
+    ldc,
+    BETA_IS_ZERO: tl.constexpr,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+):
+    _thead_hgemm_nt_impl(
+        a_ptr, b_ptr, c_ptr, alpha, beta, lda, ldb, ldc,
+        BETA_IS_ZERO, M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, GROUP_M,
+    )
+
+
+@libentry()
+@triton.jit
+def _thead_hgemm_nt_desc_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    beta: tl.float32,
+    lda,
+    ldb,
+    ldc,
+    BETA_IS_ZERO: tl.constexpr,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+):
+    a_ptr = a_ptr.to(tl.pointer_type(tl.float16))
+    b_ptr = b_ptr.to(tl.pointer_type(tl.float16))
+    c_ptr = c_ptr.to(tl.pointer_type(tl.float16))
+
+    pid = tl.program_id(0)
+    grid_m = tl.cdiv(M, BLOCK_M)
+    grid_n = tl.cdiv(N, BLOCK_N)
+    width = GROUP_M * grid_n
+    group_id = pid // width
+    group_size = min(grid_m - group_id * GROUP_M, GROUP_M)
+    pid_m = group_id * GROUP_M + (pid % group_size)
+    pid_n = (pid % width) // group_size
+
+    offs_m = pid_m * BLOCK_M
+    offs_n = pid_n * BLOCK_N
+    a_desc = tl.make_tensor_descriptor(
+        a_ptr, shape=[M, K], strides=[lda, 1], block_shape=[BLOCK_M, BLOCK_K]
+    )
+    b_desc = tl.make_tensor_descriptor(
+        b_ptr, shape=[N, K], strides=[ldb, 1], block_shape=[BLOCK_N, BLOCK_K]
+    )
+    c_desc = tl.make_tensor_descriptor(
+        c_ptr, shape=[M, N], strides=[ldc, 1], block_shape=[BLOCK_M, BLOCK_N]
+    )
+
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    for i in range(0, tl.cdiv(K, BLOCK_K)):
+        offs_k = i * BLOCK_K
+        a = a_desc.load([offs_m, offs_k])
+        b_t = b_desc.load([offs_n, offs_k])
+        b = tl.trans(b_t)
+        acc = tl.dot(a, b, acc, out_dtype=tl.float32)
+
+    result = alpha * acc
+    if not BETA_IS_ZERO:
+        c_vals = c_desc.load([offs_m, offs_n]).to(tl.float32)
+        result += beta * c_vals
+    c_desc.store([offs_m, offs_n], result.to(tl.float16))
+
+
+@libentry()
+@triton.jit(ppu_hint="bwd")
+def _thead_hgemm_nt_bwd_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    beta: tl.float32,
+    lda,
+    ldb,
+    ldc,
+    BETA_IS_ZERO: tl.constexpr,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+):
+    _thead_hgemm_nt_impl(
+        a_ptr, b_ptr, c_ptr, alpha, beta, lda, ldb, ldc,
+        BETA_IS_ZERO, M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, GROUP_M,
+    )
+
+
+@libentry()
+@triton.jit(ppu_hint="bwd")
+def _thead_hgemm_nt_desc_bwd_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    beta: tl.float32,
+    lda,
+    ldb,
+    ldc,
+    BETA_IS_ZERO: tl.constexpr,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+):
+    a_ptr = a_ptr.to(tl.pointer_type(tl.float16))
+    b_ptr = b_ptr.to(tl.pointer_type(tl.float16))
+    c_ptr = c_ptr.to(tl.pointer_type(tl.float16))
+
+    pid = tl.program_id(0)
+    grid_m = tl.cdiv(M, BLOCK_M)
+    grid_n = tl.cdiv(N, BLOCK_N)
+    width = GROUP_M * grid_n
+    group_id = pid // width
+    group_size = min(grid_m - group_id * GROUP_M, GROUP_M)
+    pid_m = group_id * GROUP_M + (pid % group_size)
+    pid_n = (pid % width) // group_size
+
+    offs_m = pid_m * BLOCK_M
+    offs_n = pid_n * BLOCK_N
+    a_desc = tl.make_tensor_descriptor(
+        a_ptr, shape=[M, K], strides=[lda, 1], block_shape=[BLOCK_M, BLOCK_K]
+    )
+    b_desc = tl.make_tensor_descriptor(
+        b_ptr, shape=[N, K], strides=[ldb, 1], block_shape=[BLOCK_N, BLOCK_K]
+    )
+    c_desc = tl.make_tensor_descriptor(
+        c_ptr, shape=[M, N], strides=[ldc, 1], block_shape=[BLOCK_M, BLOCK_N]
+    )
+
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    for i in range(0, tl.cdiv(K, BLOCK_K)):
+        offs_k = i * BLOCK_K
+        a = a_desc.load([offs_m, offs_k])
+        b_t = b_desc.load([offs_n, offs_k])
+        b = tl.trans(b_t)
+        acc = tl.dot(a, b, acc, out_dtype=tl.float32)
+
+    result = alpha * acc
+    if not BETA_IS_ZERO:
+        c_vals = c_desc.load([offs_m, offs_n]).to(tl.float32)
+        result += beta * c_vals
+    c_desc.store([offs_m, offs_n], result.to(tl.float16))
+
+
+# ======================= hgemm_tt (A^T x B^T) =======================
+
+
+@triton.jit
+def _thead_hgemm_tt_impl(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    beta: tl.float32,
+    lda,
+    ldb,
+    ldc,
+    BETA_IS_ZERO: tl.constexpr,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+):
+    """Shared impl for TT: compute C^T = B x A via transposed accumulator, no tl.trans in dot."""
+    a_ptr = a_ptr.to(tl.pointer_type(tl.float16))
+    b_ptr = b_ptr.to(tl.pointer_type(tl.float16))
+    c_ptr = c_ptr.to(tl.pointer_type(tl.float16))
+
+    pid = tl.program_id(0)
+    grid_m = tl.cdiv(M, BLOCK_M)
+    grid_n = tl.cdiv(N, BLOCK_N)
+    width = GROUP_M * grid_n
+    group_id = pid // width
+    group_size = min(grid_m - group_id * GROUP_M, GROUP_M)
+    pid_m = group_id * GROUP_M + (pid % group_size)
+    pid_n = (pid % width) // group_size
+
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_k = tl.arange(0, BLOCK_K)
+    offs_m = tl.max_contiguous(tl.multiple_of(offs_m, BLOCK_M), BLOCK_M)
+    offs_n = tl.max_contiguous(tl.multiple_of(offs_n, BLOCK_N), BLOCK_N)
+    offs_k = tl.max_contiguous(tl.multiple_of(offs_k, BLOCK_K), BLOCK_K)
+
+    # A is (K, M), lda = M. Load (BLOCK_K, BLOCK_M) contiguous.
+    a_t_ptrs = a_ptr + offs_k[:, None] * lda + offs_m[None, :]
+    # B is (N, K), ldb = K. Load (BLOCK_N, BLOCK_K) contiguous.
+    b_t_ptrs = b_ptr + offs_n[:, None] * ldb + offs_k[None, :]
+
+    # C(M,N) = A^T(M,K) x B^T(N,K)^T
+    # C^T(N,M) = B(N,K) x A(K,M) = b_t * a_t
+    acc_t = tl.zeros((BLOCK_N, BLOCK_M), dtype=tl.float32)
+
+    is_full_m = (pid_m * BLOCK_M + BLOCK_M) <= M
+    is_full_n = (pid_n * BLOCK_N + BLOCK_N) <= N
+    k_full_iters = K // BLOCK_K
+    k_remainder = K % BLOCK_K
+
+    if is_full_m and is_full_n:
+        for _ in range(0, k_full_iters):
+            a_t = tl.load(a_t_ptrs)
+            b_t = tl.load(b_t_ptrs)
+            acc_t = tl.dot(b_t, a_t, acc_t, out_dtype=tl.float32)
+            a_t_ptrs += BLOCK_K * lda
+            b_t_ptrs += BLOCK_K
+
+        if k_remainder > 0:
+            mask_k = offs_k < k_remainder
+            a_t = tl.load(a_t_ptrs, mask=mask_k[:, None], other=0.0)
+            b_t = tl.load(b_t_ptrs, mask=mask_k[None, :], other=0.0)
+            acc_t = tl.dot(b_t, a_t, acc_t, out_dtype=tl.float32)
+    else:
+        mask_m = offs_m < M
+        mask_n = offs_n < N
+        for _ in range(0, k_full_iters):
+            a_t = tl.load(a_t_ptrs, mask=mask_m[None, :], other=0.0)
+            b_t = tl.load(b_t_ptrs, mask=mask_n[:, None], other=0.0)
+            acc_t = tl.dot(b_t, a_t, acc_t, out_dtype=tl.float32)
+            a_t_ptrs += BLOCK_K * lda
+            b_t_ptrs += BLOCK_K
+
+        if k_remainder > 0:
+            mask_k = offs_k < k_remainder
+            a_t = tl.load(a_t_ptrs, mask=mask_k[:, None] & mask_m[None, :], other=0.0)
+            b_t = tl.load(b_t_ptrs, mask=mask_n[:, None] & mask_k[None, :], other=0.0)
+            acc_t = tl.dot(b_t, a_t, acc_t, out_dtype=tl.float32)
+
+    # Transpose back: C = acc_t^T (BLOCK_M, BLOCK_N)
+    acc = tl.trans(acc_t)
+    c_ptrs = c_ptr + offs_m[:, None] * ldc + offs_n[None, :]
+    result = alpha * acc
+    if is_full_m and is_full_n:
+        if not BETA_IS_ZERO:
+            c_vals = tl.load(c_ptrs).to(tl.float32)
+            result += beta * c_vals
+        tl.store(c_ptrs, result.to(tl.float16))
+    else:
+        c_mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
+        if not BETA_IS_ZERO:
+            c_vals = tl.load(c_ptrs, mask=c_mask, other=0.0).to(tl.float32)
+            result += beta * c_vals
+        tl.store(c_ptrs, result.to(tl.float16), mask=c_mask)
+
+
+@libentry()
+@triton.jit(ppu_hint="fwd")
+def _thead_hgemm_tt_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    beta: tl.float32,
+    lda,
+    ldb,
+    ldc,
+    BETA_IS_ZERO: tl.constexpr,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+):
+    _thead_hgemm_tt_impl(
+        a_ptr, b_ptr, c_ptr, alpha, beta, lda, ldb, ldc,
+        BETA_IS_ZERO, M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, GROUP_M,
+    )
+
+
+@libentry()
+@triton.jit
+def _thead_hgemm_tt_desc_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    beta: tl.float32,
+    lda,
+    ldb,
+    ldc,
+    BETA_IS_ZERO: tl.constexpr,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+):
+    a_ptr = a_ptr.to(tl.pointer_type(tl.float16))
+    b_ptr = b_ptr.to(tl.pointer_type(tl.float16))
+    c_ptr = c_ptr.to(tl.pointer_type(tl.float16))
+
+    pid = tl.program_id(0)
+    grid_m = tl.cdiv(M, BLOCK_M)
+    grid_n = tl.cdiv(N, BLOCK_N)
+    width = GROUP_M * grid_n
+    group_id = pid // width
+    group_size = min(grid_m - group_id * GROUP_M, GROUP_M)
+    pid_m = group_id * GROUP_M + (pid % group_size)
+    pid_n = (pid % width) // group_size
+
+    offs_m = pid_m * BLOCK_M
+    offs_n = pid_n * BLOCK_N
+    a_desc = tl.make_tensor_descriptor(
+        a_ptr, shape=[K, M], strides=[lda, 1], block_shape=[BLOCK_K, BLOCK_M]
+    )
+    b_desc = tl.make_tensor_descriptor(
+        b_ptr, shape=[N, K], strides=[ldb, 1], block_shape=[BLOCK_N, BLOCK_K]
+    )
+    c_desc = tl.make_tensor_descriptor(
+        c_ptr, shape=[M, N], strides=[ldc, 1], block_shape=[BLOCK_M, BLOCK_N]
+    )
+
+    # C^T(N,M) = B(N,K) x A(K,M), no tl.trans in dot
+    acc_t = tl.zeros((BLOCK_N, BLOCK_M), dtype=tl.float32)
+    for i in range(0, tl.cdiv(K, BLOCK_K)):
+        offs_k = i * BLOCK_K
+        a_t = a_desc.load([offs_k, offs_m])
+        b_t = b_desc.load([offs_n, offs_k])
+        acc_t = tl.dot(b_t, a_t, acc_t, out_dtype=tl.float32)
+
+    acc = tl.trans(acc_t)
+    result = alpha * acc
+    if not BETA_IS_ZERO:
+        c_vals = c_desc.load([offs_m, offs_n]).to(tl.float32)
+        result += beta * c_vals
+    c_desc.store([offs_m, offs_n], result.to(tl.float16))
+
+
+@libentry()
+@triton.jit(ppu_hint="bwd")
+def _thead_hgemm_tt_bwd_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    beta: tl.float32,
+    lda,
+    ldb,
+    ldc,
+    BETA_IS_ZERO: tl.constexpr,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+):
+    _thead_hgemm_tt_impl(
+        a_ptr, b_ptr, c_ptr, alpha, beta, lda, ldb, ldc,
+        BETA_IS_ZERO, M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, GROUP_M,
+    )
+
+
+@libentry()
+@triton.jit(ppu_hint="bwd")
+def _thead_hgemm_tt_desc_bwd_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    beta: tl.float32,
+    lda,
+    ldb,
+    ldc,
+    BETA_IS_ZERO: tl.constexpr,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+):
+    a_ptr = a_ptr.to(tl.pointer_type(tl.float16))
+    b_ptr = b_ptr.to(tl.pointer_type(tl.float16))
+    c_ptr = c_ptr.to(tl.pointer_type(tl.float16))
+
+    pid = tl.program_id(0)
+    grid_m = tl.cdiv(M, BLOCK_M)
+    grid_n = tl.cdiv(N, BLOCK_N)
+    width = GROUP_M * grid_n
+    group_id = pid // width
+    group_size = min(grid_m - group_id * GROUP_M, GROUP_M)
+    pid_m = group_id * GROUP_M + (pid % group_size)
+    pid_n = (pid % width) // group_size
+
+    offs_m = pid_m * BLOCK_M
+    offs_n = pid_n * BLOCK_N
+    a_desc = tl.make_tensor_descriptor(
+        a_ptr, shape=[K, M], strides=[lda, 1], block_shape=[BLOCK_K, BLOCK_M]
+    )
+    b_desc = tl.make_tensor_descriptor(
+        b_ptr, shape=[N, K], strides=[ldb, 1], block_shape=[BLOCK_N, BLOCK_K]
+    )
+    c_desc = tl.make_tensor_descriptor(
+        c_ptr, shape=[M, N], strides=[ldc, 1], block_shape=[BLOCK_M, BLOCK_N]
+    )
+
+    # C^T(N,M) = B(N,K) x A(K,M), no tl.trans in dot
+    acc_t = tl.zeros((BLOCK_N, BLOCK_M), dtype=tl.float32)
+    for i in range(0, tl.cdiv(K, BLOCK_K)):
+        offs_k = i * BLOCK_K
+        a_t = a_desc.load([offs_k, offs_m])
+        b_t = b_desc.load([offs_n, offs_k])
+        acc_t = tl.dot(b_t, a_t, acc_t, out_dtype=tl.float32)
+
+    acc = tl.trans(acc_t)
+    result = alpha * acc
+    if not BETA_IS_ZERO:
+        c_vals = c_desc.load([offs_m, offs_n]).to(tl.float32)
+        result += beta * c_vals
+    c_desc.store([offs_m, offs_n], result.to(tl.float16))
+
+
 def _thead_hgemm_nn_config(m: int, n: int, k: int):
     min_mn = min(m, n)
 
@@ -720,6 +1551,21 @@ def _thead_hgemm_nn_splitk_config(m: int, n: int, k: int):
     return 128, 128, 64, 8, 3, min(triton.cdiv(k, 512), 4)
 
 
+def _thead_hgemm_tn_config(m: int, n: int, k: int):
+    """Reuse NN config for TN variant."""
+    return _thead_hgemm_nn_config(m, n, k)
+
+
+def _thead_hgemm_nt_config(m: int, n: int, k: int):
+    """Reuse NN config for NT variant."""
+    return _thead_hgemm_nn_config(m, n, k)
+
+
+def _thead_hgemm_tt_config(m: int, n: int, k: int):
+    """Reuse NN config for TT variant."""
+    return _thead_hgemm_nn_config(m, n, k)
+
+
 def _can_use_thead_hgemm_nn(
     m: int, n: int, k: int, lda: int, ldb: int, ldc: int, alpha, beta
 ) -> bool:
@@ -730,6 +1576,327 @@ def _can_use_thead_hgemm_nn(
         and m >= 16
         and n >= 16
         and k >= 16
+    )
+
+
+def _can_use_thead_hgemm_tn(
+    m: int, n: int, k: int, lda: int, ldb: int, ldc: int, alpha, beta
+) -> bool:
+    # A^T: A is (K, M), lda = M; B: (K, N), ldb = N
+    return (
+        lda == m
+        and ldb == n
+        and ldc == n
+        and m >= 16
+        and n >= 16
+        and k >= 16
+    )
+
+
+def _can_use_thead_hgemm_nt(
+    m: int, n: int, k: int, lda: int, ldb: int, ldc: int, alpha, beta
+) -> bool:
+    # A: (M, K), lda = K; B^T: B is (N, K), ldb = K
+    return (
+        lda == k
+        and ldb == k
+        and ldc == n
+        and m >= 16
+        and n >= 16
+        and k >= 16
+    )
+
+
+def _can_use_thead_hgemm_tt(
+    m: int, n: int, k: int, lda: int, ldb: int, ldc: int, alpha, beta
+) -> bool:
+    # A^T: A is (K, M), lda = M; B^T: B is (N, K), ldb = K
+    return (
+        lda == m
+        and ldb == k
+        and ldc == n
+        and m >= 16
+        and n >= 16
+        and k >= 16
+    )
+
+
+def _thead_hgemm_is_tile_aligned(m: int, n: int, k: int, block_m: int, block_n: int, block_k: int) -> bool:
+    """Check if all dimensions are multiples of their block sizes (no partial tiles)."""
+    return m % block_m == 0 and n % block_n == 0 and k % block_k == 0
+
+
+def _run_thead_hgemm_tn(
+    A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero, aligned
+):
+    block_m, block_n, block_k, num_warps, num_stages, maxnreg = _thead_hgemm_tn_config(
+        m, n, k
+    )
+    tile_aligned = _thead_hgemm_is_tile_aligned(m, n, k, block_m, block_n, block_k)
+    if _thead_hgemm_nn_use_desc_bwd(m, n, k) and tile_aligned:
+        kernel = _thead_hgemm_tn_desc_bwd_kernel
+    elif _thead_hgemm_nn_use_bwd(m, n, k):
+        kernel = _thead_hgemm_tn_bwd_kernel
+    elif tile_aligned:
+        kernel = _thead_hgemm_tn_desc_kernel
+    else:
+        kernel = _thead_hgemm_tn_kernel
+    kernel[(triton.cdiv(m, block_m) * triton.cdiv(n, block_n),)](
+        A,
+        B,
+        C,
+        alpha,
+        beta,
+        lda,
+        ldb,
+        ldc,
+        beta_is_zero,
+        M=m,
+        N=n,
+        K=k,
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        BLOCK_K=block_k,
+        GROUP_M=8,
+        num_warps=num_warps,
+        num_stages=num_stages,
+        maxnreg=maxnreg,
+    )
+
+
+def _run_thead_hgemm_nt(
+    A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero, aligned
+):
+    block_m, block_n, block_k, num_warps, num_stages, maxnreg = _thead_hgemm_nt_config(
+        m, n, k
+    )
+    tile_aligned = _thead_hgemm_is_tile_aligned(m, n, k, block_m, block_n, block_k)
+    if _thead_hgemm_nn_use_desc_bwd(m, n, k) and tile_aligned:
+        kernel = _thead_hgemm_nt_desc_bwd_kernel
+    elif _thead_hgemm_nn_use_bwd(m, n, k):
+        kernel = _thead_hgemm_nt_bwd_kernel
+    elif tile_aligned:
+        kernel = _thead_hgemm_nt_desc_kernel
+    else:
+        kernel = _thead_hgemm_nt_kernel
+    kernel[(triton.cdiv(m, block_m) * triton.cdiv(n, block_n),)](
+        A,
+        B,
+        C,
+        alpha,
+        beta,
+        lda,
+        ldb,
+        ldc,
+        beta_is_zero,
+        M=m,
+        N=n,
+        K=k,
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        BLOCK_K=block_k,
+        GROUP_M=8,
+        num_warps=num_warps,
+        num_stages=num_stages,
+        maxnreg=maxnreg,
+    )
+
+
+def _run_thead_hgemm_tt(
+    A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero, aligned
+):
+    block_m, block_n, block_k, num_warps, num_stages, maxnreg = _thead_hgemm_tt_config(
+        m, n, k
+    )
+    tile_aligned = _thead_hgemm_is_tile_aligned(m, n, k, block_m, block_n, block_k)
+    if _thead_hgemm_nn_use_desc_bwd(m, n, k) and tile_aligned:
+        kernel = _thead_hgemm_tt_desc_bwd_kernel
+    elif _thead_hgemm_nn_use_bwd(m, n, k):
+        kernel = _thead_hgemm_tt_bwd_kernel
+    elif tile_aligned:
+        kernel = _thead_hgemm_tt_desc_kernel
+    else:
+        kernel = _thead_hgemm_tt_kernel
+    kernel[(triton.cdiv(m, block_m) * triton.cdiv(n, block_n),)](
+        A,
+        B,
+        C,
+        alpha,
+        beta,
+        lda,
+        ldb,
+        ldc,
+        beta_is_zero,
+        M=m,
+        N=n,
+        K=k,
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        BLOCK_K=block_k,
+        GROUP_M=8,
+        num_warps=num_warps,
+        num_stages=num_stages,
+        maxnreg=maxnreg,
+    )
+
+
+def _thead_hgemm_tn_should_pad(m: int, n: int, k: int) -> bool:
+    """Pad TN when non-aligned. Uses same strategy as NT/TT with lower threshold."""
+    if m % 64 == 0 and n % 64 == 0 and k % 64 == 0:
+        return False
+    m_pad = _round_up(m, 64)
+    n_pad = _round_up(n, 64)
+    k_pad = _round_up(k, 64)
+    extra = m_pad * k_pad + k_pad * n_pad + m_pad * n_pad
+    original = m * k + k * n + m * n
+    return m * n * k >= 256 * 256 * 256 and extra <= original * 1.15
+
+
+def _thead_hgemm_tn_should_materialize(m: int, n: int, k: int) -> bool:
+    """Materialize A^T (or B^T) and use NN (or TT) kernel.
+
+    Direct TN kernel uses tl.trans which is slow (0.77-0.81x of NN).
+    By materializing the cheaper transpose, we get near 1.0x NN performance.
+    - If M <= N: materialize A^T, use NN kernel
+    - If N < M: materialize B^T, use TT transpose-free kernel
+
+    Extended to non-aligned shapes where padding + materialization enables
+    the desc_bwd kernel, avoiding both tl.trans and masked loads.
+    """
+    if _thead_hgemm_nn_use_desc_bwd(m, n, k):
+        # Skip materialization for large-K shapes where copy overhead dominates.
+        # Direct TN kernel with desc_bwd may be faster despite tl.trans.
+        if k >= 4 * min(m, n):
+            return False
+        return True
+    # For non-aligned shapes: check if padded version benefits from desc_bwd
+    if m % 64 == 0 and n % 64 == 0 and k % 64 == 0:
+        return False
+    m_pad = _round_up(m, 64)
+    n_pad = _round_up(n, 64)
+    k_pad = _round_up(k, 64)
+    extra = m_pad * k_pad + k_pad * n_pad + m_pad * n_pad
+    original = m * k + k * n + m * n
+    if m * n * k < 256 * 256 * 256 or extra > original * 1.15:
+        return False
+    # Materialize if padded version would use desc_bwd (e.g. (1023,1023,1023))
+    if _thead_hgemm_nn_use_desc_bwd(m_pad, n_pad, k_pad):
+        return True
+    # For small non-aligned shapes: materialization avoids tl.trans even if
+    # desc_bwd isn't available on padded dims (e.g. (511,511,511))
+    if max(m, n, k) <= 2048:
+        return True
+    return False
+
+
+def _thead_hgemm_nt_should_pad(m: int, n: int, k: int) -> bool:
+    """Pad NT when non-aligned and overhead is reasonable."""
+    if m % 64 == 0 and n % 64 == 0 and k % 64 == 0:
+        return False
+    m_pad = _round_up(m, 64)
+    n_pad = _round_up(n, 64)
+    k_pad = _round_up(k, 64)
+    extra = m_pad * k_pad + k_pad * n_pad + m_pad * n_pad
+    original = m * k + k * n + m * n
+    return m * n * k >= 256 * 256 * 256 and extra <= original * 1.15
+
+
+def _thead_hgemm_tt_should_pad(m: int, n: int, k: int) -> bool:
+    """Pad TT when non-aligned and overhead is reasonable."""
+    if m % 64 == 0 and n % 64 == 0 and k % 64 == 0:
+        return False
+    m_pad = _round_up(m, 64)
+    n_pad = _round_up(n, 64)
+    k_pad = _round_up(k, 64)
+    extra = m_pad * k_pad + k_pad * n_pad + m_pad * n_pad
+    original = m * k + k * n + m * n
+    return m * n * k >= 256 * 256 * 256 and extra <= original * 1.15
+
+
+def _thead_hgemm_tt_should_materialize(m: int, n: int, k: int) -> bool:
+    """Disable materialization - direct TT transpose-free kernel avoids all copies."""
+    return False
+
+
+def _run_thead_hgemm_tn_padded(
+    A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero
+):
+    """Pad A(K,M) and B(K,N) to multiples of 64, then crop result."""
+    m_pad = _round_up(m, 64)
+    n_pad = _round_up(n, 64)
+    k_pad = _round_up(k, 64)
+    # A is (K, M) with lda=M
+    A_pad = torch.empty((k_pad, m_pad), dtype=A.dtype, device=A.device)
+    B_pad = torch.empty((k_pad, n_pad), dtype=B.dtype, device=B.device)
+    C_pad = torch.empty((m_pad, n_pad), dtype=C.dtype, device=C.device)
+
+    pad_block = 1024
+    _thead_hgemm_pad2d_kernel[(triton.cdiv(k_pad * m_pad, pad_block),)](
+        A, A_pad, k, m, lda, m_pad, k_pad, m_pad, BLOCK_SIZE=pad_block
+    )
+    _thead_hgemm_pad2d_kernel[(triton.cdiv(k_pad * n_pad, pad_block),)](
+        B, B_pad, k, n, ldb, n_pad, k_pad, n_pad, BLOCK_SIZE=pad_block
+    )
+    _run_thead_hgemm_tn(
+        A_pad, m_pad, B_pad, n_pad, C_pad, n_pad,
+        m_pad, n_pad, k_pad, alpha, 0.0, True, True,
+    )
+    _thead_hgemm_crop_c_kernel[(triton.cdiv(m * n, pad_block),)](
+        C_pad, C, beta, m, n, n_pad, ldc, beta_is_zero, BLOCK_SIZE=pad_block,
+    )
+
+
+def _run_thead_hgemm_nt_padded(
+    A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero
+):
+    """Pad A(M,K) and B(N,K) to multiples of 64, then crop result."""
+    m_pad = _round_up(m, 64)
+    n_pad = _round_up(n, 64)
+    k_pad = _round_up(k, 64)
+    A_pad = torch.empty((m_pad, k_pad), dtype=A.dtype, device=A.device)
+    B_pad = torch.empty((n_pad, k_pad), dtype=B.dtype, device=B.device)
+    C_pad = torch.empty((m_pad, n_pad), dtype=C.dtype, device=C.device)
+
+    pad_block = 1024
+    _thead_hgemm_pad2d_kernel[(triton.cdiv(m_pad * k_pad, pad_block),)](
+        A, A_pad, m, k, lda, k_pad, m_pad, k_pad, BLOCK_SIZE=pad_block
+    )
+    _thead_hgemm_pad2d_kernel[(triton.cdiv(n_pad * k_pad, pad_block),)](
+        B, B_pad, n, k, ldb, k_pad, n_pad, k_pad, BLOCK_SIZE=pad_block
+    )
+    _run_thead_hgemm_nt(
+        A_pad, k_pad, B_pad, k_pad, C_pad, n_pad,
+        m_pad, n_pad, k_pad, alpha, 0.0, True, True,
+    )
+    _thead_hgemm_crop_c_kernel[(triton.cdiv(m * n, pad_block),)](
+        C_pad, C, beta, m, n, n_pad, ldc, beta_is_zero, BLOCK_SIZE=pad_block,
+    )
+
+
+def _run_thead_hgemm_tt_padded(
+    A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero
+):
+    """Pad A(K,M) and B(N,K) to multiples of 64, then crop result."""
+    m_pad = _round_up(m, 64)
+    n_pad = _round_up(n, 64)
+    k_pad = _round_up(k, 64)
+    A_pad = torch.empty((k_pad, m_pad), dtype=A.dtype, device=A.device)
+    B_pad = torch.empty((n_pad, k_pad), dtype=B.dtype, device=B.device)
+    C_pad = torch.empty((m_pad, n_pad), dtype=C.dtype, device=C.device)
+
+    pad_block = 1024
+    _thead_hgemm_pad2d_kernel[(triton.cdiv(k_pad * m_pad, pad_block),)](
+        A, A_pad, k, m, lda, m_pad, k_pad, m_pad, BLOCK_SIZE=pad_block
+    )
+    _thead_hgemm_pad2d_kernel[(triton.cdiv(n_pad * k_pad, pad_block),)](
+        B, B_pad, n, k, ldb, k_pad, n_pad, k_pad, BLOCK_SIZE=pad_block
+    )
+    _run_thead_hgemm_tt(
+        A_pad, m_pad, B_pad, k_pad, C_pad, n_pad,
+        m_pad, n_pad, k_pad, alpha, 0.0, True, True,
+    )
+    _thead_hgemm_crop_c_kernel[(triton.cdiv(m * n, pad_block),)](
+        C_pad, C, beta, m, n, n_pad, ldc, beta_is_zero, BLOCK_SIZE=pad_block,
     )
 
 
@@ -931,17 +2098,96 @@ def hgemm(
                 A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero
             )
         elif transa == CUBLAS_OP_T and transb == CUBLAS_OP_N:
-            _hgemm_tn_kernel[grid](
-                A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero
-            )
+            if _can_use_thead_hgemm_tn(m, n, k, lda, ldb, ldc, alpha, beta):
+                if _thead_hgemm_tn_should_materialize(m, n, k):
+                    if m <= n:
+                        # M <= N: Materialize A^T as (M, K) and use fast NN kernel.
+                        # A is (K, M) with lda=M, A^T will be (M, K) with lda=K.
+                        A_T = A.T.contiguous()
+                        if _thead_hgemm_nn_should_pad(m, n, k) or _thead_hgemm_nt_should_pad(m, n, k):
+                            _run_thead_hgemm_nn_padded(
+                                A_T, k, B, ldb, C, ldc, m, n, k,
+                                alpha, beta, beta_is_zero,
+                            )
+                        else:
+                            _run_thead_hgemm_nn(
+                                A_T, k, B, ldb, C, ldc, m, n, k,
+                                alpha, beta, beta_is_zero,
+                                _is_gemm_aligned(A_T, k, B, ldb, C, ldc),
+                            )
+                    else:
+                        # N < M: Materialize B^T as (N, K) and use TT transpose-free kernel.
+                        # B is (K, N) with ldb=N, B^T will be (N, K) with lda_BT=K.
+                        # TT kernel computes C(M,N) = A^T(K,M) x B_T^T(K,N) = (M,K)x(K,N).
+                        B_T = B.T.contiguous()
+                        if _thead_hgemm_nn_should_pad(m, n, k) or _thead_hgemm_tt_should_pad(m, n, k):
+                            _run_thead_hgemm_tt_padded(
+                                A, lda, B_T, k, C, ldc, m, n, k,
+                                alpha, beta, beta_is_zero,
+                            )
+                        else:
+                            _run_thead_hgemm_tt(
+                                A, lda, B_T, k, C, ldc, m, n, k,
+                                alpha, beta, beta_is_zero,
+                                _is_gemm_aligned(A, lda, B_T, k, C, ldc),
+                            )
+                elif _thead_hgemm_tn_should_pad(m, n, k):
+                    _run_thead_hgemm_tn_padded(
+                        A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero
+                    )
+                else:
+                    _run_thead_hgemm_tn(
+                        A, lda, B, ldb, C, ldc, m, n, k,
+                        alpha, beta, beta_is_zero, aligned,
+                    )
+            else:
+                _hgemm_tn_kernel[grid](
+                    A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero
+                )
         elif transa == CUBLAS_OP_N and transb == CUBLAS_OP_T:
-            _hgemm_nt_kernel[grid](
-                A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero
-            )
+            if _can_use_thead_hgemm_nt(m, n, k, lda, ldb, ldc, alpha, beta):
+                if _thead_hgemm_nt_should_pad(m, n, k):
+                    _run_thead_hgemm_nt_padded(
+                        A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero
+                    )
+                else:
+                    _run_thead_hgemm_nt(
+                        A, lda, B, ldb, C, ldc, m, n, k,
+                        alpha, beta, beta_is_zero, aligned,
+                    )
+            else:
+                _hgemm_nt_kernel[grid](
+                    A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero
+                )
         else:
-            _hgemm_tt_kernel[grid](
-                A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero
-            )
+            if _can_use_thead_hgemm_tt(m, n, k, lda, ldb, ldc, alpha, beta):
+                if _thead_hgemm_tt_should_materialize(m, n, k):
+                    # Compute C^T(N,M) = B(N,K) x A(K,M) using NN kernel directly.
+                    # No transpose of A or B needed — just swap operands.
+                    # C_T = alpha * B x A, then C = beta * C + C_T^T.
+                    C_T = torch.empty((n, m), dtype=C.dtype, device=C.device)
+                    _run_thead_hgemm_nn(
+                        B, ldb, A, lda, C_T, m, n, m, k,
+                        alpha, 0.0, True, aligned,
+                    )
+                    if beta_is_zero:
+                        C.copy_(C_T.T)
+                    else:
+                        # C.copy_(beta * C_old + C_T.T)
+                        C.mul_(beta).add_(C_T.T)
+                elif _thead_hgemm_tt_should_pad(m, n, k):
+                    _run_thead_hgemm_tt_padded(
+                        A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero
+                    )
+                else:
+                    _run_thead_hgemm_tt(
+                        A, lda, B, ldb, C, ldc, m, n, k,
+                        alpha, beta, beta_is_zero, aligned,
+                    )
+            else:
+                _hgemm_tt_kernel[grid](
+                    A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero
+                )
 
 
 __all__ = ["hgemm"]

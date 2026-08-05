@@ -2314,6 +2314,9 @@ def _thead_nn_tf32_config(m: int, n: int, k: int):
     if min_mn <= 64:
         return 32, 32, 32, 4, 3
 
+    if m == n == k == 1023:
+        return 128, 128, 32, 8, 3
+
     if max_mn <= 512 and k <= 512:
         return 32, 32, 32, 4, 3
 
@@ -2540,6 +2543,76 @@ def _can_use_thead_nn_511(
     return m == n == k == 511 and lda == k and ldb == n and ldc == n
 
 
+def _can_use_thead_nn_odd_padded(
+    m: int, n: int, k: int, lda: int, ldb: int, ldc: int, alpha, beta
+) -> bool:
+    """Pad N and K when any dimension is not aligned to 64.
+    
+    On padded dimensions the kernel runs mask-free, eliminating
+    per-tile boundary-check overhead that hurts odd shapes.
+    Only applied when min(m,n,k) >= 2048 to avoid kernel-launch
+    overhead dominating on small shapes."""
+    return (
+        lda == k
+        and ldb == n
+        and ldc == n
+        and m >= 64
+        and n >= 64
+        and k >= 64
+        and min(m, n, k) >= 2048
+        and (n % 64 != 0 or k % 64 != 0)
+    )
+
+
+def _run_sgemm_nn_odd_padded(A, B, C, m, n, k, alpha, beta, beta_is_zero):
+    """Pad N and K to multiples of 64, run fp32 kernel, crop back to C."""
+    k_pad = _align_up(k, 64)
+    n_pad = _align_up(n, 64)
+
+    A_pad = torch.empty((m, k_pad), device=A.device, dtype=torch.float32)
+    B_pad = torch.empty((k_pad, n_pad), device=B.device, dtype=torch.float32)
+    C_pad = torch.empty((m, n_pad), device=C.device, dtype=torch.float32)
+
+    _pad_sgemm_matrix(A, A_pad, m, k, k, k_pad, m, k_pad)
+    _pad_sgemm_matrix(B, B_pad, k, n, n, n_pad, k_pad, n_pad)
+
+    block_m, block_n, block_k, num_warps, num_stages = _thead_nn_tf32_config(
+        m, n_pad, k_pad
+    )
+    maxnreg = _thead_nn_fp32_maxnreg(m, n_pad, k_pad)
+    grid = (triton.cdiv(m, block_m) * triton.cdiv(n_pad, block_n),)
+
+    kernel = (
+        _thead_sgemm_nn_fp32_bwd_kernel
+        if _thead_nn_use_bwd_codegen(m, n_pad, k_pad)
+        else _thead_sgemm_nn_fp32_kernel
+    )
+    kernel[grid](
+        A_pad,
+        B_pad,
+        C_pad,
+        alpha,
+        0.0,
+        k_pad,
+        n_pad,
+        n_pad,
+        True,
+        M=m,
+        N=n_pad,
+        K=k_pad,
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        BLOCK_K=block_k,
+        GROUP_M=8,
+        USE_TF32X3=_thead_nn_use_tf32x3(m, n_pad, k_pad),
+        num_warps=num_warps,
+        num_stages=num_stages,
+        maxnreg=maxnreg,
+    )
+
+    _crop_sgemm_c(C_pad, C, m, n, n_pad, n, beta, beta_is_zero)
+
+
 def _pad_sgemm_matrix(src, dst, rows, cols, src_ld, dst_ld, dst_rows, dst_cols):
     grid = (triton.cdiv(dst_rows * dst_cols, 1024),)
     _sgemm_pad2d_kernel[
@@ -2577,11 +2650,19 @@ def _run_sgemm_nn_square_odd_padded(A, B, C, m, n, k, alpha, beta, beta_is_zero)
     C_pad = torch.empty((size_pad, size_pad), device=C.device, dtype=torch.float32)
     _pad_sgemm_matrix(A, A_pad, m, k, k, size_pad, size_pad, size_pad)
     _pad_sgemm_matrix(B, B_pad, k, n, n, size_pad, size_pad, size_pad)
-    block_m, block_n, block_k, num_warps, num_stages = 64, 64, 32, 4, 3
-    if size_pad == 1024:
+
+    # Config: use larger tiles for larger padded sizes
+    if size_pad <= 512:
         block_m, block_n, block_k, num_warps, num_stages = 64, 64, 32, 4, 3
+    elif size_pad <= 1024:
+        block_m, block_n, block_k, num_warps, num_stages = 128, 64, 32, 8, 3
+    else:
+        block_m, block_n, block_k, num_warps, num_stages = (
+            _thead_nn_tf32_config(size_pad, size_pad, size_pad)
+        )
+
     grid = (triton.cdiv(size_pad, block_m) * triton.cdiv(size_pad, block_n),)
-    _thead_sgemm_nn_tf32_kernel[grid](
+    _thead_sgemm_nn_fp32_kernel[grid](
         A_pad,
         B_pad,
         C_pad,
@@ -2590,16 +2671,18 @@ def _run_sgemm_nn_square_odd_padded(A, B, C, m, n, k, alpha, beta, beta_is_zero)
         size_pad,
         size_pad,
         size_pad,
-        size_pad,
-        size_pad,
-        size_pad,
         True,
+        M=size_pad,
+        N=size_pad,
+        K=size_pad,
         BLOCK_M=block_m,
         BLOCK_N=block_n,
         BLOCK_K=block_k,
         GROUP_M=8,
+        USE_TF32X3=False,
         num_warps=num_warps,
         num_stages=num_stages,
+        maxnreg=128,
     )
     _crop_sgemm_c(C_pad, C, m, n, size_pad, n, beta, beta_is_zero)
 
@@ -4325,7 +4408,15 @@ def sgemm(
 
     with torch_device_fn.device(A.device):
         if transa == CUBLAS_OP_N and transb == CUBLAS_OP_N:
-            if _can_use_thead_nn_tf32(m, n, k, lda, ldb, ldc, alpha, beta):
+            if _can_use_thead_nn_511(m, n, k, lda, ldb, ldc, alpha, beta):
+                _run_sgemm_nn_511(
+                    A, B, C, alpha, beta, beta_is_zero
+                )
+            elif _can_use_thead_nn_odd_padded(m, n, k, lda, ldb, ldc, alpha, beta):
+                _run_sgemm_nn_odd_padded(
+                    A, B, C, m, n, k, alpha, beta, beta_is_zero
+                )
+            elif _can_use_thead_nn_tf32(m, n, k, lda, ldb, ldc, alpha, beta):
                 _run_sgemm_nn_tf32(
                     A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero
                 )
