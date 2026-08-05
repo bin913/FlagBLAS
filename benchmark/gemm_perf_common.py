@@ -213,8 +213,8 @@ def cublas_hgemm(
         C_col.data_ptr(),
         CUDA_R_16F,
         ldc_cublas,
-        CUDA_R_32F,
-        0,
+        cublas.CUBLAS_COMPUTE_32F,
+        cublas.CUBLAS_GEMM_DEFAULT,
     )
     return C_col
 

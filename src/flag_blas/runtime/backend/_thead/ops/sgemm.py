@@ -1278,6 +1278,227 @@ def _sgemm_nn_descriptor_manual_kernel(
 
 
 @libentry()
+@triton.jit
+def _sgemm_tn_descriptor_manual_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    beta: tl.float32,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    BETA_IS_ZERO: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+):
+    """Descriptor-based TN kernel without autotuner.
+    A is (k, m) stored with lda, B is (k, n) stored with ldb.
+    C = A^T @ B."""
+    pid = tl.program_id(0)
+
+    grid_m = tl.cdiv(m, BLOCK_M)
+    grid_n = tl.cdiv(n, BLOCK_N)
+    width = GROUP_M * grid_n
+    group_id = pid // width
+    group_size = min(grid_m - group_id * GROUP_M, GROUP_M)
+    pid_m = group_id * GROUP_M + (pid % group_size)
+    pid_n = (pid % width) // group_size
+
+    a_block_ptr = tl.make_block_ptr(
+        base=a_ptr,
+        shape=(k, m),
+        strides=(lda, 1),
+        offsets=(0, pid_m * BLOCK_M),
+        block_shape=(BLOCK_K, BLOCK_M),
+        order=(1, 0),
+    )
+
+    b_block_ptr = tl.make_block_ptr(
+        base=b_ptr,
+        shape=(k, n),
+        strides=(ldb, 1),
+        offsets=(0, pid_n * BLOCK_N),
+        block_shape=(BLOCK_K, BLOCK_N),
+        order=(1, 0),
+    )
+
+    c_block_ptr = tl.make_block_ptr(
+        base=c_ptr,
+        shape=(m, n),
+        strides=(ldc, 1),
+        offsets=(pid_m * BLOCK_M, pid_n * BLOCK_N),
+        block_shape=(BLOCK_M, BLOCK_N),
+        order=(1, 0),
+    )
+
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+
+    for _ in range(0, tl.cdiv(k, BLOCK_K)):
+        a_t = tl.load(a_block_ptr, boundary_check=(0, 1))
+        b = tl.load(b_block_ptr, boundary_check=(0, 1))
+        a = tl.trans(a_t)
+        acc = tl.dot(a, b, acc, out_dtype=tl.float32, allow_tf32=False)
+        a_block_ptr = tl.advance(a_block_ptr, (BLOCK_K, 0))
+        b_block_ptr = tl.advance(b_block_ptr, (BLOCK_K, 0))
+
+    if BETA_IS_ZERO:
+        result = (alpha * acc).to(tl.float32)
+        tl.store(c_block_ptr, result, boundary_check=(0, 1))
+    else:
+        c_vals = tl.load(c_block_ptr, boundary_check=(0, 1)).to(tl.float32)
+        result = (alpha * acc + beta * c_vals).to(tl.float32)
+        tl.store(c_block_ptr, result, boundary_check=(0, 1))
+
+
+@libentry()
+@triton.jit
+def _sgemm_nt_descriptor_manual_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    beta: tl.float32,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    BETA_IS_ZERO: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+):
+    """Descriptor-based NT kernel without autotuner.
+    A is (m, k) stored with lda, B is (n, k) stored with ldb.
+    C = A @ B^T."""
+    a_ptr = a_ptr.to(tl.pointer_type(tl.float32))
+    b_ptr = b_ptr.to(tl.pointer_type(tl.float32))
+    c_ptr = c_ptr.to(tl.pointer_type(tl.float32))
+
+    pid = tl.program_id(0)
+
+    grid_m = tl.cdiv(m, BLOCK_M)
+    grid_n = tl.cdiv(n, BLOCK_N)
+    width = GROUP_M * grid_n
+    group_id = pid // width
+    group_size = min(grid_m - group_id * GROUP_M, GROUP_M)
+    pid_m = group_id * GROUP_M + (pid % group_size)
+    pid_n = (pid % width) // group_size
+
+    a_desc = tl.make_tensor_descriptor(
+        a_ptr, shape=[m, k], strides=[lda, 1], block_shape=[BLOCK_M, BLOCK_K]
+    )
+    b_desc = tl.make_tensor_descriptor(
+        b_ptr, shape=[n, k], strides=[ldb, 1], block_shape=[BLOCK_N, BLOCK_K]
+    )
+    c_desc = tl.make_tensor_descriptor(
+        c_ptr, shape=[m, n], strides=[ldc, 1], block_shape=[BLOCK_M, BLOCK_N]
+    )
+
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+
+    for i in range(0, tl.cdiv(k, BLOCK_K)):
+        a_t = a_desc.load([pid_m * BLOCK_M, i * BLOCK_K])
+        b_t = b_desc.load([pid_n * BLOCK_N, i * BLOCK_K])
+        acc = tl.dot(
+            a_t, tl.trans(b_t), acc, out_dtype=tl.float32, allow_tf32=False)
+
+    if BETA_IS_ZERO:
+        result = (alpha * acc).to(tl.float32)
+        c_desc.store([pid_m * BLOCK_M, pid_n * BLOCK_N], result)
+    else:
+        c_vals = c_desc.load([pid_m * BLOCK_M, pid_n * BLOCK_N]).to(tl.float32)
+        result = (alpha * acc + beta * c_vals).to(tl.float32)
+        c_desc.store([pid_m * BLOCK_M, pid_n * BLOCK_N], result)
+
+
+@libentry()
+@triton.jit
+def _sgemm_tt_descriptor_manual_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    beta: tl.float32,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    BETA_IS_ZERO: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+):
+    """Descriptor-based TT kernel without autotuner.
+    A is (k, m) stored with lda (transposed), B is (k, n) stored with ldb (transposed).
+    C = A^T @ B^T."""
+    pid = tl.program_id(0)
+
+    grid_m = tl.cdiv(m, BLOCK_M)
+    grid_n = tl.cdiv(n, BLOCK_N)
+    width = GROUP_M * grid_n
+    group_id = pid // width
+    group_size = min(grid_m - group_id * GROUP_M, GROUP_M)
+    pid_m = group_id * GROUP_M + (pid % group_size)
+    pid_n = (pid % width) // group_size
+
+    a_block_ptr = tl.make_block_ptr(
+        base=a_ptr,
+        shape=(m, k),
+        strides=(1, lda),
+        offsets=(pid_m * BLOCK_M, 0),
+        block_shape=(BLOCK_M, BLOCK_K),
+        order=(0, 1),
+    )
+
+    b_block_ptr = tl.make_block_ptr(
+        base=b_ptr,
+        shape=(k, n),
+        strides=(1, ldb),
+        offsets=(0, pid_n * BLOCK_N),
+        block_shape=(BLOCK_K, BLOCK_N),
+        order=(0, 1),
+    )
+
+    c_block_ptr = tl.make_block_ptr(
+        base=c_ptr,
+        shape=(m, n),
+        strides=(ldc, 1),
+        offsets=(pid_m * BLOCK_M, pid_n * BLOCK_N),
+        block_shape=(BLOCK_M, BLOCK_N),
+        order=(1, 0),
+    )
+
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+
+    for _ in range(0, tl.cdiv(k, BLOCK_K)):
+        a = tl.load(a_block_ptr, boundary_check=(0, 1))
+        b = tl.load(b_block_ptr, boundary_check=(0, 1))
+        acc = tl.dot(a, b, acc, out_dtype=tl.float32, allow_tf32=False)
+        a_block_ptr = tl.advance(a_block_ptr, (0, BLOCK_K))
+        b_block_ptr = tl.advance(b_block_ptr, (BLOCK_K, 0))
+
+    if BETA_IS_ZERO:
+        result = (alpha * acc).to(tl.float32)
+        tl.store(c_block_ptr, result, boundary_check=(0, 1))
+    else:
+        c_vals = tl.load(c_block_ptr, boundary_check=(0, 1)).to(tl.float32)
+        result = (alpha * acc + beta * c_vals).to(tl.float32)
+        tl.store(c_block_ptr, result, boundary_check=(0, 1))
+
+
+@libentry()
 @libtuner(
     configs=runtime.get_tuned_config("sgemm"), key=_SGEMM_KEY, restore_value=["c_ptr"]
 )
@@ -2674,6 +2895,224 @@ def _run_sgemm_nn_descriptor(A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_
     )
 
 
+def _can_use_thead_nt_descriptor(
+    m: int, n: int, k: int, lda: int, ldb: int, ldc: int, alpha, beta
+) -> bool:
+    """Use manual descriptor config for NT aligned shapes >= 64.
+    A is (m, k) contiguous, B is (n, k) contiguous (transposed), C is (m, n) contiguous."""
+    return (
+        lda == k
+        and ldb == k
+        and ldc == n
+        and m >= 64
+        and n >= 64
+        and k >= 64
+    )
+
+
+def _sgemm_nt_descriptor_config(m: int, n: int, k: int):
+    """Select optimal tile config for NT descriptor kernel."""
+    min_mn = min(m, n)
+    max_mn = max(m, n)
+
+    if max_mn <= 128 and k <= 128:
+        return 64, 64, 64, 4, 3
+
+    if max_mn <= 256 and k <= 256:
+        return 64, 64, 64, 4, 4
+
+    if max_mn <= 1024:
+        if min_mn <= 64:
+            if m <= 64:
+                return 64, 128, 64, 4, 4
+            return 128, 64, 64, 4, 4
+        return 128, 128, 32, 8, 4
+
+    if min_mn <= 64:
+        if m <= 64:
+            if n >= 4096:
+                return 64, 256, 64, 8, 3
+            return 64, 128, 64, 4, 4
+        if n <= 64:
+            if m >= 4096:
+                return 256, 64, 64, 8, 3
+            return 128, 64, 64, 4, 4
+        return 64, 64, 64, 4, 4
+
+    if m >= n * 3:
+        return 256, 64, 64, 8, 3
+    if n >= m * 3:
+        return 64, 256, 64, 8, 3
+    if m >= n * 1.5:
+        return 256, 128, 32, 8, 4
+    if n >= m * 1.5:
+        return 128, 256, 32, 8, 4
+
+    if min_mn >= 8192:
+        return 256, 256, 32, 8, 3
+    if min_mn >= 4096:
+        return 128, 128, 64, 8, 3
+    if min_mn >= 2048:
+        return 128, 128, 32, 8, 4
+    return 128, 128, 32, 8, 4
+
+
+def _run_sgemm_nt_descriptor(A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero):
+    """Run NT sgemm using the descriptor kernel with manual config."""
+    block_m, block_n, block_k, num_warps, num_stages = _sgemm_nt_descriptor_config(m, n, k)
+    grid = (triton.cdiv(m, block_m) * triton.cdiv(n, block_n),)
+    _sgemm_nt_descriptor_manual_kernel[grid](
+        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero,
+        BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k,
+        GROUP_M=8, num_warps=num_warps, num_stages=num_stages,
+    )
+
+
+def _can_use_thead_tn_descriptor(
+    m: int, n: int, k: int, lda: int, ldb: int, ldc: int, alpha, beta
+) -> bool:
+    """Use manual descriptor config for TN aligned shapes >= 64."""
+    return (
+        lda == m
+        and ldb == n
+        and ldc == n
+        and m >= 64
+        and n >= 64
+        and k >= 64
+    )
+
+
+def _sgemm_tn_descriptor_config(m: int, n: int, k: int):
+    """Select optimal tile config for TN descriptor kernel."""
+    min_mn = min(m, n)
+    max_mn = max(m, n)
+
+    if max_mn <= 128 and k <= 128:
+        return 64, 64, 64, 4, 3
+
+    if max_mn <= 256 and k <= 256:
+        return 64, 64, 64, 4, 4
+
+    if max_mn <= 1024:
+        if min_mn <= 64:
+            if m <= 64:
+                return 64, 128, 64, 4, 4
+            return 128, 64, 64, 4, 4
+        return 128, 128, 32, 8, 4
+
+    if min_mn <= 64:
+        if m <= 64:
+            if n >= 4096:
+                return 64, 256, 64, 8, 3
+            return 64, 128, 64, 4, 4
+        if n <= 64:
+            if m >= 4096:
+                return 256, 64, 64, 8, 3
+            return 128, 64, 64, 4, 4
+        return 64, 64, 64, 4, 4
+
+    if m >= n * 3:
+        return 256, 64, 64, 8, 3
+    if n >= m * 3:
+        return 64, 256, 64, 8, 3
+    if m >= n * 1.5:
+        return 256, 128, 32, 8, 4
+    if n >= m * 1.5:
+        return 128, 256, 32, 8, 4
+
+    if min_mn >= 8192:
+        return 256, 256, 32, 8, 3
+    if min_mn >= 4096:
+        return 128, 128, 64, 8, 3
+    if min_mn >= 2048:
+        return 128, 128, 32, 8, 4
+    return 128, 128, 32, 8, 4
+
+
+def _run_sgemm_tn_descriptor(A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero):
+    """Run TN sgemm using the descriptor kernel with manual config."""
+    block_m, block_n, block_k, num_warps, num_stages = _sgemm_tn_descriptor_config(m, n, k)
+    grid = (triton.cdiv(m, block_m) * triton.cdiv(n, block_n),)
+    _sgemm_tn_descriptor_manual_kernel[grid](
+        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero,
+        BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k,
+        GROUP_M=8, num_warps=num_warps, num_stages=num_stages,
+    )
+
+
+def _can_use_thead_tt_descriptor(
+    m: int, n: int, k: int, lda: int, ldb: int, ldc: int, alpha, beta
+) -> bool:
+    """Use manual descriptor config for TT aligned shapes >= 64.
+    A is (k, m) stored with lda == m, B is (n, k) stored with ldb == k, C is (m, n) contiguous."""
+    return (
+        lda == m
+        and ldb == k
+        and ldc == n
+        and m >= 64
+        and n >= 64
+        and k >= 64
+    )
+
+
+def _sgemm_tt_descriptor_config(m: int, n: int, k: int):
+    """Select optimal tile config for TT descriptor kernel."""
+    min_mn = min(m, n)
+    max_mn = max(m, n)
+
+    if max_mn <= 128 and k <= 128:
+        return 64, 64, 64, 4, 3
+
+    if max_mn <= 256 and k <= 256:
+        return 64, 64, 64, 4, 4
+
+    if max_mn <= 1024:
+        if min_mn <= 64:
+            if m <= 64:
+                return 64, 128, 64, 4, 4
+            return 128, 64, 64, 4, 4
+        return 128, 128, 32, 8, 4
+
+    if min_mn <= 64:
+        if m <= 64:
+            if n >= 4096:
+                return 64, 256, 64, 8, 3
+            return 64, 128, 64, 4, 4
+        if n <= 64:
+            if m >= 4096:
+                return 256, 64, 64, 8, 3
+            return 128, 64, 64, 4, 4
+        return 64, 64, 64, 4, 4
+
+    if m >= n * 3:
+        return 256, 64, 64, 8, 3
+    if n >= m * 3:
+        return 64, 256, 64, 8, 3
+    if m >= n * 1.5:
+        return 256, 128, 32, 8, 4
+    if n >= m * 1.5:
+        return 128, 256, 32, 8, 4
+
+    if min_mn >= 8192:
+        return 256, 256, 32, 8, 3
+    if min_mn >= 4096:
+        return 128, 128, 64, 8, 3
+    if min_mn >= 2048:
+        return 128, 128, 32, 8, 4
+    return 128, 128, 32, 8, 4
+
+
+def _run_sgemm_tt_descriptor(A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero):
+    """Run TT sgemm using the descriptor kernel with manual config."""
+    block_m, block_n, block_k, num_warps, num_stages = _sgemm_tt_descriptor_config(m, n, k)
+    grid = (triton.cdiv(m, block_m) * triton.cdiv(n, block_n),)
+    _sgemm_tt_descriptor_manual_kernel[grid](
+        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero,
+        BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k,
+        GROUP_M=8, num_warps=num_warps, num_stages=num_stages,
+    )
+
+
 def _run_sgemm_nn_nomask(A, lda, B, ldb, C, ldc, m, n, k, alpha):
     grid = (triton.cdiv(m, 128) * triton.cdiv(n, 128),)
     _thead_sgemm_nn_nomask_kernel[grid](
@@ -3911,7 +4350,11 @@ def sgemm(
                 runner = dispatch.lookup_and_build(m, n, k, aligned, snapshot_tensor=C)
                 runner()
         elif transa == CUBLAS_OP_T and transb == CUBLAS_OP_N:
-            if m == n == k == 511:
+            if _can_use_thead_tn_descriptor(m, n, k, lda, ldb, ldc, alpha, beta):
+                _run_sgemm_tn_descriptor(
+                    A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero
+                )
+            elif m == n == k == 511:
                 _run_sgemm_tn_square_odd(
                     A, lda, B, ldb, C, ldc, m, alpha, beta, beta_is_zero
                 )
@@ -3938,31 +4381,40 @@ def sgemm(
                 runner = dispatch.lookup_and_build(m, n, k, aligned, snapshot_tensor=C)
                 runner()
         elif transa == CUBLAS_OP_N and transb == CUBLAS_OP_T:
-            runner = _SGEMM_NT_DISPATCH.lookup_and_build(
-                m,
-                n,
-                k,
-                aligned,
-                context=dict(
-                    A=A,
-                    lda=lda,
-                    B=B,
-                    ldb=ldb,
-                    C=C,
-                    ldc=ldc,
-                    m=m,
-                    n=n,
-                    k=k,
-                    alpha=alpha,
-                    beta=beta,
-                    beta_is_zero=beta_is_zero,
-                    grid=grid,
-                    aligned=aligned,
-                ),
-            )
-            runner()
+            if _can_use_thead_nt_descriptor(m, n, k, lda, ldb, ldc, alpha, beta):
+                _run_sgemm_nt_descriptor(
+                    A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero
+                )
+            else:
+                runner = _SGEMM_NT_DISPATCH.lookup_and_build(
+                    m,
+                    n,
+                    k,
+                    aligned,
+                    context=dict(
+                        A=A,
+                        lda=lda,
+                        B=B,
+                        ldb=ldb,
+                        C=C,
+                        ldc=ldc,
+                        m=m,
+                        n=n,
+                        k=k,
+                        alpha=alpha,
+                        beta=beta,
+                        beta_is_zero=beta_is_zero,
+                        grid=grid,
+                        aligned=aligned,
+                    ),
+                )
+                runner()
         else:
-            if m == n == k == 511:
+            if _can_use_thead_tt_descriptor(m, n, k, lda, ldb, ldc, alpha, beta):
+                _run_sgemm_tt_descriptor(
+                    A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero
+                )
+            elif m == n == k == 511:
                 _run_sgemm_tt_511(A, lda, B, ldb, C, ldc, alpha, beta, beta_is_zero)
             else:
                 dispatch = _build_sgemm_tt_dispatch_table(
