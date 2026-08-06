@@ -251,6 +251,36 @@ def _thead_hgemm_transpose_c_kernel(
 
 @libentry()
 @triton.jit
+def _thead_hgemm_transpose2d_kernel(
+    src_ptr,
+    dst_ptr,
+    rows: tl.constexpr,
+    cols: tl.constexpr,
+    src_ld,
+    dst_ld,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    src_ptr = src_ptr.to(tl.pointer_type(tl.float16))
+    dst_ptr = dst_ptr.to(tl.pointer_type(tl.float16))
+
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    mask = (offs_m[:, None] < rows) & (offs_n[None, :] < cols)
+
+    vals = tl.load(
+        src_ptr + offs_m[:, None] * src_ld + offs_n[None, :],
+        mask=mask,
+        other=0.0,
+    )
+    dst_offsets = offs_n[None, :] * dst_ld + offs_m[:, None]
+    tl.store(dst_ptr + dst_offsets, vals, mask=mask)
+
+
+@libentry()
+@triton.jit
 def _thead_hgemm_zero_f32_kernel(
     ptr,
     total,
@@ -2066,6 +2096,15 @@ def _thead_hgemm_nt_should_pad(m: int, n: int, k: int) -> bool:
     return m * n * k >= 256 * 256 * 256 and extra <= original * 1.15
 
 
+def _thead_hgemm_nt_should_materialize(m: int, n: int, k: int) -> bool:
+    """Materialize B^T for odd NT cases where padding wastes too much time."""
+    if m % 64 == 0 and n % 64 == 0 and k % 64 == 0:
+        return False
+    if max(m, n, k) <= 1024:
+        return True
+    return m != n and m * n * k >= 256 * 256 * 256
+
+
 def _thead_hgemm_tt_should_pad(m: int, n: int, k: int) -> bool:
     """Pad TT when non-aligned and overhead is reasonable."""
     if m % 64 == 0 and n % 64 == 0 and k % 64 == 0:
@@ -2079,23 +2118,130 @@ def _thead_hgemm_tt_should_pad(m: int, n: int, k: int) -> bool:
 
 
 def _thead_hgemm_tt_should_materialize(m: int, n: int, k: int) -> bool:
-    """Materialize C^T for small odd TT cases where padding overhead dominates."""
-    if m != n or n != k:
-        return False
+    """Materialize C^T for odd TT cases where padding overhead dominates."""
     if m % 64 == 0:
         return False
-    return max(m, n, k) <= 1024
+    if m == n and n == k:
+        return max(m, n, k) <= 1024
+    if m != n and m * n * k >= 256 * 256 * 256:
+        return True
+    return False
+
+
+def _thead_hgemm_transpose2d(src, rows: int, cols: int, src_ld: int):
+    if rows <= 512 and cols <= 512:
+        block_m, block_n = 64, 16
+    elif rows <= 1024 and cols <= 1024:
+        block_m, block_n = 32, 32
+    else:
+        block_m, block_n = 16, 64
+
+    dst = torch.empty((cols, rows), dtype=src.dtype, device=src.device)
+    _thead_hgemm_transpose2d_kernel[
+        (triton.cdiv(rows, block_m), triton.cdiv(cols, block_n))
+    ](
+        src,
+        dst,
+        rows,
+        cols,
+        src_ld,
+        rows,
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        num_warps=4,
+    )
+    return dst
+
+
+def _run_thead_hgemm_nt_materialized(
+    A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero
+):
+    B_T = _thead_hgemm_transpose2d(B, n, k, ldb)
+    if _thead_hgemm_nn_should_pad(m, n, k):
+        _run_thead_hgemm_nn_padded(
+            A, lda, B_T, n, C, ldc, m, n, k, alpha, beta, beta_is_zero
+        )
+    else:
+        _run_thead_hgemm_nn(
+            A,
+            lda,
+            B_T,
+            n,
+            C,
+            ldc,
+            m,
+            n,
+            k,
+            alpha,
+            beta,
+            beta_is_zero,
+            True,
+        )
+
+
+def _run_thead_hgemm_tn_materialize_a(
+    A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero
+):
+    A_T = _thead_hgemm_transpose2d(A, k, m, lda)
+    _run_thead_hgemm_nn(
+        A_T,
+        k,
+        B,
+        ldb,
+        C,
+        ldc,
+        m,
+        n,
+        k,
+        alpha,
+        beta,
+        beta_is_zero,
+        True,
+    )
+
+
+def _run_thead_hgemm_tn_materialize_b(
+    A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero
+):
+    B_T = _thead_hgemm_transpose2d(B, k, n, ldb)
+    _run_thead_hgemm_tt(
+        A,
+        lda,
+        B_T,
+        k,
+        C,
+        ldc,
+        m,
+        n,
+        k,
+        alpha,
+        beta,
+        beta_is_zero,
+        True,
+    )
 
 
 def _run_thead_hgemm_tt_materialized(
     A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero
 ):
     C_T = torch.empty((n, m), dtype=C.dtype, device=C.device)
-    _run_thead_hgemm_nn(
-        B, ldb, A, lda, C_T, m, n, m, k, alpha, 0.0, True, True
-    )
+    if _thead_hgemm_nn_should_pad(n, m, k):
+        _run_thead_hgemm_nn_padded(
+            B, ldb, A, lda, C_T, m, n, m, k, alpha, 0.0, True
+        )
+    else:
+        _run_thead_hgemm_nn(
+            B, ldb, A, lda, C_T, m, n, m, k, alpha, 0.0, True, True
+        )
+
+    if m <= 512 and n <= 512:
+        block_m, block_n = 8, 64
+    elif m * n >= 2048 * 2048 and m != n:
+        block_m, block_n = 16, 128
+    else:
+        block_m, block_n = 16, 64
     _thead_hgemm_transpose_c_kernel[
-        (triton.cdiv(m, 16), triton.cdiv(n, 64))
+        (triton.cdiv(m, block_m), triton.cdiv(n, block_n))
     ](
         C_T,
         C,
@@ -2105,8 +2251,8 @@ def _run_thead_hgemm_tt_materialized(
         m,
         ldc,
         beta_is_zero,
-        BLOCK_M=16,
-        BLOCK_N=64,
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
         num_warps=4,
     )
 
@@ -2396,45 +2542,41 @@ def hgemm(
                     if m <= n:
                         # M <= N: Materialize A^T as (M, K) and use fast NN kernel.
                         # A is (K, M) with lda=M, A^T will be (M, K) with lda=K.
-                        A_T = A.T.contiguous()
                         if max(m, n, k) <= 1024:
-                            _run_thead_hgemm_nn(
-                                A_T, k, B, ldb, C, ldc, m, n, k,
+                            _run_thead_hgemm_tn_materialize_a(
+                                A, lda, B, ldb, C, ldc, m, n, k,
                                 alpha, beta, beta_is_zero,
-                                _is_gemm_aligned(A_T, k, B, ldb, C, ldc),
                             )
                         elif _thead_hgemm_nn_should_pad(m, n, k) or _thead_hgemm_nt_should_pad(m, n, k):
+                            A_T = _thead_hgemm_transpose2d(A, k, m, lda)
                             _run_thead_hgemm_nn_padded(
                                 A_T, k, B, ldb, C, ldc, m, n, k,
                                 alpha, beta, beta_is_zero,
                             )
                         else:
-                            _run_thead_hgemm_nn(
-                                A_T, k, B, ldb, C, ldc, m, n, k,
+                            _run_thead_hgemm_tn_materialize_a(
+                                A, lda, B, ldb, C, ldc, m, n, k,
                                 alpha, beta, beta_is_zero,
-                                _is_gemm_aligned(A_T, k, B, ldb, C, ldc),
                             )
                     else:
                         # N < M: Materialize B^T as (N, K) and use TT transpose-free kernel.
                         # B is (K, N) with ldb=N, B^T will be (N, K) with lda_BT=K.
                         # TT kernel computes C(M,N) = A^T(K,M) x B_T^T(K,N) = (M,K)x(K,N).
-                        B_T = B.T.contiguous()
                         if max(m, n, k) <= 1024:
-                            _run_thead_hgemm_tt(
-                                A, lda, B_T, k, C, ldc, m, n, k,
+                            _run_thead_hgemm_tn_materialize_b(
+                                A, lda, B, ldb, C, ldc, m, n, k,
                                 alpha, beta, beta_is_zero,
-                                _is_gemm_aligned(A, lda, B_T, k, C, ldc),
                             )
                         elif _thead_hgemm_nn_should_pad(m, n, k) or _thead_hgemm_tt_should_pad(m, n, k):
+                            B_T = _thead_hgemm_transpose2d(B, k, n, ldb)
                             _run_thead_hgemm_tt_padded(
                                 A, lda, B_T, k, C, ldc, m, n, k,
                                 alpha, beta, beta_is_zero,
                             )
                         else:
-                            _run_thead_hgemm_tt(
-                                A, lda, B_T, k, C, ldc, m, n, k,
+                            _run_thead_hgemm_tn_materialize_b(
+                                A, lda, B, ldb, C, ldc, m, n, k,
                                 alpha, beta, beta_is_zero,
-                                _is_gemm_aligned(A, lda, B_T, k, C, ldc),
                             )
                 elif _thead_hgemm_tn_should_pad(m, n, k):
                     _run_thead_hgemm_tn_padded(
@@ -2451,7 +2593,11 @@ def hgemm(
                 )
         elif transa == CUBLAS_OP_N and transb == CUBLAS_OP_T:
             if _can_use_thead_hgemm_nt(m, n, k, lda, ldb, ldc, alpha, beta):
-                if _thead_hgemm_nt_should_pad(m, n, k):
+                if _thead_hgemm_nt_should_materialize(m, n, k):
+                    _run_thead_hgemm_nt_materialized(
+                        A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero
+                    )
+                elif _thead_hgemm_nt_should_pad(m, n, k):
                     _run_thead_hgemm_nt_padded(
                         A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero
                     )
