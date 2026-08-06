@@ -53,6 +53,7 @@ def _hgemm_kernel(
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
     GROUP_M: tl.constexpr,
+    UNROLL: tl.constexpr,
 ):
     pid = tl.program_id(0)
     grid_m = tl.cdiv(m, BLOCK_M)
@@ -112,19 +113,74 @@ def _hgemm_kernel(
             b = tl.load(b_ptrs, mask=b_mask, other=0.0, cache_modifier=CACHE)
             acc = tl.dot(a, b, acc, out_dtype=tl.float32, allow_tf32=False)
     else:
-        for k_start in range(0, k, BLOCK_K):
-            offs_k = k_start + offs_k_base
-            if TRANS_A:
-                a_ptrs = a_ptr + offs_k[None, :] * lda + offs_m[:, None]
-            else:
-                a_ptrs = a_ptr + offs_m[:, None] * lda + offs_k[None, :]
-            if TRANS_B:
-                b_ptrs = b_ptr + offs_n[None, :] * ldb + offs_k[:, None]
-            else:
-                b_ptrs = b_ptr + offs_k[:, None] * ldb + offs_n[None, :]
-            a = tl.load(a_ptrs, cache_modifier=CACHE)
-            b = tl.load(b_ptrs, cache_modifier=CACHE)
-            acc = tl.dot(a, b, acc, out_dtype=tl.float32, allow_tf32=False)
+        if UNROLL >= 4:
+            k_unroll = BLOCK_K * 4
+            k_full = (k // k_unroll) * k_unroll
+            for k_start in range(0, k_full, k_unroll):
+                offs_k0 = k_start + offs_k_base
+                offs_k1 = k_start + BLOCK_K + offs_k_base
+                offs_k2 = k_start + 2 * BLOCK_K + offs_k_base
+                offs_k3 = k_start + 3 * BLOCK_K + offs_k_base
+                if TRANS_A:
+                    a0_ptrs = a_ptr + offs_k0[None, :] * lda + offs_m[:, None]
+                    a1_ptrs = a_ptr + offs_k1[None, :] * lda + offs_m[:, None]
+                    a2_ptrs = a_ptr + offs_k2[None, :] * lda + offs_m[:, None]
+                    a3_ptrs = a_ptr + offs_k3[None, :] * lda + offs_m[:, None]
+                else:
+                    a0_ptrs = a_ptr + offs_m[:, None] * lda + offs_k0[None, :]
+                    a1_ptrs = a_ptr + offs_m[:, None] * lda + offs_k1[None, :]
+                    a2_ptrs = a_ptr + offs_m[:, None] * lda + offs_k2[None, :]
+                    a3_ptrs = a_ptr + offs_m[:, None] * lda + offs_k3[None, :]
+                if TRANS_B:
+                    b0_ptrs = b_ptr + offs_n[None, :] * ldb + offs_k0[:, None]
+                    b1_ptrs = b_ptr + offs_n[None, :] * ldb + offs_k1[:, None]
+                    b2_ptrs = b_ptr + offs_n[None, :] * ldb + offs_k2[:, None]
+                    b3_ptrs = b_ptr + offs_n[None, :] * ldb + offs_k3[:, None]
+                else:
+                    b0_ptrs = b_ptr + offs_k0[:, None] * ldb + offs_n[None, :]
+                    b1_ptrs = b_ptr + offs_k1[:, None] * ldb + offs_n[None, :]
+                    b2_ptrs = b_ptr + offs_k2[:, None] * ldb + offs_n[None, :]
+                    b3_ptrs = b_ptr + offs_k3[:, None] * ldb + offs_n[None, :]
+                a0 = tl.load(a0_ptrs, cache_modifier=CACHE)
+                b0 = tl.load(b0_ptrs, cache_modifier=CACHE)
+                acc = tl.dot(a0, b0, acc, out_dtype=tl.float32, allow_tf32=False)
+                a1 = tl.load(a1_ptrs, cache_modifier=CACHE)
+                b1 = tl.load(b1_ptrs, cache_modifier=CACHE)
+                acc = tl.dot(a1, b1, acc, out_dtype=tl.float32, allow_tf32=False)
+                a2 = tl.load(a2_ptrs, cache_modifier=CACHE)
+                b2 = tl.load(b2_ptrs, cache_modifier=CACHE)
+                acc = tl.dot(a2, b2, acc, out_dtype=tl.float32, allow_tf32=False)
+                a3 = tl.load(a3_ptrs, cache_modifier=CACHE)
+                b3 = tl.load(b3_ptrs, cache_modifier=CACHE)
+                acc = tl.dot(a3, b3, acc, out_dtype=tl.float32, allow_tf32=False)
+            for k_start in range(k_full, k, BLOCK_K):
+                offs_k = k_start + offs_k_base
+                if TRANS_A:
+                    a_ptrs = a_ptr + offs_k[None, :] * lda + offs_m[:, None]
+                else:
+                    a_ptrs = a_ptr + offs_m[:, None] * lda + offs_k[None, :]
+                if TRANS_B:
+                    b_ptrs = b_ptr + offs_n[None, :] * ldb + offs_k[:, None]
+                else:
+                    b_ptrs = b_ptr + offs_k[:, None] * ldb + offs_n[None, :]
+                a = tl.load(a_ptrs, cache_modifier=CACHE)
+                b = tl.load(b_ptrs, cache_modifier=CACHE)
+                acc = tl.dot(a, b, acc, out_dtype=tl.float32, allow_tf32=False)
+        else:
+            for k_start in range(0, k, BLOCK_K):
+                offs_k = k_start + offs_k_base
+                if TRANS_A:
+                    a_ptrs = a_ptr + offs_k[None, :] * lda + offs_m[:, None]
+                else:
+                    a_ptrs = a_ptr + offs_m[:, None] * lda + offs_k[None, :]
+                if TRANS_B:
+                    b_ptrs = b_ptr + offs_n[None, :] * ldb + offs_k[:, None]
+                else:
+                    b_ptrs = b_ptr + offs_k[:, None] * ldb + offs_n[None, :]
+                a = tl.load(a_ptrs, cache_modifier=CACHE)
+                b = tl.load(b_ptrs, cache_modifier=CACHE)
+                acc = tl.dot(a, b, acc, out_dtype=tl.float32, allow_tf32=False)
+
 
     c_ptrs = c_ptr + offs_m[:, None] * ldc + offs_n[None, :]
     result = alpha * acc
@@ -139,6 +195,60 @@ def _hgemm_kernel(
         tl.store(c_ptrs, result.to(tl.float16))
 
 
+@triton.jit
+def _hgemm_tt_transpose_dot_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    beta: tl.float32,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    BETA_IS_ZERO: tl.constexpr,
+    CACHE: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    grid_m = tl.cdiv(m, BLOCK_M)
+    grid_n = tl.cdiv(n, BLOCK_N)
+    width = GROUP_M * grid_n
+    group_id = pid // width
+    group_size = tl.minimum(grid_m - group_id * GROUP_M, GROUP_M)
+    pid_m = group_id * GROUP_M + (pid % group_size)
+    pid_n = (pid % width) // group_size
+
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_k_base = tl.arange(0, BLOCK_K)
+    acc_t = tl.zeros((BLOCK_N, BLOCK_M), dtype=tl.float32)
+
+    for k_start in range(0, k, BLOCK_K):
+        offs_k = k_start + offs_k_base
+        a = tl.load(
+            a_ptr + offs_k[:, None] * lda + offs_m[None, :],
+            cache_modifier=CACHE,
+        )
+        b = tl.load(
+            b_ptr + offs_n[:, None] * ldb + offs_k[None, :],
+            cache_modifier=CACHE,
+        )
+        acc_t = tl.dot(b, a, acc_t, out_dtype=tl.float32, allow_tf32=False)
+
+    c_ptrs = c_ptr + offs_m[:, None] * ldc + offs_n[None, :]
+    acc = tl.trans(acc_t)
+    result = alpha * acc
+    if not BETA_IS_ZERO:
+        result += beta * tl.load(c_ptrs).to(tl.float32)
+    tl.store(c_ptrs, result.to(tl.float16))
+
+
 def _select_hgemm_config(m: int, n: int, k: int, transa: int, transb: int):
     """Select (BLOCK_M, BLOCK_N, BLOCK_K, num_warps, group_m, num_stages).
 
@@ -146,34 +256,68 @@ def _select_hgemm_config(m: int, n: int, k: int, transa: int, transb: int):
     """
     # ---- Smallest square ----
     if m == 64 and n == 64 and k == 64:
-        return 64, 64, 64, 4, 8, 3
+        return 64, 64, 64, 4, 8, 3, 1
 
     # ---- Tall / skinny (small m) ----
     if m <= 64:
-        return 64, 64, 128, 4, 8, 4
+        return 64, 64, 128, 4, 8, 4, 1
 
     # ---- Short / wide (small n) ----
     if n <= 64:
-        return 64, 64, 128, 4, 8, 4
+        return 64, 64, 128, 4, 8, 4, 1
 
     # ---- Small squares (max dim <= 512) ----
     if max(m, n, k) <= 512:
-        return 64, 64, 128, 4, 8, 4
+        return 64, 64, 128, 4, 8, 4, 1
+
+    # ---- Exact core-shape fixes for previously under-threshold cases ----
+    if transa == CUBLAS_OP_N and transb == CUBLAS_OP_N:
+        if m == 4096 and n == 128 and k == 1024:
+            return 128, 128, 128, 16, 16, 4, 1
+        if m == 512 and n == 16384 and k == 4096:
+            return 128, 128, 64, 16, 8, 3, 1
+    if transa == CUBLAS_OP_T and transb == CUBLAS_OP_N:
+        if m == 256 and n == 8192 and k == 2048:
+            return 128, 128, 64, 16, 8, 2, 1
+        if m == 512 and n == 16384 and k == 4096:
+            return 128, 128, 64, 16, 16, 3, 1
+        if m == 8192 and n == 256 and k == 2048:
+            return 128, 128, 64, 16, 8, 2, 1
+    if transa == CUBLAS_OP_N and transb == CUBLAS_OP_T:
+        if m == 128 and n == 4096 and k == 1024:
+            return 128, 128, 128, 16, 4, 2, 1
+        if m == 256 and n == 8192 and k == 2048:
+            return 128, 128, 64, 16, 8, 3, 1
+    if transa == CUBLAS_OP_T and transb == CUBLAS_OP_T:
+        if m == 128 and n == 4096 and k == 1024:
+            return 128, 128, 128, 16, 8, 4, 1
 
     # ---- 128-ish narrow shapes ----
     if m == 128:
-        return 64, 128, 64, 8, 8, 4
+        return 64, 128, 64, 8, 8, 4, 1
     if n == 128:
         if transa == CUBLAS_OP_T:
-            return 128, 64, 64, 8, 8, 4
-        return 64, 64, 128, 4, 8, 4
+            return 128, 64, 64, 8, 8, 4, 1
+        return 64, 64, 128, 4, 8, 4, 1
 
     # ---- Medium / large shapes (max dim <= 2048, e.g. 1024^3 / 2048^3) ----
     if max(m, n, k) <= 2048:
-        return 128, 128, 64, 16, 4, 3
+        return 128, 128, 64, 16, 4, 3, 1
 
     # ---- Default large ----
-    return 128, 128, 64, 16, 4, 3
+    return 128, 128, 64, 16, 4, 3, 1
+
+
+def _select_hgemm_tt_transpose_dot_config(m: int, n: int, k: int):
+    if m == 256 and n == 8192 and k == 2048:
+        return 128, 128, 64, 16, 16, 2
+    if m == 512 and n == 16384 and k == 4096:
+        return 128, 128, 64, 16, 8, 2
+    if m == 16384 and n == 512 and k == 4096:
+        return 128, 128, 64, 16, 4, 3
+    if m == 4096 and n == 4096 and k == 4096:
+        return 128, 128, 64, 16, 8, 2
+    return None
 
 
 def _can_use_fast_hgemm(m: int, n: int, k: int, block_m: int, block_n: int, block_k: int) -> bool:
@@ -212,11 +356,40 @@ def _launch_hgemm(
     num_warps: int,
     group_m: int,
     num_stages: int,
+    unroll: int,
 ) -> None:
     _hgemm_kernel[grid](
         A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero,
         transa == CUBLAS_OP_T, transb == CUBLAS_OP_T, check_bounds, False, 0, 0,
         ".cg",
+        BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k, GROUP_M=group_m,
+        UNROLL=unroll, num_warps=num_warps, num_stages=num_stages,
+    )
+
+
+def _launch_hgemm_tt_transpose_dot(
+    grid,
+    A: torch.Tensor,
+    B: torch.Tensor,
+    C: torch.Tensor,
+    alpha: float,
+    beta: float,
+    m: int,
+    n: int,
+    k: int,
+    lda: int,
+    ldb: int,
+    ldc: int,
+    beta_is_zero: bool,
+    block_m: int,
+    block_n: int,
+    block_k: int,
+    num_warps: int,
+    group_m: int,
+    num_stages: int,
+) -> None:
+    _hgemm_tt_transpose_dot_kernel[grid](
+        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero, ".cg",
         BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k, GROUP_M=group_m,
         num_warps=num_warps, num_stages=num_stages,
     )
@@ -266,11 +439,27 @@ def hgemm(
         transb = CUBLAS_OP_N
         ldb = n
 
-    block_m, block_n, block_k, num_warps, group_m, num_stages = _select_hgemm_config(
+    beta_is_zero = beta == 0.0
+
+    tt_transpose_dot_config = None
+    if transa == CUBLAS_OP_T and transb == CUBLAS_OP_T:
+        tt_transpose_dot_config = _select_hgemm_tt_transpose_dot_config(m, n, k)
+    if tt_transpose_dot_config is not None:
+        block_m, block_n, block_k, num_warps, group_m, num_stages = tt_transpose_dot_config
+        if _can_use_fast_hgemm(m, n, k, block_m, block_n, block_k):
+            grid = (triton.cdiv(m, block_m) * triton.cdiv(n, block_n),)
+            with torch_device_fn.device(A.device):
+                _launch_hgemm_tt_transpose_dot(
+                    grid, A, B, C, alpha, beta, m, n, k, lda, ldb, ldc,
+                    beta_is_zero, block_m, block_n, block_k, num_warps,
+                    group_m, num_stages,
+                )
+            return
+
+    block_m, block_n, block_k, num_warps, group_m, num_stages, unroll = _select_hgemm_config(
         m, n, k, transa, transb
     )
     check_bounds = not _can_use_fast_hgemm(m, n, k, block_m, block_n, block_k)
-    beta_is_zero = beta == 0.0
 
     with torch_device_fn.device(A.device):
         # ---- Padding path: pad to block-aligned dims and run fast no-bounds kernel ----
@@ -299,7 +488,7 @@ def hgemm(
                 transa, transb, grid_pad, A_pad, B_pad, C_pad, alpha, beta,
                 padded_m, padded_n, padded_k, lda_pad, ldb_pad, padded_n,
                 beta_is_zero, False, block_m, block_n, block_k, num_warps,
-                group_m, num_stages,
+                group_m, num_stages, unroll,
             )
             C.copy_(C_pad[:m, :n])
             return
@@ -309,5 +498,5 @@ def hgemm(
         _launch_hgemm(
             transa, transb, grid, A, B, C, alpha, beta, m, n, k, lda, ldb, ldc,
             beta_is_zero, check_bounds, block_m, block_n, block_k, num_warps,
-            group_m, num_stages,
+            group_m, num_stages, unroll,
         )
