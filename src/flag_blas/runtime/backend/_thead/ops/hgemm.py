@@ -219,6 +219,38 @@ def _thead_hgemm_crop_c_kernel(
 
 @libentry()
 @triton.jit
+def _thead_hgemm_transpose_c_kernel(
+    src_ptr,
+    dst_ptr,
+    beta: tl.float32,
+    rows,
+    cols,
+    src_ld,
+    dst_ld,
+    BETA_IS_ZERO: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    src_ptr = src_ptr.to(tl.pointer_type(tl.float16))
+    dst_ptr = dst_ptr.to(tl.pointer_type(tl.float16))
+
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    mask = (offs_m[:, None] < rows) & (offs_n[None, :] < cols)
+
+    src_offsets = offs_n[None, :] * src_ld + offs_m[:, None]
+    vals = tl.load(src_ptr + src_offsets, mask=mask, other=0.0).to(tl.float32)
+    dst_offsets = offs_m[:, None] * dst_ld + offs_n[None, :]
+    if not BETA_IS_ZERO:
+        dst_vals = tl.load(dst_ptr + dst_offsets, mask=mask, other=0.0).to(tl.float32)
+        vals += beta * dst_vals
+    tl.store(dst_ptr + dst_offsets, vals.to(tl.float16), mask=mask)
+
+
+@libentry()
+@triton.jit
 def _thead_hgemm_zero_f32_kernel(
     ptr,
     total,
@@ -1711,6 +1743,8 @@ def _thead_hgemm_tn_config(m: int, n: int, k: int):
         return 64, 64, 64, 4, 3, 128
 
     if min_mn <= 64:
+        if k >= 1024:
+            return 64, 64, 128, 4, 3, 128
         if m <= n:
             if n >= 4096 and k >= 2048:
                 return 64, 128, 64, 4, 3, 128
@@ -1723,6 +1757,8 @@ def _thead_hgemm_tn_config(m: int, n: int, k: int):
         return 64, 128, 64, 4, 3, 128
 
     if m <= n:
+        if m == n and m == 1024:
+            return 128, 128, 32, 4, 3, 128
         if m == 2048 and n == 2048 and k == 2048:
             return 128, 128, 32, 4, 3, 128
         if m == n and m <= 1024:
@@ -1733,7 +1769,7 @@ def _thead_hgemm_tn_config(m: int, n: int, k: int):
 
 
 def _thead_hgemm_tn_use_trans_a(m: int, n: int, k: int) -> bool:
-    return m <= n
+    return m <= n or (n == 128 and m >= 4096 and k <= 1024)
 
 
 def _thead_hgemm_nt_config(m: int, n: int, k: int):
@@ -1742,7 +1778,26 @@ def _thead_hgemm_nt_config(m: int, n: int, k: int):
 
 
 def _thead_hgemm_tt_config(m: int, n: int, k: int):
-    """Reuse NN config for TT variant."""
+    """T-Head TT config.
+
+    TT uses a transposed accumulator and has a different sweet spot from NN.
+    The NN 128x256 tile is competitive for large-K cases but loses on 2048
+    square and is not better on the core large shapes.
+    """
+    min_mn = min(m, n)
+
+    if max(m, n, k) <= 512:
+        return 64, 64, 64, 4, 3, 128
+
+    if min_mn <= 64:
+        return 64, 64, 128, 4, 3, 128
+
+    if min_mn == 128 and max(m, n) >= 4096 and k <= 1024:
+        return 64, 128, 64, 4, 3, 128
+
+    if min_mn >= 1024:
+        return 128, 128, 64, 4, 3, 128
+
     return _thead_hgemm_nn_config(m, n, k)
 
 
@@ -2024,8 +2079,36 @@ def _thead_hgemm_tt_should_pad(m: int, n: int, k: int) -> bool:
 
 
 def _thead_hgemm_tt_should_materialize(m: int, n: int, k: int) -> bool:
-    """Disable materialization - direct TT transpose-free kernel avoids all copies."""
-    return False
+    """Materialize C^T for small odd TT cases where padding overhead dominates."""
+    if m != n or n != k:
+        return False
+    if m % 64 == 0:
+        return False
+    return max(m, n, k) <= 1024
+
+
+def _run_thead_hgemm_tt_materialized(
+    A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero
+):
+    C_T = torch.empty((n, m), dtype=C.dtype, device=C.device)
+    _run_thead_hgemm_nn(
+        B, ldb, A, lda, C_T, m, n, m, k, alpha, 0.0, True, True
+    )
+    _thead_hgemm_transpose_c_kernel[
+        (triton.cdiv(m, 16), triton.cdiv(n, 64))
+    ](
+        C_T,
+        C,
+        beta,
+        m,
+        n,
+        m,
+        ldc,
+        beta_is_zero,
+        BLOCK_M=16,
+        BLOCK_N=64,
+        num_warps=4,
+    )
 
 
 def _run_thead_hgemm_tn_padded(
@@ -2384,19 +2467,9 @@ def hgemm(
         else:
             if _can_use_thead_hgemm_tt(m, n, k, lda, ldb, ldc, alpha, beta):
                 if _thead_hgemm_tt_should_materialize(m, n, k):
-                    # Compute C^T(N,M) = B(N,K) x A(K,M) using NN kernel directly.
-                    # No transpose of A or B needed — just swap operands.
-                    # C_T = alpha * B x A, then C = beta * C + C_T^T.
-                    C_T = torch.empty((n, m), dtype=C.dtype, device=C.device)
-                    _run_thead_hgemm_nn(
-                        B, ldb, A, lda, C_T, m, n, m, k,
-                        alpha, 0.0, True, aligned,
+                    _run_thead_hgemm_tt_materialized(
+                        A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero
                     )
-                    if beta_is_zero:
-                        C.copy_(C_T.T)
-                    else:
-                        # C.copy_(beta * C_old + C_T.T)
-                        C.mul_(beta).add_(C_T.T)
                 elif _thead_hgemm_tt_should_pad(m, n, k):
                     _run_thead_hgemm_tt_padded(
                         A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero
