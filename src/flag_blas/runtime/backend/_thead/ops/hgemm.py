@@ -747,6 +747,151 @@ def _thead_hgemm_tn_kernel(
     )
 
 
+@triton.jit
+def _thead_hgemm_tn_trans_a_impl(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    beta: tl.float32,
+    lda,
+    ldb,
+    ldc,
+    BETA_IS_ZERO: tl.constexpr,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+):
+    """TN variant for M <= N: transpose A tile and accumulate C directly."""
+    a_ptr = a_ptr.to(tl.pointer_type(tl.float16))
+    b_ptr = b_ptr.to(tl.pointer_type(tl.float16))
+    c_ptr = c_ptr.to(tl.pointer_type(tl.float16))
+
+    pid = tl.program_id(0)
+    grid_m = tl.cdiv(M, BLOCK_M)
+    grid_n = tl.cdiv(N, BLOCK_N)
+    width = GROUP_M * grid_n
+    group_id = pid // width
+    group_size = min(grid_m - group_id * GROUP_M, GROUP_M)
+    pid_m = group_id * GROUP_M + (pid % group_size)
+    pid_n = (pid % width) // group_size
+
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_k = tl.arange(0, BLOCK_K)
+    offs_m = tl.max_contiguous(tl.multiple_of(offs_m, BLOCK_M), BLOCK_M)
+    offs_n = tl.max_contiguous(tl.multiple_of(offs_n, BLOCK_N), BLOCK_N)
+    offs_k = tl.max_contiguous(tl.multiple_of(offs_k, BLOCK_K), BLOCK_K)
+
+    a_t_ptrs = a_ptr + offs_k[:, None] * lda + offs_m[None, :]
+    b_ptrs = b_ptr + offs_k[:, None] * ldb + offs_n[None, :]
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+
+    is_full_m = (pid_m * BLOCK_M + BLOCK_M) <= M
+    is_full_n = (pid_n * BLOCK_N + BLOCK_N) <= N
+    k_full_iters = K // BLOCK_K
+    k_remainder = K % BLOCK_K
+
+    if is_full_m and is_full_n:
+        for _ in range(0, k_full_iters):
+            a_t = tl.load(a_t_ptrs)
+            b = tl.load(b_ptrs)
+            acc = tl.dot(tl.trans(a_t), b, acc, out_dtype=tl.float32)
+            a_t_ptrs += BLOCK_K * lda
+            b_ptrs += BLOCK_K * ldb
+
+        if k_remainder > 0:
+            mask_k = offs_k < k_remainder
+            a_t = tl.load(a_t_ptrs, mask=mask_k[:, None], other=0.0)
+            b = tl.load(b_ptrs, mask=mask_k[:, None], other=0.0)
+            acc = tl.dot(tl.trans(a_t), b, acc, out_dtype=tl.float32)
+    else:
+        mask_m = offs_m < M
+        mask_n = offs_n < N
+        for _ in range(0, k_full_iters):
+            a_t = tl.load(a_t_ptrs, mask=mask_m[None, :], other=0.0)
+            b = tl.load(b_ptrs, mask=mask_n[None, :], other=0.0)
+            acc = tl.dot(tl.trans(a_t), b, acc, out_dtype=tl.float32)
+            a_t_ptrs += BLOCK_K * lda
+            b_ptrs += BLOCK_K * ldb
+
+        if k_remainder > 0:
+            mask_k = offs_k < k_remainder
+            a_t = tl.load(a_t_ptrs, mask=mask_k[:, None] & mask_m[None, :], other=0.0)
+            b = tl.load(b_ptrs, mask=mask_k[:, None] & mask_n[None, :], other=0.0)
+            acc = tl.dot(tl.trans(a_t), b, acc, out_dtype=tl.float32)
+
+    c_ptrs = c_ptr + offs_m[:, None] * ldc + offs_n[None, :]
+    result = alpha * acc
+    if is_full_m and is_full_n:
+        if not BETA_IS_ZERO:
+            c_vals = tl.load(c_ptrs).to(tl.float32)
+            result += beta * c_vals
+        tl.store(c_ptrs, result.to(tl.float16))
+    else:
+        c_mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
+        if not BETA_IS_ZERO:
+            c_vals = tl.load(c_ptrs, mask=c_mask, other=0.0).to(tl.float32)
+            result += beta * c_vals
+        tl.store(c_ptrs, result.to(tl.float16), mask=c_mask)
+
+
+@libentry()
+@triton.jit(ppu_hint="fwd")
+def _thead_hgemm_tn_trans_a_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    beta: tl.float32,
+    lda,
+    ldb,
+    ldc,
+    BETA_IS_ZERO: tl.constexpr,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+):
+    _thead_hgemm_tn_trans_a_impl(
+        a_ptr, b_ptr, c_ptr, alpha, beta, lda, ldb, ldc,
+        BETA_IS_ZERO, M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, GROUP_M,
+    )
+
+
+@libentry()
+@triton.jit(ppu_hint="bwd")
+def _thead_hgemm_tn_trans_a_bwd_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    beta: tl.float32,
+    lda,
+    ldb,
+    ldc,
+    BETA_IS_ZERO: tl.constexpr,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+):
+    _thead_hgemm_tn_trans_a_impl(
+        a_ptr, b_ptr, c_ptr, alpha, beta, lda, ldb, ldc,
+        BETA_IS_ZERO, M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, GROUP_M,
+    )
+
+
 @libentry()
 @triton.jit
 def _thead_hgemm_tn_desc_kernel(
@@ -1552,8 +1697,43 @@ def _thead_hgemm_nn_splitk_config(m: int, n: int, k: int):
 
 
 def _thead_hgemm_tn_config(m: int, n: int, k: int):
-    """Reuse NN config for TN variant."""
-    return _thead_hgemm_nn_config(m, n, k)
+    """T-Head TN config.
+
+    TN has a different codegen profile from NN because one dot operand is
+    transposed in-register. Avoid the NN 128x256 tile on Zhenwu: it is fast for
+    NN but consistently poor for direct TN.
+    """
+    if max(m, n, k) <= 512 and (m % 64 != 0 or n % 64 != 0 or k % 64 != 0):
+        return 64, 64, 64, 4, 3, 128
+
+    min_mn = min(m, n)
+    if max(m, n, k) <= 512:
+        return 64, 64, 64, 4, 3, 128
+
+    if min_mn <= 64:
+        if m <= n:
+            if n >= 4096 and k >= 2048:
+                return 64, 128, 64, 4, 3, 128
+            return 64, 64, 64, 4, 3, 128
+        if m >= 4096 and k >= 2048:
+            return 128, 64, 64, 4, 3, 128
+        return 64, 64, 64, 4, 3, 128
+
+    if min_mn == 128 and max(m, n) >= 4096 and k <= 1024:
+        return 64, 128, 64, 4, 3, 128
+
+    if m <= n:
+        if m == 2048 and n == 2048 and k == 2048:
+            return 128, 128, 32, 4, 3, 128
+        if m == n and m <= 1024:
+            return 128, 128, 64, 8, 3, 128
+        return 128, 128, 64, 4, 3, 128
+
+    return 128, 128, 64, 4, 3, 128
+
+
+def _thead_hgemm_tn_use_trans_a(m: int, n: int, k: int) -> bool:
+    return m <= n
 
 
 def _thead_hgemm_nt_config(m: int, n: int, k: int):
@@ -1632,6 +1812,31 @@ def _run_thead_hgemm_tn(
     block_m, block_n, block_k, num_warps, num_stages, maxnreg = _thead_hgemm_tn_config(
         m, n, k
     )
+    if _thead_hgemm_tn_use_trans_a(m, n, k):
+        kernel = _thead_hgemm_tn_trans_a_kernel
+        kernel[(triton.cdiv(m, block_m) * triton.cdiv(n, block_n),)](
+            A,
+            B,
+            C,
+            alpha,
+            beta,
+            lda,
+            ldb,
+            ldc,
+            beta_is_zero,
+            M=m,
+            N=n,
+            K=k,
+            BLOCK_M=block_m,
+            BLOCK_N=block_n,
+            BLOCK_K=block_k,
+            GROUP_M=8,
+            num_warps=num_warps,
+            num_stages=num_stages,
+            maxnreg=maxnreg,
+        )
+        return
+
     tile_aligned = _thead_hgemm_is_tile_aligned(m, n, k, block_m, block_n, block_k)
     if _thead_hgemm_nn_use_desc_bwd(m, n, k) and tile_aligned:
         kernel = _thead_hgemm_tn_desc_bwd_kernel
@@ -1763,15 +1968,20 @@ def _thead_hgemm_tn_should_materialize(m: int, n: int, k: int) -> bool:
     Extended to non-aligned shapes where padding + materialization enables
     the desc_bwd kernel, avoiding both tl.trans and masked loads.
     """
-    if _thead_hgemm_nn_use_desc_bwd(m, n, k):
-        # Skip materialization for large-K shapes where copy overhead dominates.
-        # Direct TN kernel with desc_bwd may be faster despite tl.trans.
-        if k >= 4 * min(m, n):
-            return False
-        return True
-    # For non-aligned shapes: check if padded version benefits from desc_bwd
     if m % 64 == 0 and n % 64 == 0 and k % 64 == 0:
-        return False
+        # On aligned square/large-K shapes the direct trans-a TN kernel avoids
+        # the copy overhead and is faster than materializing A.T. Keep
+        # materialization for skinny cases where the copied operand is small
+        # enough and the NN/TT kernels recover more compute throughput.
+        if m == n and m >= 8192:
+            return True
+        if min(m, n) <= 64:
+            return False
+        if m <= n:
+            return m <= 512 and n >= 4096 and k >= 2048
+        return n <= 512 and m >= 4096 and k >= 2048
+
+    # For non-aligned shapes: check if padded version benefits from desc_bwd
     m_pad = _round_up(m, 64)
     n_pad = _round_up(n, 64)
     k_pad = _round_up(k, 64)
@@ -2104,7 +2314,13 @@ def hgemm(
                         # M <= N: Materialize A^T as (M, K) and use fast NN kernel.
                         # A is (K, M) with lda=M, A^T will be (M, K) with lda=K.
                         A_T = A.T.contiguous()
-                        if _thead_hgemm_nn_should_pad(m, n, k) or _thead_hgemm_nt_should_pad(m, n, k):
+                        if max(m, n, k) <= 1024:
+                            _run_thead_hgemm_nn(
+                                A_T, k, B, ldb, C, ldc, m, n, k,
+                                alpha, beta, beta_is_zero,
+                                _is_gemm_aligned(A_T, k, B, ldb, C, ldc),
+                            )
+                        elif _thead_hgemm_nn_should_pad(m, n, k) or _thead_hgemm_nt_should_pad(m, n, k):
                             _run_thead_hgemm_nn_padded(
                                 A_T, k, B, ldb, C, ldc, m, n, k,
                                 alpha, beta, beta_is_zero,
@@ -2120,7 +2336,13 @@ def hgemm(
                         # B is (K, N) with ldb=N, B^T will be (N, K) with lda_BT=K.
                         # TT kernel computes C(M,N) = A^T(K,M) x B_T^T(K,N) = (M,K)x(K,N).
                         B_T = B.T.contiguous()
-                        if _thead_hgemm_nn_should_pad(m, n, k) or _thead_hgemm_tt_should_pad(m, n, k):
+                        if max(m, n, k) <= 1024:
+                            _run_thead_hgemm_tt(
+                                A, lda, B_T, k, C, ldc, m, n, k,
+                                alpha, beta, beta_is_zero,
+                                _is_gemm_aligned(A, lda, B_T, k, C, ldc),
+                            )
+                        elif _thead_hgemm_nn_should_pad(m, n, k) or _thead_hgemm_tt_should_pad(m, n, k):
                             _run_thead_hgemm_tt_padded(
                                 A, lda, B_T, k, C, ldc, m, n, k,
                                 alpha, beta, beta_is_zero,
