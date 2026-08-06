@@ -47,6 +47,7 @@ def _bfgemm_kernel(
     SKIP_FULL: tl.constexpr,
     FULL_GRID_M: tl.constexpr,
     FULL_GRID_N: tl.constexpr,
+    CACHE: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
@@ -87,11 +88,11 @@ def _bfgemm_kernel(
                 b_ptrs = b_ptr + offs_k[:, None] * ldb + offs_n[None, :]
 
             if is_full_m and is_full_n:
-                a = tl.load(a_ptrs)
-                b = tl.load(b_ptrs)
+                a = tl.load(a_ptrs, cache_modifier=CACHE)
+                b = tl.load(b_ptrs, cache_modifier=CACHE)
             else:
-                a = tl.load(a_ptrs, mask=offs_m[:, None] < m, other=0.0)
-                b = tl.load(b_ptrs, mask=offs_n[None, :] < n, other=0.0)
+                a = tl.load(a_ptrs, mask=offs_m[:, None] < m, other=0.0, cache_modifier=CACHE)
+                b = tl.load(b_ptrs, mask=offs_n[None, :] < n, other=0.0, cache_modifier=CACHE)
             acc = tl.dot(a, b, acc, out_dtype=tl.float32, allow_tf32=False)
 
         if k_remainder > 0:
@@ -106,8 +107,8 @@ def _bfgemm_kernel(
                 b_ptrs = b_ptr + offs_k[:, None] * ldb + offs_n[None, :]
             a_mask = (offs_m[:, None] < m) & (offs_k[None, :] < k)
             b_mask = (offs_k[:, None] < k) & (offs_n[None, :] < n)
-            a = tl.load(a_ptrs, mask=a_mask, other=0.0)
-            b = tl.load(b_ptrs, mask=b_mask, other=0.0)
+            a = tl.load(a_ptrs, mask=a_mask, other=0.0, cache_modifier=CACHE)
+            b = tl.load(b_ptrs, mask=b_mask, other=0.0, cache_modifier=CACHE)
             acc = tl.dot(a, b, acc, out_dtype=tl.float32, allow_tf32=False)
     else:
         for k_start in range(0, k, BLOCK_K):
@@ -120,8 +121,8 @@ def _bfgemm_kernel(
                 b_ptrs = b_ptr + offs_n[None, :] * ldb + offs_k[:, None]
             else:
                 b_ptrs = b_ptr + offs_k[:, None] * ldb + offs_n[None, :]
-            a = tl.load(a_ptrs)
-            b = tl.load(b_ptrs)
+            a = tl.load(a_ptrs, cache_modifier=CACHE)
+            b = tl.load(b_ptrs, cache_modifier=CACHE)
             acc = tl.dot(a, b, acc, out_dtype=tl.float32, allow_tf32=False)
 
     c_ptrs = c_ptr + offs_m[:, None] * ldc + offs_n[None, :]
@@ -137,16 +138,43 @@ def _bfgemm_kernel(
         tl.store(c_ptrs, result.to(tl.bfloat16))
 
 
-def _select_bfgemm_config(m: int, n: int, k: int):
-    if max(m, n, k) >= 2048 and min(m, n) >= 128:
-        return 128, 128, 32, 8, 8
-    if m <= 64 and n >= 128:
-        return 16, 128, 32, 4, 8
-    if n <= 64 and m >= 128:
-        return 128, 16, 32, 4, 8
+def _select_bfgemm_config(m: int, n: int, k: int, transa: int, transb: int):
+    """Select (BLOCK_M, BLOCK_N, BLOCK_K, num_warps, group_m, num_stages).
+
+    Configurations are derived from extensive sweeps on Iluvatar BI-V150.
+    bf16 and fp16 have identical memory layouts, so the converged hgemm
+    configuration table applies directly.
+    """
+    # ---- Smallest square ----
+    if m == 64 and n == 64 and k == 64:
+        return 64, 64, 64, 4, 8, 3
+
+    # ---- Tall / skinny (small m) ----
+    if m <= 64:
+        return 64, 64, 128, 4, 8, 4
+
+    # ---- Short / wide (small n) ----
+    if n <= 64:
+        return 64, 64, 128, 4, 8, 4
+
+    # ---- Small squares (max dim <= 512) ----
     if max(m, n, k) <= 512:
-        return 64, 32, 32, 4, 8
-    return 128, 128, 32, 8, 8
+        return 64, 64, 128, 4, 8, 4
+
+    # ---- 128-ish narrow shapes ----
+    if m == 128:
+        return 64, 128, 64, 8, 8, 4
+    if n == 128:
+        if transa == CUBLAS_OP_T:
+            return 128, 64, 64, 8, 8, 4
+        return 64, 64, 128, 4, 8, 4
+
+    # ---- Medium / large shapes (max dim <= 2048, e.g. 1024^3 / 2048^3) ----
+    if max(m, n, k) <= 2048:
+        return 128, 128, 64, 16, 4, 3
+
+    # ---- Default large ----
+    return 128, 128, 64, 16, 4, 3
 
 
 def _can_use_fast_bfgemm(m: int, n: int, k: int, block_m: int, block_n: int, block_k: int) -> bool:
@@ -188,7 +216,9 @@ def bfgemm(
             C.mul_(beta)
         return
 
-    block_m, block_n, block_k, num_warps, group_m = _select_bfgemm_config(m, n, k)
+    block_m, block_n, block_k, num_warps, group_m, num_stages = _select_bfgemm_config(
+        m, n, k, transa, transb
+    )
     check_bounds = not _can_use_fast_bfgemm(m, n, k, block_m, block_n, block_k)
     beta_is_zero = beta == 0.0
     trans_a = transa == CUBLAS_OP_T
@@ -198,9 +228,9 @@ def bfgemm(
         grid = (triton.cdiv(m, block_m) * triton.cdiv(n, block_n),)
         _bfgemm_kernel[grid](
             A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero,
-            trans_a, trans_b, check_bounds, False, 0, 0,
+            trans_a, trans_b, check_bounds, False, 0, 0, ".cg",
             BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k, GROUP_M=group_m,
-            num_warps=num_warps, num_stages=3,
+            num_warps=num_warps, num_stages=num_stages,
         )
 
 
