@@ -281,6 +281,45 @@ def _thead_hgemm_transpose2d_kernel(
 
 @libentry()
 @triton.jit
+def _thead_hgemm_transpose_pad_kernel(
+    src_ptr,
+    dst_ptr,
+    rows: tl.constexpr,
+    cols: tl.constexpr,
+    src_ld,
+    dst_ld,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    """Transpose src (rows, cols) = (K, M) into dst (M_pad, K) with row padding.
+
+    Grid covers M_pad rows so the extra rows (m .. M_pad-1) are written with
+    zeros.  Only the column (K) direction is masked on store; the dst row
+    stride must equal K so the desc_bwd kernel can zero-fill the tail K-block
+    (lda == k requirement for non-multiple-of-64 K).
+    """
+    src_ptr = src_ptr.to(tl.pointer_type(tl.float16))
+    dst_ptr = dst_ptr.to(tl.pointer_type(tl.float16))
+
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+
+    vals = tl.load(
+        src_ptr + offs_n[None, :] * src_ld + offs_m[:, None],
+        mask=(offs_m[:, None] < cols) & (offs_n[None, :] < rows),
+        other=0.0,
+    )
+    tl.store(
+        dst_ptr + offs_m[:, None] * dst_ld + offs_n[None, :],
+        vals,
+        mask=offs_n[None, :] < rows,
+    )
+
+
+@libentry()
+@triton.jit
 def _thead_hgemm_zero_f32_kernel(
     ptr,
     total,
@@ -2389,6 +2428,30 @@ def _thead_hgemm_nt_should_pad(m: int, n: int, k: int) -> bool:
     return m * n * k >= 256 * 256 * 256 and extra <= original * 1.15
 
 
+def _thead_hgemm_tn_use_narrow_materialize(m: int, n: int, k: int) -> bool:
+    """TN materialize-A variant that avoids the padA/padB copies.
+
+    A^T is transposed directly into a row-padded (M_pad, K) buffer with
+    lda == K, then the desc_bwd NN kernel runs on unpadded B (N = n, ldb = n)
+    into a row/col-padded C (ldc = n_pad) which is cropped.  The desc kernel
+    zero-fills the tail K-block only when lda == K, so this path is only valid
+    when K is not a multiple of 64 (i.e. when padding is otherwise needed).
+    Only used for shapes where the desc_bwd kernel is selected (min(m, n) >=
+    1024) and the plain aligned path is not applicable.
+    """
+    if m > n:
+        return False
+    if max(m, n, k) <= 1024:
+        return False
+    if m % 64 == 0 and n % 64 == 0 and k % 64 == 0:
+        return False
+    if k % 64 == 0:
+        return False
+    if min(m, n) < 1024:
+        return False
+    return True
+
+
 def _thead_hgemm_nt_should_materialize(m: int, n: int, k: int) -> bool:
     """Materialize B^T for odd NT cases where padding wastes too much time."""
     if m % 64 == 0 and n % 64 == 0 and k % 64 == 0:
@@ -2490,6 +2553,62 @@ def _run_thead_hgemm_tn_materialize_a(
         beta,
         beta_is_zero,
         True,
+    )
+
+
+def _run_thead_hgemm_tn_materialize_a_narrow(
+    A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero
+):
+    """TN materialize-A without padA/padB: transpose into (M_pad, K) with
+    lda == K, run desc_bwd NN with unpadded B, crop padded C."""
+    m_pad = _round_up(m, 128)
+    n_pad = _round_up(n, 64)
+    A_pad = torch.empty((m_pad, k), dtype=A.dtype, device=A.device)
+    C_pad = torch.empty((m_pad, n_pad), dtype=C.dtype, device=C.device)
+
+    if max(m, k) <= 1024:
+        block_m, block_n = 32, 32
+    else:
+        block_m, block_n = 16, 64
+    _thead_hgemm_transpose_pad_kernel[
+        (triton.cdiv(m_pad, block_m), triton.cdiv(k, block_n))
+    ](
+        A,
+        A_pad,
+        k,
+        m,
+        lda,
+        k,
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        num_warps=4,
+    )
+    _run_thead_hgemm_nn(
+        A_pad,
+        k,
+        B,
+        ldb,
+        C_pad,
+        n_pad,
+        m_pad,
+        n,
+        k,
+        alpha,
+        0.0,
+        True,
+        True,
+    )
+    pad_block = 1024
+    _thead_hgemm_crop_c_kernel[(triton.cdiv(m * n, pad_block),)](
+        C_pad,
+        C,
+        beta,
+        m,
+        n,
+        n_pad,
+        ldc,
+        beta_is_zero,
+        BLOCK_SIZE=pad_block,
     )
 
 
@@ -2848,11 +2967,17 @@ def hgemm(
                                 alpha, beta, beta_is_zero,
                             )
                         elif _thead_hgemm_nn_should_pad(m, n, k) or _thead_hgemm_nt_should_pad(m, n, k):
-                            A_T = _thead_hgemm_transpose2d(A, k, m, lda)
-                            _run_thead_hgemm_nn_padded(
-                                A_T, k, B, ldb, C, ldc, m, n, k,
-                                alpha, beta, beta_is_zero,
-                            )
+                            if _thead_hgemm_tn_use_narrow_materialize(m, n, k):
+                                _run_thead_hgemm_tn_materialize_a_narrow(
+                                    A, lda, B, ldb, C, ldc, m, n, k,
+                                    alpha, beta, beta_is_zero,
+                                )
+                            else:
+                                A_T = _thead_hgemm_transpose2d(A, k, m, lda)
+                                _run_thead_hgemm_nn_padded(
+                                    A_T, k, B, ldb, C, ldc, m, n, k,
+                                    alpha, beta, beta_is_zero,
+                                )
                         else:
                             _run_thead_hgemm_tn_materialize_a(
                                 A, lda, B, ldb, C, ldc, m, n, k,
