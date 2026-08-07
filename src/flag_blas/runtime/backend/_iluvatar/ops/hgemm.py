@@ -249,6 +249,68 @@ def _hgemm_tt_transpose_dot_kernel(
     tl.store(c_ptrs, result.to(tl.float16))
 
 
+@triton.jit
+def _hgemm_tn_transpose_dot_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    beta: tl.float32,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    BETA_IS_ZERO: tl.constexpr,
+    CACHE: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+):
+    """TN variant of the transposed-dot kernel.
+
+    For TN (C = A^T @ B) with A stored (k, m) and B stored (k, n) both
+    row-major, loading A as [BLOCK_K, BLOCK_M] is fully coalesced (inner
+    dimension m is contiguous), whereas the standard kernel's [BLOCK_M,
+    BLOCK_K] A tile gathers along k.  The result is accumulated in the
+    transposed orientation C^T = B^T @ A and transposed once before store.
+    """
+    pid = tl.program_id(0)
+    grid_m = tl.cdiv(m, BLOCK_M)
+    grid_n = tl.cdiv(n, BLOCK_N)
+    width = GROUP_M * grid_n
+    group_id = pid // width
+    group_size = tl.minimum(grid_m - group_id * GROUP_M, GROUP_M)
+    pid_m = group_id * GROUP_M + (pid % group_size)
+    pid_n = (pid % width) // group_size
+
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_k_base = tl.arange(0, BLOCK_K)
+    acc_t = tl.zeros((BLOCK_N, BLOCK_M), dtype=tl.float32)
+
+    for k_start in range(0, k, BLOCK_K):
+        offs_k = k_start + offs_k_base
+        a = tl.load(
+            a_ptr + offs_k[:, None] * lda + offs_m[None, :],
+            cache_modifier=CACHE,
+        )
+        b = tl.load(
+            b_ptr + offs_k[None, :] * ldb + offs_n[:, None],
+            cache_modifier=CACHE,
+        )
+        acc_t = tl.dot(b, a, acc_t, out_dtype=tl.float32, allow_tf32=False)
+
+    c_ptrs = c_ptr + offs_m[:, None] * ldc + offs_n[None, :]
+    acc = tl.trans(acc_t)
+    result = alpha * acc
+    if not BETA_IS_ZERO:
+        result += beta * tl.load(c_ptrs).to(tl.float32)
+    tl.store(c_ptrs, result.to(tl.float16))
+
+
 def _select_hgemm_config(m: int, n: int, k: int, transa: int, transb: int):
     """Select (BLOCK_M, BLOCK_N, BLOCK_K, num_warps, group_m, num_stages).
 
@@ -272,17 +334,75 @@ def _select_hgemm_config(m: int, n: int, k: int, transa: int, transb: int):
 
     # ---- Exact core-shape fixes for previously under-threshold cases ----
     if transa == CUBLAS_OP_N and transb == CUBLAS_OP_N:
+        if m == 2048 and n == 2048 and k == 2048:
+            return 128, 128, 64, 8, 4, 5, 1
+        if m == 4096 and n == 4096 and k == 4096:
+            return 128, 128, 64, 8, 4, 3, 1
+        if m == 8192 and n == 8192 and k == 8192:
+            return 128, 128, 64, 8, 8, 2, 1
+        if m == 16384 and n == 16384 and k == 16384:
+            return 256, 256, 64, 8, 8, 2, 1
+        if m == 2048 and n == 12288 and k == 4096:
+            return 128, 128, 64, 8, 8, 5, 1
+        if m == 2048 and n == 11008 and k == 4096:
+            return 128, 128, 64, 8, 8, 3, 1
+        if m == 2048 and n == 4096 and k == 11008:
+            return 128, 128, 64, 8, 8, 4, 1
+        if m == 4096 and n == 24576 and k == 8192:
+            return 128, 128, 64, 8, 8, 2, 1
+        if m == 4096 and n == 8192 and k == 28672:
+            return 128, 128, 64, 8, 8, 4, 1
+        if m == 8192 and n == 28672 and k == 8192:
+            return 128, 128, 64, 8, 8, 4, 1
+        if m == 16384 and n == 2048 and k == 2048:
+            return 128, 128, 64, 8, 4, 3, 1
+        if m == 2048 and n == 16384 and k == 2048:
+            return 128, 128, 64, 8, 16, 3, 1
+        if m == 32768 and n == 1024 and k == 1024:
+            return 128, 128, 64, 8, 8, 5, 1
         if m == 4096 and n == 128 and k == 1024:
-            return 128, 128, 128, 16, 16, 4, 1
-        if m == 512 and n == 16384 and k == 4096:
-            return 128, 128, 64, 16, 8, 3, 1
-    if transa == CUBLAS_OP_T and transb == CUBLAS_OP_N:
-        if m == 256 and n == 8192 and k == 2048:
-            return 128, 128, 64, 16, 8, 2, 1
-        if m == 512 and n == 16384 and k == 4096:
-            return 128, 128, 64, 16, 16, 3, 1
+            return 128, 128, 128, 16, 16, 3, 4
         if m == 8192 and n == 256 and k == 2048:
+            return 128, 128, 64, 16, 4, 2, 1
+        if m == 16384 and n == 512 and k == 4096:
+            return 128, 128, 64, 8, 8, 4, 1
+        if m == 512 and n == 16384 and k == 4096:
+            return 128, 128, 64, 8, 8, 5, 1
+    if transa == CUBLAS_OP_T and transb == CUBLAS_OP_N:
+        if m == 2048 and n == 2048 and k == 2048:
+            return 128, 128, 64, 16, 4, 2, 1
+        if m == 4096 and n == 4096 and k == 4096:
             return 128, 128, 64, 16, 8, 2, 1
+        if m == 8192 and n == 8192 and k == 8192:
+            return 128, 128, 64, 16, 4, 5, 1
+        if m == 16384 and n == 16384 and k == 16384:
+            return 128, 128, 64, 16, 8, 3, 1
+        if m == 2048 and n == 16384 and k == 2048:
+            return 128, 128, 64, 16, 16, 2, 1
+        if m == 16384 and n == 2048 and k == 2048:
+            return 128, 128, 64, 16, 4, 10, 1
+        if m == 16384 and n == 512 and k == 4096:
+            return 128, 128, 64, 16, 2, 2, 1
+        if m == 512 and n == 16384 and k == 4096:
+            return 256, 256, 64, 8, 8, 8, 1
+        if m == 2048 and n == 2048 and k == 16384:
+            return 128, 128, 64, 16, 8, 2, 1
+        if m == 4096 and n == 24576 and k == 8192:
+            return 128, 128, 64, 16, 4, 3, 4
+        if m == 2048 and n == 11008 and k == 4096:
+            return 128, 128, 64, 16, 8, 2, 1
+        if m == 2048 and n == 12288 and k == 4096:
+            return 128, 128, 64, 16, 4, 3, 4
+        if m == 8192 and n == 28672 and k == 8192:
+            return 128, 128, 64, 16, 4, 4, 1
+        if m == 8192 and n == 256 and k == 2048:
+            return 128, 128, 64, 16, 2, 2, 1
+        if m == 256 and n == 8192 and k == 2048:
+            return 128, 128, 64, 16, 2, 2, 1
+        if m == 4096 and n == 8192 and k == 28672:
+            return 128, 128, 64, 16, 4, 6, 1
+        if m == 32768 and n == 1024 and k == 1024:
+            return 128, 128, 64, 16, 4, 3, 1
     if transa == CUBLAS_OP_N and transb == CUBLAS_OP_T:
         if m == 128 and n == 4096 and k == 1024:
             return 128, 128, 128, 16, 4, 2, 1
@@ -317,6 +437,40 @@ def _select_hgemm_tt_transpose_dot_config(m: int, n: int, k: int):
         return 128, 128, 64, 16, 4, 3
     if m == 4096 and n == 4096 and k == 4096:
         return 128, 128, 64, 16, 8, 2
+    return None
+
+
+def _select_hgemm_tn_transpose_dot_config(m: int, n: int, k: int):
+    """Per-shape (BLOCK_M, BLOCK_N, BLOCK_K, num_warps, group_m, num_stages)
+    for the TN transposed-dot kernel, from a sweep on Iluvatar BI-V150.
+
+    The transposed-dot kernel loads A fully coalesced (A is stored (k, m)
+    for TN), which wins for most large shapes; it is disabled for shapes
+    where the one-time fp32 accumulator transpose is more expensive than
+    the strided-A savings (e.g. big tiles / extreme aspect ratios).
+    """
+    if m == 4096 and n == 4096 and k == 4096:
+        return 128, 128, 64, 16, 8, 4
+    if m == 8192 and n == 8192 and k == 8192:
+        return 128, 128, 64, 16, 4, 6
+    if m == 16384 and n == 16384 and k == 16384:
+        return 128, 128, 64, 16, 8, 3
+    if m == 16384 and n == 512 and k == 4096:
+        return 128, 128, 64, 16, 2, 2
+    if m == 2048 and n == 2048 and k == 16384:
+        return 128, 128, 64, 16, 8, 2
+    if m == 2048 and n == 12288 and k == 4096:
+        return 128, 128, 64, 16, 4, 3
+    if m == 8192 and n == 256 and k == 2048:
+        return 128, 128, 64, 16, 2, 10
+    if m == 256 and n == 8192 and k == 2048:
+        return 128, 128, 64, 16, 2, 2
+    if m == 4096 and n == 24576 and k == 8192:
+        return 128, 128, 64, 16, 4, 4
+    if m == 2048 and n == 11008 and k == 4096:
+        return 128, 128, 64, 16, 8, 2
+    if m == 8192 and n == 28672 and k == 8192:
+        return 128, 128, 64, 16, 4, 4
     return None
 
 
@@ -395,6 +549,34 @@ def _launch_hgemm_tt_transpose_dot(
     )
 
 
+def _launch_hgemm_tn_transpose_dot(
+    grid,
+    A: torch.Tensor,
+    B: torch.Tensor,
+    C: torch.Tensor,
+    alpha: float,
+    beta: float,
+    m: int,
+    n: int,
+    k: int,
+    lda: int,
+    ldb: int,
+    ldc: int,
+    beta_is_zero: bool,
+    block_m: int,
+    block_n: int,
+    block_k: int,
+    num_warps: int,
+    group_m: int,
+    num_stages: int,
+) -> None:
+    _hgemm_tn_transpose_dot_kernel[grid](
+        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero, ".cg",
+        BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k, GROUP_M=group_m,
+        num_warps=num_warps, num_stages=num_stages,
+    )
+
+
 def hgemm(
     transa: int,
     transb: int,
@@ -450,6 +632,21 @@ def hgemm(
             grid = (triton.cdiv(m, block_m) * triton.cdiv(n, block_n),)
             with torch_device_fn.device(A.device):
                 _launch_hgemm_tt_transpose_dot(
+                    grid, A, B, C, alpha, beta, m, n, k, lda, ldb, ldc,
+                    beta_is_zero, block_m, block_n, block_k, num_warps,
+                    group_m, num_stages,
+                )
+            return
+
+    tn_transpose_dot_config = None
+    if transa == CUBLAS_OP_T and transb == CUBLAS_OP_N:
+        tn_transpose_dot_config = _select_hgemm_tn_transpose_dot_config(m, n, k)
+    if tn_transpose_dot_config is not None:
+        block_m, block_n, block_k, num_warps, group_m, num_stages = tn_transpose_dot_config
+        if _can_use_fast_hgemm(m, n, k, block_m, block_n, block_k):
+            grid = (triton.cdiv(m, block_m) * triton.cdiv(n, block_n),)
+            with torch_device_fn.device(A.device):
+                _launch_hgemm_tn_transpose_dot(
                     grid, A, B, C, alpha, beta, m, n, k, lda, ldb, ldc,
                     beta_is_zero, block_m, block_n, block_k, num_warps,
                     group_m, num_stages,
