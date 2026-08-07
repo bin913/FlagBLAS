@@ -1996,9 +1996,163 @@ def _thead_hgemm_is_tile_aligned(m: int, n: int, k: int, block_m: int, block_n: 
     return m % block_m == 0 and n % block_n == 0 and k % block_k == 0
 
 
+@libentry()
+@triton.jit(ppu_hint="fwd")
+def _thead_hgemm_tn_cola_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    beta: tl.float32,
+    lda,
+    ldb,
+    ldc,
+    BETA_IS_ZERO: tl.constexpr,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+    FULL: tl.constexpr,
+):
+    """TN (A^T x B) kernel loading A blocks column-wise.
+
+    A is (K, M) row-major with lda=M; the (BLOCK_M, BLOCK_K) block is read with
+    the M dimension contiguous, so the A^T transpose happens implicitly in the
+    load addressing and tl.dot sees a normal (BLOCK_M, BLOCK_K) x (BLOCK_K,
+    BLOCK_N) pair. FULL selects the fully-aligned, branch-free fast path.
+    """
+    a_ptr = a_ptr.to(tl.pointer_type(tl.float16))
+    b_ptr = b_ptr.to(tl.pointer_type(tl.float16))
+    c_ptr = c_ptr.to(tl.pointer_type(tl.float16))
+
+    pid = tl.program_id(0)
+    grid_m = tl.cdiv(M, BLOCK_M)
+    grid_n = tl.cdiv(N, BLOCK_N)
+    width = GROUP_M * grid_n
+    group_id = pid // width
+    group_size = min(grid_m - group_id * GROUP_M, GROUP_M)
+    pid_m = group_id * GROUP_M + (pid % group_size)
+    pid_n = (pid % width) // group_size
+
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_k = tl.arange(0, BLOCK_K)
+
+    a_ptrs = a_ptr + offs_m[:, None] + offs_k[None, :] * lda
+    b_ptrs = b_ptr + offs_k[:, None] * ldb + offs_n[None, :]
+
+    k_full = K // BLOCK_K
+    k_rem = K % BLOCK_K
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+
+    if FULL:
+        for _ in range(0, k_full):
+            a_block = tl.load(a_ptrs)
+            b = tl.load(b_ptrs)
+            acc = tl.dot(a_block, b, acc, out_dtype=tl.float32)
+            a_ptrs += BLOCK_K * lda
+            b_ptrs += BLOCK_K * ldb
+        if k_rem > 0:
+            mask_k = offs_k < k_rem
+            a_block = tl.load(a_ptrs, mask=mask_k[None, :], other=0.0)
+            b = tl.load(b_ptrs, mask=mask_k[:, None], other=0.0)
+            acc = tl.dot(a_block, b, acc, out_dtype=tl.float32)
+        result = alpha * acc
+        c_ptrs = c_ptr + offs_m[:, None] * ldc + offs_n[None, :]
+        if not BETA_IS_ZERO:
+            c_vals = tl.load(c_ptrs).to(tl.float32)
+            result += beta * c_vals
+        tl.store(c_ptrs, result.to(tl.float16))
+    else:
+        mask_m = offs_m < M
+        mask_n = offs_n < N
+        for _ in range(0, k_full):
+            a_block = tl.load(a_ptrs, mask=mask_m[:, None], other=0.0)
+            b = tl.load(b_ptrs, mask=mask_n[None, :], other=0.0)
+            acc = tl.dot(a_block, b, acc, out_dtype=tl.float32)
+            a_ptrs += BLOCK_K * lda
+            b_ptrs += BLOCK_K * ldb
+        if k_rem > 0:
+            mask_k = offs_k < k_rem
+            a_block = tl.load(a_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0)
+            b = tl.load(b_ptrs, mask=mask_k[:, None] & mask_n[None, :], other=0.0)
+            acc = tl.dot(a_block, b, acc, out_dtype=tl.float32)
+        result = alpha * acc
+        c_ptrs = c_ptr + offs_m[:, None] * ldc + offs_n[None, :]
+        c_mask = mask_m[:, None] & mask_n[None, :]
+        if not BETA_IS_ZERO:
+            c_vals = tl.load(c_ptrs, mask=c_mask, other=0.0).to(tl.float32)
+            result += beta * c_vals
+        tl.store(c_ptrs, result.to(tl.float16), mask=c_mask)
+
+
+def _thead_hgemm_tn_cola_config(m: int, n: int, k: int):
+    """Config for the colA TN kernel, tuned on Zhenwu for large aligned shapes."""
+    return 128, 128, 64, 8, 4, 112
+
+
+def _thead_hgemm_tn_use_cola(m: int, n: int, k: int) -> bool:
+    """Use the column-loaded (colA) TN kernel for aligned shapes where the
+    direct trans-a TN kernel is measurably slower.
+
+    The colA kernel avoids both tl.trans in the dot and the materialize
+    (transpose + NN) overhead; it is the fastest option measured on Zhenwu for
+    the 2048-square family and large-K shapes.
+    """
+    if m % 128 != 0 or n % 128 != 0 or k % 64 != 0:
+        return False
+    if m == n and m == k == 2048:
+        return True
+    if m == 2048 and n == 2048 and k == 16384:
+        return True
+    if m == 2048 and n == 4096 and k == 11008:
+        return True
+    return False
+
+
+def _run_thead_hgemm_tn_cola(
+    A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero
+):
+    block_m, block_n, block_k, num_warps, num_stages, maxnreg = (
+        _thead_hgemm_tn_cola_config(m, n, k)
+    )
+    _thead_hgemm_tn_cola_kernel[
+        (triton.cdiv(m, block_m) * triton.cdiv(n, block_n),)
+    ](
+        A,
+        B,
+        C,
+        alpha,
+        beta,
+        lda,
+        ldb,
+        ldc,
+        beta_is_zero,
+        M=m,
+        N=n,
+        K=k,
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        BLOCK_K=block_k,
+        GROUP_M=4,
+        FULL=True,
+        num_warps=num_warps,
+        num_stages=num_stages,
+        maxnreg=maxnreg,
+    )
+
+
 def _run_thead_hgemm_tn(
     A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero, aligned
 ):
+    if _thead_hgemm_tn_use_cola(m, n, k):
+        _run_thead_hgemm_tn_cola(
+            A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero
+        )
+        return
     if _thead_hgemm_tn_use_desc_overlap(m, n, k):
         block_m, block_n, block_k, num_warps, num_stages, maxnreg = (
             _thead_hgemm_tn_desc_overlap_config(m, n, k)
@@ -2196,6 +2350,11 @@ def _thead_hgemm_tn_should_materialize(m: int, n: int, k: int) -> bool:
             return True
         if min(m, n) <= 64:
             return False
+        if m != n and max(m, n) >= 8 * min(m, n) and min(m, n) >= 1024:
+            # Semi-skinny aligned shapes (e.g. 2048x16384, 16384x2048,
+            # 32768x1024): the transpose is cheap relative to the GEMM and the
+            # transpose-free NN/TT kernels beat the direct trans-a TN kernel.
+            return True
         if m <= n:
             return m <= 512 and n >= 4096 and k >= 2048
         return n <= 512 and m >= 4096 and k >= 2048
