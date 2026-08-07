@@ -12,7 +12,29 @@ from flag_blas.ops import CUBLAS_FILL_MODE_LOWER, CUBLAS_FILL_MODE_UPPER
 from .accuracy_utils import blas_assert_close, to_cpu_blas_tensor
 from .conftest import TO_CPU
 
-HER_SIZES = [64, 128, 256, 512]
+HER_SIZES = [
+    64,
+    96,
+    127,
+    128,
+    129,
+    192,
+    255,
+    256,
+    257,
+    384,
+    511,
+    512,
+    513,
+    768,
+    1023,
+    1024,
+    1025,
+    1536,
+    2048,
+    3072,
+    4096,
+]
 HER_UPLOS = [CUBLAS_FILL_MODE_LOWER, CUBLAS_FILL_MODE_UPPER]
 CUBLAS_POINTER_MODE_HOST = 0
 _cublas = None

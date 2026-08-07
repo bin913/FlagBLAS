@@ -13,7 +13,29 @@ from .conftest import TO_CPU
 
 pytestmark = pytest.mark.syr
 
-SYR_SIZES = [64, 128, 256]
+SYR_SIZES = [
+    64,
+    96,
+    127,
+    128,
+    129,
+    192,
+    255,
+    256,
+    257,
+    384,
+    511,
+    512,
+    513,
+    768,
+    1023,
+    1024,
+    1025,
+    1536,
+    2048,
+    3072,
+    4096,
+]
 SYR_UPLOS = [CUBLAS_FILL_MODE_UPPER, CUBLAS_FILL_MODE_LOWER]
 SYR_STRIDES = [(2, CUBLAS_FILL_MODE_UPPER, 64), (3, CUBLAS_FILL_MODE_LOWER, 128)]
 

@@ -208,7 +208,41 @@ def _run(op, cpu_ref, gpu_ref, dtype, uplo, trans, diag, n, incx=1):
     blas_assert_close(y, ref, dtype, reduce_dim=n)
 
 
-TPSV_SIZES = (1, 2, 3, 7, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 129)
+TPSV_SIZES = (
+    1,
+    2,
+    3,
+    7,
+    15,
+    16,
+    17,
+    31,
+    32,
+    33,
+    63,
+    64,
+    65,
+    96,
+    127,
+    128,
+    129,
+    192,
+    255,
+    256,
+    257,
+    384,
+    511,
+    512,
+    513,
+    768,
+    1023,
+    1024,
+    1025,
+    1536,
+    2048,
+    3072,
+    4096,
+)
 TPSV_STRIDE_SIZES = (3, 17, 33, 127)
 
 REAL_CASES = [
