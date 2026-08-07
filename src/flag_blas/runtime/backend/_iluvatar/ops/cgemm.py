@@ -14,6 +14,7 @@
 
 import torch
 import triton
+import triton.language as tl
 
 from flag_blas.ops.level3.cgemm import (
     ScalarType,
@@ -22,6 +23,191 @@ from flag_blas.ops.level3.cgemm import (
     _validate_cgemm_args,
 )
 from flag_blas.runtime import torch_device_fn
+from flag_blas.runtime.backend._iluvatar.ops.sgemm import sgemm as _sgemm_iluvatar
+
+
+_CGEMM_WORKSPACE = {"key": None, "buffers": None}
+
+
+@triton.jit
+def _cgemm_split_sum_op_kernel(
+    src,
+    dst_r,
+    dst_i,
+    dst_sum,
+    total,
+    cols: tl.constexpr,
+    ld: tl.constexpr,
+    TRANS: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    offsets = pid * BLOCK + tl.arange(0, BLOCK)
+    mask = offsets < total
+    row = offsets // cols
+    col = offsets - row * cols
+    if TRANS == 0:
+        src_offsets = row * ld + col
+    else:
+        src_offsets = col * ld + row
+    real = tl.load(src + 2 * src_offsets, mask=mask, other=0.0)
+    imag = tl.load(src + 2 * src_offsets + 1, mask=mask, other=0.0)
+    tl.store(dst_r + offsets, real, mask=mask)
+    tl.store(dst_i + offsets, imag, mask=mask)
+    tl.store(dst_sum + offsets, real + imag, mask=mask)
+
+
+@triton.jit
+def _cgemm_split_sum2_op_kernel(
+    src_a,
+    src_b,
+    dst_ar,
+    dst_ai,
+    dst_as,
+    dst_br,
+    dst_bi,
+    dst_bs,
+    total_a,
+    total_b,
+    cols_a: tl.constexpr,
+    cols_b: tl.constexpr,
+    lda: tl.constexpr,
+    ldb: tl.constexpr,
+    TRANS_A: tl.constexpr,
+    TRANS_B: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    offsets = pid * BLOCK + tl.arange(0, BLOCK)
+
+    mask_a = offsets < total_a
+    row_a = offsets // cols_a
+    col_a = offsets - row_a * cols_a
+    if TRANS_A == 0:
+        a_src = row_a * lda + col_a
+    else:
+        a_src = col_a * lda + row_a
+    ar = tl.load(src_a + 2 * a_src, mask=mask_a, other=0.0)
+    ai = tl.load(src_a + 2 * a_src + 1, mask=mask_a, other=0.0)
+    tl.store(dst_ar + offsets, ar, mask=mask_a)
+    tl.store(dst_ai + offsets, ai, mask=mask_a)
+    tl.store(dst_as + offsets, ar + ai, mask=mask_a)
+
+    mask_b = offsets < total_b
+    row_b = offsets // cols_b
+    col_b = offsets - row_b * cols_b
+    if TRANS_B == 0:
+        b_src = row_b * ldb + col_b
+    else:
+        b_src = col_b * ldb + row_b
+    br = tl.load(src_b + 2 * b_src, mask=mask_b, other=0.0)
+    bi = tl.load(src_b + 2 * b_src + 1, mask=mask_b, other=0.0)
+    tl.store(dst_br + offsets, br, mask=mask_b)
+    tl.store(dst_bi + offsets, bi, mask=mask_b)
+    tl.store(dst_bs + offsets, br + bi, mask=mask_b)
+
+
+@triton.jit
+def _cgemm_merge_3m_kernel(dst, prod_r, prod_i, prod_sum, total, BLOCK: tl.constexpr):
+    pid = tl.program_id(0)
+    offsets = pid * BLOCK + tl.arange(0, BLOCK)
+    mask = offsets < total
+    real_prod = tl.load(prod_r + offsets, mask=mask, other=0.0)
+    imag_prod = tl.load(prod_i + offsets, mask=mask, other=0.0)
+    sum_prod = tl.load(prod_sum + offsets, mask=mask, other=0.0)
+    tl.store(dst + 2 * offsets, real_prod - imag_prod, mask=mask)
+    tl.store(dst + 2 * offsets + 1, sum_prod - real_prod - imag_prod, mask=mask)
+
+
+def _get_cgemm_workspace(A: torch.Tensor, m: int, n: int, k: int):
+    key = (A.device, m, n, k)
+    if _CGEMM_WORKSPACE["key"] != key:
+        _CGEMM_WORKSPACE["key"] = key
+        _CGEMM_WORKSPACE["buffers"] = (
+            torch.empty((m, k), device=A.device, dtype=torch.float32),
+            torch.empty((m, k), device=A.device, dtype=torch.float32),
+            torch.empty((m, k), device=A.device, dtype=torch.float32),
+            torch.empty((k, n), device=A.device, dtype=torch.float32),
+            torch.empty((k, n), device=A.device, dtype=torch.float32),
+            torch.empty((k, n), device=A.device, dtype=torch.float32),
+            torch.empty((m, n), device=A.device, dtype=torch.float32),
+            torch.empty((m, n), device=A.device, dtype=torch.float32),
+            torch.empty((m, n), device=A.device, dtype=torch.float32),
+        )
+    return _CGEMM_WORKSPACE["buffers"]
+
+
+def _launch_cgemm_pack_sgemm(
+    transa: int,
+    transb: int,
+    m: int,
+    n: int,
+    k: int,
+    A: torch.Tensor,
+    lda: int,
+    B: torch.Tensor,
+    ldb: int,
+    C: torch.Tensor,
+) -> None:
+    Ar, Ai, As, Br, Bi, Bs, prod_r, prod_i, prod_sum = _get_cgemm_workspace(A, m, n, k)
+    A_real = torch.view_as_real(A).reshape(-1)
+    B_real = torch.view_as_real(B).reshape(-1)
+    C_real = torch.view_as_real(C).reshape(-1)
+
+    split_grid = (triton.cdiv(max(m * k, k * n), 1024),)
+    merge_grid = (triton.cdiv(m * n, 1024),)
+
+    _cgemm_split_sum2_op_kernel[split_grid](
+        A_real,
+        B_real,
+        Ar,
+        Ai,
+        As,
+        Br,
+        Bi,
+        Bs,
+        m * k,
+        k * n,
+        k,
+        n,
+        lda,
+        ldb,
+        transa,
+        transb,
+        BLOCK=1024,
+    )
+
+    _sgemm_iluvatar(0, 0, m, n, k, 1.0, Ar, k, Br, n, 0.0, prod_r, n)
+    _sgemm_iluvatar(0, 0, m, n, k, 1.0, Ai, k, Bi, n, 0.0, prod_i, n)
+    _sgemm_iluvatar(0, 0, m, n, k, 1.0, As, k, Bs, n, 0.0, prod_sum, n)
+    _cgemm_merge_3m_kernel[merge_grid](
+        C_real, prod_r, prod_i, prod_sum, m * n, BLOCK=1024
+    )
+
+
+def _try_cgemm_pack_sgemm(
+    transa: int,
+    transb: int,
+    m: int,
+    n: int,
+    k: int,
+    alpha_is_one: bool,
+    beta_is_zero: bool,
+    A: torch.Tensor,
+    lda: int,
+    B: torch.Tensor,
+    ldb: int,
+    C: torch.Tensor,
+    ldc: int,
+) -> bool:
+    if not (alpha_is_one and beta_is_zero):
+        return False
+    if transa not in (0, 1) or transb not in (0, 1):
+        return False
+    if ldc != n or max(m, n, k) < 1023:
+        return False
+    _launch_cgemm_pack_sgemm(transa, transb, m, n, k, A, lda, B, ldb, C)
+    return True
 
 
 def _select_iluvatar_cgemm_config(m: int, n: int, k: int):
@@ -62,6 +248,25 @@ def cgemm(
 
     beta_is_zero = beta_r == 0.0 and beta_i == 0.0
     alpha_is_one = alpha_r == 1.0 and alpha_i == 0.0
+
+    with torch_device_fn.device(A.device):
+        if _try_cgemm_pack_sgemm(
+            transa,
+            transb,
+            m,
+            n,
+            k,
+            alpha_is_one,
+            beta_is_zero,
+            A,
+            lda,
+            B,
+            ldb,
+            C,
+            ldc,
+        ):
+            return
+
     block_m, block_n, block_k, num_warps, group_m = _select_iluvatar_cgemm_config(
         m, n, k
     )
