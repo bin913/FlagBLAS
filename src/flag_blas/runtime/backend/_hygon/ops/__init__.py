@@ -1,17 +1,30 @@
 from .gemv import cgemv, zgemv
+from .gbmv import cgbmv, dgbmv, zgbmv
+from .hbmv import chbmv, zhbmv
 from .hemv import chemv, zhemv
+from .hpmv import chpmv, zhpmv
+from .spmv import dspmv, sspmv
 from .symv import csymv, zsymv
 from .trmv import ctrmv, dtrmv, strmv, ztrmv
 
 __all__ = [
     "cgemv",
+    "cgbmv",
+    "chbmv",
     "chemv",
+    "chpmv",
     "csymv",
     "ctrmv",
+    "dgbmv",
+    "dspmv",
     "dtrmv",
+    "sspmv",
     "strmv",
-    "zgemv",
     "zhemv",
+    "zgemv",
+    "zgbmv",
+    "zhbmv",
+    "zhpmv",
     "zsymv",
     "ztrmv",
 ]

@@ -8,12 +8,21 @@ from scipy.linalg import blas as cpu_blas
 import flag_blas
 from flag_blas.ops import CUBLAS_OP_C, CUBLAS_OP_N, CUBLAS_OP_T
 
+if flag_blas.vendor_name == "hygon":
+    from .hipblas_reference import (
+        HipComplex,
+        HipDoubleComplex,
+        check_hipblas_status,
+        get_hipblas_context,
+    )
+
 from .accuracy_utils import blas_assert_close, to_cpu_blas_tensor, to_reference
 from .conftest import TO_CPU
 
 IS_ASCEND = flag_blas.vendor_name == "ascend"
+IS_HYGON = flag_blas.vendor_name == "hygon"
 
-if not IS_ASCEND:
+if not IS_ASCEND and not IS_HYGON:
     import cupy as cp
 
 
@@ -31,7 +40,7 @@ def load_cublas():
     raise RuntimeError("Unable to find libcublas.so on this system")
 
 
-_cublas = None if IS_ASCEND else load_cublas()
+_cublas = None if IS_ASCEND or IS_HYGON else load_cublas()
 
 
 class cuComplex(ctypes.Structure):
@@ -40,6 +49,80 @@ class cuComplex(ctypes.Structure):
 
 class cuDoubleComplex(ctypes.Structure):
     _fields_ = [("x", ctypes.c_double), ("y", ctypes.c_double)]
+
+
+def hipblas_gbmv_reference(
+    trans, m, n, kl, ku, alpha, AB, lda, x, incx, beta, y, incy
+):
+    if m == 0 or n == 0:
+        return
+
+    if AB.dtype == torch.float32:
+        symbol = "hipblasSgbmv"
+        scalar_type = ctypes.c_float
+        alpha_value = scalar_type(alpha)
+        beta_value = scalar_type(beta)
+    elif AB.dtype == torch.float64:
+        symbol = "hipblasDgbmv"
+        scalar_type = ctypes.c_double
+        alpha_value = scalar_type(alpha)
+        beta_value = scalar_type(beta)
+    elif AB.dtype == torch.complex64:
+        symbol = "hipblasCgbmv_v2"
+        scalar_type = HipComplex
+        alpha_value = scalar_type(alpha.real, alpha.imag)
+        beta_value = scalar_type(beta.real, beta.imag)
+    elif AB.dtype == torch.complex128:
+        symbol = "hipblasZgbmv_v2"
+        scalar_type = HipDoubleComplex
+        alpha_value = scalar_type(alpha.real, alpha.imag)
+        beta_value = scalar_type(beta.real, beta.imag)
+    else:
+        raise ValueError(f"Unsupported dtype for hipBLAS GBMV: {AB.dtype}")
+
+    hip_trans = {
+        CUBLAS_OP_N: 111,
+        CUBLAS_OP_T: 112,
+        CUBLAS_OP_C: 113,
+    }[trans]
+    library, handle = get_hipblas_context(AB)
+    function = getattr(library, symbol)
+    function.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.POINTER(scalar_type),
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.POINTER(scalar_type),
+        ctypes.c_void_p,
+        ctypes.c_int,
+    ]
+    function.restype = ctypes.c_int
+    check_hipblas_status(
+        function(
+            handle,
+            hip_trans,
+            m,
+            n,
+            kl,
+            ku,
+            ctypes.byref(alpha_value),
+            ctypes.c_void_p(AB.data_ptr()),
+            lda,
+            ctypes.c_void_p(x.data_ptr()),
+            incx,
+            ctypes.byref(beta_value),
+            ctypes.c_void_p(y.data_ptr()),
+            incy,
+        ),
+        symbol,
+    )
 
 
 def cublas_gbmv_reference(trans, m, n, kl, ku, alpha, AB, lda, x, incx, beta, y, incy):
@@ -166,9 +249,14 @@ def gbmv_reference(trans, m, n, kl, ku, alpha, AB, lda, x, incx, beta, y, incy):
         )
 
     ref_y = y.clone()
-    cublas_gbmv_reference(
-        trans, m, n, kl, ku, alpha, AB, lda, x, incx, beta, ref_y, incy
-    )
+    if IS_HYGON:
+        hipblas_gbmv_reference(
+            trans, m, n, kl, ku, alpha, AB, lda, x, incx, beta, ref_y, incy
+        )
+    else:
+        cublas_gbmv_reference(
+            trans, m, n, kl, ku, alpha, AB, lda, x, incx, beta, ref_y, incy
+        )
     return ref_y
 
 

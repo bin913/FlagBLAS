@@ -7,7 +7,14 @@ from scipy.linalg import blas as cpu_blas
 
 import flag_blas
 
-if flag_blas.vendor_name != "ascend":
+if flag_blas.vendor_name == "hygon":
+    from .hipblas_reference import (
+        HipComplex,
+        HipDoubleComplex,
+        check_hipblas_status,
+        get_hipblas_context,
+    )
+elif flag_blas.vendor_name != "ascend":
     import cupy as cp
     from cupy_backends.cuda.libs import cublas
 from flag_blas.ops import CUBLAS_FILL_MODE_LOWER, CUBLAS_FILL_MODE_UPPER
@@ -30,7 +37,9 @@ def load_cublas():
     raise RuntimeError("Unable to find libcublas.so on this system")
 
 
-_cublas = None if flag_blas.vendor_name == "ascend" else load_cublas()
+_cublas = (
+    None if flag_blas.vendor_name in {"ascend", "hygon"} else load_cublas()
+)
 
 
 class cuComplex(ctypes.Structure):
@@ -39,6 +48,62 @@ class cuComplex(ctypes.Structure):
 
 class cuDoubleComplex(ctypes.Structure):
     _fields_ = [("x", ctypes.c_double), ("y", ctypes.c_double)]
+
+
+def hipblas_hbmv_reference(uplo, n, k, alpha, A, lda, x, incx, beta, y, incy):
+    if n == 0:
+        return y
+
+    alpha = alpha.item() if isinstance(alpha, torch.Tensor) else complex(alpha)
+    beta = beta.item() if isinstance(beta, torch.Tensor) else complex(beta)
+
+    if A.dtype == torch.complex64:
+        symbol = "hipblasChbmv_v2"
+        alpha_value = HipComplex(alpha.real, alpha.imag)
+        beta_value = HipComplex(beta.real, beta.imag)
+    elif A.dtype == torch.complex128:
+        symbol = "hipblasZhbmv_v2"
+        alpha_value = HipDoubleComplex(alpha.real, alpha.imag)
+        beta_value = HipDoubleComplex(beta.real, beta.imag)
+    else:
+        raise ValueError(f"Unsupported dtype for hipBLAS HBMV: {A.dtype}")
+
+    hip_uplo = 121 if uplo == CUBLAS_FILL_MODE_UPPER else 122
+    library, handle = get_hipblas_context(A)
+    function = getattr(library, symbol)
+    function.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_int,
+    ]
+    function.restype = ctypes.c_int
+    check_hipblas_status(
+        function(
+            handle,
+            hip_uplo,
+            n,
+            k,
+            ctypes.byref(alpha_value),
+            ctypes.c_void_p(A.data_ptr()),
+            lda,
+            ctypes.c_void_p(x.data_ptr()),
+            incx,
+            ctypes.byref(beta_value),
+            ctypes.c_void_p(y.data_ptr()),
+            incy,
+        ),
+        symbol,
+    )
+    return y
 
 
 def cublas_hbmv_reference(uplo, n, k, alpha, A, lda, x, incx, beta, y, incy):
@@ -109,7 +174,14 @@ def hbmv_reference(uplo, n, k, alpha, A, lda, x, incx, beta, y, incy):
         return cpu_hbmv_reference(uplo, n, k, alpha, A, lda, x, incx, beta, y, incy)
 
     ref_y = y.clone()
-    cublas_hbmv_reference(uplo, n, k, alpha, A, lda, x, incx, beta, ref_y, incy)
+    if flag_blas.vendor_name == "hygon":
+        hipblas_hbmv_reference(
+            uplo, n, k, alpha, A, lda, x, incx, beta, ref_y, incy
+        )
+    else:
+        cublas_hbmv_reference(
+            uplo, n, k, alpha, A, lda, x, incx, beta, ref_y, incy
+        )
     return ref_y
 
 
