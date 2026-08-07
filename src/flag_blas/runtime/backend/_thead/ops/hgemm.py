@@ -1017,6 +1017,91 @@ def _thead_hgemm_tn_desc_kernel(
 
 
 @libentry()
+@triton.jit(ppu_hint="fwd")
+def _thead_hgemm_tn_desc_overlap_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    beta: tl.float32,
+    lda,
+    ldb,
+    ldc,
+    BETA_IS_ZERO: tl.constexpr,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+):
+    """TN desc kernel for K % BLOCK_K == BLOCK_K - 1.
+
+    desc.load with a partially-out-of-bounds first (K) dimension returns
+    garbage instead of zero-fill on Zhenwu, so the last k block is loaded
+    at K - BLOCK_K (fully in-bounds, covering K-BLOCK_K .. K-1). This
+    double-counts the single k = K-BLOCK_K row, which is subtracted below
+    as a rank-1 correction. M/N boundaries are handled by desc fill (correct).
+    """
+    a_ptr = a_ptr.to(tl.pointer_type(tl.float16))
+    b_ptr = b_ptr.to(tl.pointer_type(tl.float16))
+    c_ptr = c_ptr.to(tl.pointer_type(tl.float16))
+
+    pid = tl.program_id(0)
+    grid_m = tl.cdiv(M, BLOCK_M)
+    grid_n = tl.cdiv(N, BLOCK_N)
+    width = GROUP_M * grid_n
+    group_id = pid // width
+    group_size = min(grid_m - group_id * GROUP_M, GROUP_M)
+    pid_m = group_id * GROUP_M + (pid % group_size)
+    pid_n = (pid % width) // group_size
+
+    offs_m = pid_m * BLOCK_M
+    offs_n = pid_n * BLOCK_N
+    a_desc = tl.make_tensor_descriptor(
+        a_ptr, shape=[K, M], strides=[lda, 1], block_shape=[BLOCK_K, BLOCK_M]
+    )
+    b_desc = tl.make_tensor_descriptor(
+        b_ptr, shape=[K, N], strides=[ldb, 1], block_shape=[BLOCK_K, BLOCK_N]
+    )
+    c_desc = tl.make_tensor_descriptor(
+        c_ptr, shape=[M, N], strides=[ldc, 1], block_shape=[BLOCK_M, BLOCK_N]
+    )
+
+    # C(M,N) = A^T(M,K) x B(K,N); C^T(N,M) = B^T(N,K) x A(K,M).
+    acc_t = tl.zeros((BLOCK_N, BLOCK_M), dtype=tl.float32)
+    k_full = K // BLOCK_K
+    for i in range(0, k_full):
+        offs_k = i * BLOCK_K
+        a_t = a_desc.load([offs_k, offs_m])
+        b = b_desc.load([offs_k, offs_n])
+        acc_t = tl.dot(tl.trans(b), a_t, acc_t, out_dtype=tl.float32)
+
+    # In-bounds last block covering K-BLOCK_K .. K-1 (overlaps only at k = K-BLOCK_K).
+    offs_k = K - BLOCK_K
+    a_t = a_desc.load([offs_k, offs_m])
+    b = b_desc.load([offs_k, offs_n])
+    acc_t = tl.dot(tl.trans(b), a_t, acc_t, out_dtype=tl.float32)
+
+    # Subtract the double-counted row k = K - BLOCK_K.
+    offs_mv = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_nv = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    mask_m = offs_mv < M
+    mask_n = offs_nv < N
+    a_row = tl.load(a_ptr + (K - BLOCK_K) * lda + offs_mv, mask=mask_m, other=0.0)
+    b_row = tl.load(b_ptr + (K - BLOCK_K) * ldb + offs_nv, mask=mask_n, other=0.0)
+    acc_t = acc_t - b_row[:, None] * a_row[None, :]
+
+    acc = tl.trans(acc_t)
+    result = alpha * acc
+    if not BETA_IS_ZERO:
+        c_vals = c_desc.load([offs_m, offs_n]).to(tl.float32)
+        result += beta * c_vals
+    c_desc.store([offs_m, offs_n], result.to(tl.float16))
+
+
+@libentry()
 @triton.jit(ppu_hint="bwd")
 def _thead_hgemm_tn_bwd_kernel(
     a_ptr,
@@ -1802,6 +1887,26 @@ def _thead_hgemm_tn_use_trans_a(m: int, n: int, k: int) -> bool:
     return m <= n or (n == 128 and m >= 4096 and k <= 1024)
 
 
+def _thead_hgemm_tn_desc_overlap_config(m: int, n: int, k: int):
+    """Config for the small-shape TN desc-overlap kernel (tuned on 511)."""
+    return 64, 128, 64, 8, 3, 128
+
+
+def _thead_hgemm_tn_use_desc_overlap(m: int, n: int, k: int) -> bool:
+    """Use the desc-overlap TN kernel for small non-aligned shapes.
+
+    desc.load fills out-of-bounds rows of the last (partial) K block with
+    garbage on Zhenwu, which the overlap kernel avoids by loading the tail
+    block fully in-bounds. Only beneficial for small shapes: for larger
+    shapes the materialize (transpose + NN) path is faster, since its dot
+    has no in-register transpose.
+    """
+    if max(m, n, k) > 512:
+        return False
+    _, _, block_k, _, _, _ = _thead_hgemm_tn_desc_overlap_config(m, n, k)
+    return k % block_k == block_k - 1 and k >= 2 * block_k
+
+
 def _thead_hgemm_nt_config(m: int, n: int, k: int):
     """Reuse NN config for NT variant."""
     return _thead_hgemm_nn_config(m, n, k)
@@ -1894,6 +1999,35 @@ def _thead_hgemm_is_tile_aligned(m: int, n: int, k: int, block_m: int, block_n: 
 def _run_thead_hgemm_tn(
     A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero, aligned
 ):
+    if _thead_hgemm_tn_use_desc_overlap(m, n, k):
+        block_m, block_n, block_k, num_warps, num_stages, maxnreg = (
+            _thead_hgemm_tn_desc_overlap_config(m, n, k)
+        )
+        _thead_hgemm_tn_desc_overlap_kernel[
+            (triton.cdiv(m, block_m) * triton.cdiv(n, block_n),)
+        ](
+            A,
+            B,
+            C,
+            alpha,
+            beta,
+            lda,
+            ldb,
+            ldc,
+            beta_is_zero,
+            M=m,
+            N=n,
+            K=k,
+            BLOCK_M=block_m,
+            BLOCK_N=block_n,
+            BLOCK_K=block_k,
+            GROUP_M=8,
+            num_warps=num_warps,
+            num_stages=num_stages,
+            maxnreg=maxnreg,
+        )
+        return
+
     block_m, block_n, block_k, num_warps, num_stages, maxnreg = _thead_hgemm_tn_config(
         m, n, k
     )
@@ -2538,7 +2672,14 @@ def hgemm(
             )
         elif transa == CUBLAS_OP_T and transb == CUBLAS_OP_N:
             if _can_use_thead_hgemm_tn(m, n, k, lda, ldb, ldc, alpha, beta):
-                if _thead_hgemm_tn_should_materialize(m, n, k):
+                if _thead_hgemm_tn_use_desc_overlap(m, n, k):
+                    # Small non-aligned TN: single fused kernel, avoids the
+                    # materialize (transpose + NN) overhead.
+                    _run_thead_hgemm_tn(
+                        A, lda, B, ldb, C, ldc, m, n, k,
+                        alpha, beta, beta_is_zero, aligned,
+                    )
+                elif _thead_hgemm_tn_should_materialize(m, n, k):
                     if m <= n:
                         # M <= N: Materialize A^T as (M, K) and use fast NN kernel.
                         # A is (K, M) with lda=M, A^T will be (M, K) with lda=K.
