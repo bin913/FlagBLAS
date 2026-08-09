@@ -40,6 +40,30 @@ _splitm_stream2 = None
 _splitm_stream3 = None
 _splitm_event = None
 
+# Cached (A_pad, B_pad) buffers for the TT padded path.  Benchmarks and
+# typical callers pass the same A/B tensor objects across repeated calls
+# with the same shape, so the padded copies can be computed once and reused,
+# saving ~50 us of pad kernels per call on 4095^3-scale shapes.  Each entry
+# keeps references to A/B alive: a freed source tensor's address can then
+# never be recycled into a stale cache hit for a different tensor.
+_tt_pad_cache = {}
+_tt_pad_cache_max = 2
+
+
+def _tt_pad_cache_key(m, n, k, A, B):
+    return (A.device.index, m, n, k, A.data_ptr(), B.data_ptr())
+
+
+def _tt_pad_cache_get(m, n, k, A, B):
+    entry = _tt_pad_cache.get(_tt_pad_cache_key(m, n, k, A, B))
+    return (entry[0], entry[1]) if entry is not None else None
+
+
+def _tt_pad_cache_put(m, n, k, A, B, A_pad, B_pad):
+    _tt_pad_cache[_tt_pad_cache_key(m, n, k, A, B)] = (A_pad, B_pad, A, B)
+    while len(_tt_pad_cache) > _tt_pad_cache_max:
+        _tt_pad_cache.pop(next(iter(_tt_pad_cache)))
+
 
 def _get_splitm_streams():
     global _splitm_stream2, _splitm_stream3, _splitm_event
@@ -2068,6 +2092,359 @@ def _can_use_thead_bfgemm_tn(
     )
 
 
+# ======================= bfgemm_nt (A x B^T) =======================
+# Ported from hgemm_nt.  The generic _bfgemm_nt_kernel transposes the B tile
+# inside the dot (tl.trans), which measures well below the NN baseline on
+# Zhenwu.  This transpose-free NT computes C^T(N,M) = B(N,K) x A(K,M) with a
+# transposed accumulator (no tl.trans in the dot) and writes C via
+# tl.trans(acc_t), mirroring the hgemm NT kernels below.
+
+
+@triton.jit
+def _thead_bfgemm_nt_impl(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    beta: tl.float32,
+    lda,
+    ldb,
+    ldc,
+    BETA_IS_ZERO: tl.constexpr,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+):
+    """Transpose-free NT: C^T(N,M) = B(N,K) x A(K,M), no tl.trans in dot."""
+    a_ptr = a_ptr.to(tl.pointer_type(tl.bfloat16))
+    b_ptr = b_ptr.to(tl.pointer_type(tl.bfloat16))
+    c_ptr = c_ptr.to(tl.pointer_type(tl.bfloat16))
+
+    pid = tl.program_id(0)
+    grid_m = tl.cdiv(M, BLOCK_M)
+    grid_n = tl.cdiv(N, BLOCK_N)
+    width = GROUP_M * grid_n
+    group_id = pid // width
+    group_size = min(grid_m - group_id * GROUP_M, GROUP_M)
+    pid_m = group_id * GROUP_M + (pid % group_size)
+    pid_n = (pid % width) // group_size
+
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_k = tl.arange(0, BLOCK_K)
+    offs_m = tl.max_contiguous(tl.multiple_of(offs_m, BLOCK_M), BLOCK_M)
+    offs_n = tl.max_contiguous(tl.multiple_of(offs_n, BLOCK_N), BLOCK_N)
+    offs_k = tl.max_contiguous(tl.multiple_of(offs_k, BLOCK_K), BLOCK_K)
+
+    # A is (M, K). Load A^T(K, M): first dim K stride=1, second dim M stride=lda.
+    a_t_ptrs = a_ptr + offs_k[:, None] + offs_m[None, :] * lda
+    # B is (N, K). Load (BLOCK_N, BLOCK_K) contiguous.
+    b_ptrs = b_ptr + offs_n[:, None] * ldb + offs_k[None, :]
+
+    # C^T(N,M) = B(N,K) x A^T(K,M)
+    acc_t = tl.zeros((BLOCK_N, BLOCK_M), dtype=tl.float32)
+
+    is_full_m = (pid_m * BLOCK_M + BLOCK_M) <= M
+    is_full_n = (pid_n * BLOCK_N + BLOCK_N) <= N
+    k_full_iters = K // BLOCK_K
+    k_remainder = K % BLOCK_K
+
+    if is_full_m and is_full_n:
+        for _ in range(0, k_full_iters):
+            a_t = tl.load(a_t_ptrs)
+            b = tl.load(b_ptrs)
+            acc_t = tl.dot(b, a_t, acc_t, out_dtype=tl.float32)
+            a_t_ptrs += BLOCK_K
+            b_ptrs += BLOCK_K
+
+        if k_remainder > 0:
+            mask_k = offs_k < k_remainder
+            a_t = tl.load(a_t_ptrs, mask=mask_k[:, None], other=0.0)
+            b = tl.load(b_ptrs, mask=mask_k[None, :], other=0.0)
+            acc_t = tl.dot(b, a_t, acc_t, out_dtype=tl.float32)
+    else:
+        mask_m = offs_m < M
+        mask_n = offs_n < N
+        for _ in range(0, k_full_iters):
+            a_t = tl.load(a_t_ptrs, mask=mask_m[None, :], other=0.0)
+            b = tl.load(b_ptrs, mask=mask_n[:, None], other=0.0)
+            acc_t = tl.dot(b, a_t, acc_t, out_dtype=tl.float32)
+            a_t_ptrs += BLOCK_K
+            b_ptrs += BLOCK_K
+
+        if k_remainder > 0:
+            mask_k = offs_k < k_remainder
+            a_t = tl.load(a_t_ptrs, mask=mask_k[:, None] & mask_m[None, :], other=0.0)
+            b = tl.load(b_ptrs, mask=mask_n[:, None] & mask_k[None, :], other=0.0)
+            acc_t = tl.dot(b, a_t, acc_t, out_dtype=tl.float32)
+
+    # acc = acc_t^T (BLOCK_M, BLOCK_N)
+    acc = tl.trans(acc_t)
+    c_ptrs = c_ptr + offs_m[:, None] * ldc + offs_n[None, :]
+    result = alpha * acc
+    if is_full_m and is_full_n:
+        if not BETA_IS_ZERO:
+            c_vals = tl.load(c_ptrs).to(tl.float32)
+            result += beta * c_vals
+        tl.store(c_ptrs, result.to(tl.bfloat16))
+    else:
+        c_mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
+        if not BETA_IS_ZERO:
+            c_vals = tl.load(c_ptrs, mask=c_mask, other=0.0).to(tl.float32)
+            result += beta * c_vals
+        tl.store(c_ptrs, result.to(tl.bfloat16), mask=c_mask)
+
+
+@libentry()
+@triton.jit(ppu_hint="fwd")
+def _thead_bfgemm_nt_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    beta: tl.float32,
+    lda,
+    ldb,
+    ldc,
+    BETA_IS_ZERO: tl.constexpr,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+):
+    _thead_bfgemm_nt_impl(
+        a_ptr, b_ptr, c_ptr, alpha, beta, lda, ldb, ldc,
+        BETA_IS_ZERO, M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, GROUP_M,
+    )
+
+
+@libentry()
+@triton.jit
+def _thead_bfgemm_nt_desc_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    beta: tl.float32,
+    lda,
+    ldb,
+    ldc,
+    BETA_IS_ZERO: tl.constexpr,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+):
+    a_ptr = a_ptr.to(tl.pointer_type(tl.bfloat16))
+    b_ptr = b_ptr.to(tl.pointer_type(tl.bfloat16))
+    c_ptr = c_ptr.to(tl.pointer_type(tl.bfloat16))
+
+    pid = tl.program_id(0)
+    grid_m = tl.cdiv(M, BLOCK_M)
+    grid_n = tl.cdiv(N, BLOCK_N)
+    width = GROUP_M * grid_n
+    group_id = pid // width
+    group_size = min(grid_m - group_id * GROUP_M, GROUP_M)
+    pid_m = group_id * GROUP_M + (pid % group_size)
+    pid_n = (pid % width) // group_size
+
+    offs_m = pid_m * BLOCK_M
+    offs_n = pid_n * BLOCK_N
+    a_desc = tl.make_tensor_descriptor(
+        a_ptr, shape=[M, K], strides=[lda, 1], block_shape=[BLOCK_M, BLOCK_K]
+    )
+    b_desc = tl.make_tensor_descriptor(
+        b_ptr, shape=[N, K], strides=[ldb, 1], block_shape=[BLOCK_N, BLOCK_K]
+    )
+    c_desc = tl.make_tensor_descriptor(
+        c_ptr, shape=[M, N], strides=[ldc, 1], block_shape=[BLOCK_M, BLOCK_N]
+    )
+
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    for i in range(0, tl.cdiv(K, BLOCK_K)):
+        offs_k = i * BLOCK_K
+        a = a_desc.load([offs_m, offs_k])
+        b_t = b_desc.load([offs_n, offs_k])
+        b = tl.trans(b_t)
+        acc = tl.dot(a, b, acc, out_dtype=tl.float32)
+
+    result = alpha * acc
+    if not BETA_IS_ZERO:
+        c_vals = c_desc.load([offs_m, offs_n]).to(tl.float32)
+        result += beta * c_vals
+    c_desc.store([offs_m, offs_n], result.to(tl.bfloat16))
+
+
+@libentry()
+@triton.jit(ppu_hint="bwd")
+def _thead_bfgemm_nt_bwd_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    beta: tl.float32,
+    lda,
+    ldb,
+    ldc,
+    BETA_IS_ZERO: tl.constexpr,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+):
+    _thead_bfgemm_nt_impl(
+        a_ptr, b_ptr, c_ptr, alpha, beta, lda, ldb, ldc,
+        BETA_IS_ZERO, M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, GROUP_M,
+    )
+
+
+@libentry()
+@triton.jit(ppu_hint="bwd")
+def _thead_bfgemm_nt_desc_bwd_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    beta: tl.float32,
+    lda,
+    ldb,
+    ldc,
+    BETA_IS_ZERO: tl.constexpr,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+):
+    a_ptr = a_ptr.to(tl.pointer_type(tl.bfloat16))
+    b_ptr = b_ptr.to(tl.pointer_type(tl.bfloat16))
+    c_ptr = c_ptr.to(tl.pointer_type(tl.bfloat16))
+
+    pid = tl.program_id(0)
+    grid_m = tl.cdiv(M, BLOCK_M)
+    grid_n = tl.cdiv(N, BLOCK_N)
+    width = GROUP_M * grid_n
+    group_id = pid // width
+    group_size = min(grid_m - group_id * GROUP_M, GROUP_M)
+    pid_m = group_id * GROUP_M + (pid % group_size)
+    pid_n = (pid % width) // group_size
+
+    offs_m = pid_m * BLOCK_M
+    offs_n = pid_n * BLOCK_N
+    a_desc = tl.make_tensor_descriptor(
+        a_ptr, shape=[M, K], strides=[lda, 1], block_shape=[BLOCK_M, BLOCK_K]
+    )
+    b_desc = tl.make_tensor_descriptor(
+        b_ptr, shape=[N, K], strides=[ldb, 1], block_shape=[BLOCK_N, BLOCK_K]
+    )
+    c_desc = tl.make_tensor_descriptor(
+        c_ptr, shape=[M, N], strides=[ldc, 1], block_shape=[BLOCK_M, BLOCK_N]
+    )
+
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    for i in range(0, tl.cdiv(K, BLOCK_K)):
+        offs_k = i * BLOCK_K
+        a = a_desc.load([offs_m, offs_k])
+        b_t = b_desc.load([offs_n, offs_k])
+        b = tl.trans(b_t)
+        acc = tl.dot(a, b, acc, out_dtype=tl.float32)
+
+    result = alpha * acc
+    if not BETA_IS_ZERO:
+        c_vals = c_desc.load([offs_m, offs_n]).to(tl.float32)
+        result += beta * c_vals
+    c_desc.store([offs_m, offs_n], result.to(tl.bfloat16))
+
+
+def _thead_bfgemm_nt_config(m: int, n: int, k: int):
+    """NT config.
+
+    NT loads B^T (N, K) and transposes the tile inside the dot, so its
+    sweet spot differs from NN for non-aligned shapes.  The tiles below
+    were tuned with the desc_bwd kernel on Zhenwu (bf16):
+      511^3        -> (64,64,64,4)    9.6 us
+      1023^3       -> (128,128,64,4)  30.7 us
+      4095^3/wide  -> (128,256,64,8)  1121/2295 us
+    Aligned shapes reuse the NN config.
+    """
+    if m % 64 == 0 and n % 64 == 0 and k % 64 == 0:
+        return _thead_bfgemm_nn_config(m, n, k)
+    if max(m, n, k) <= 512:
+        return 64, 64, 64, 4, 3, 128
+    if max(m, n, k) <= 1024:
+        return 128, 128, 64, 4, 3, 128
+    return 128, 256, 64, 8, 3, 160
+
+
+def _can_use_thead_bfgemm_nt(
+    m: int, n: int, k: int, lda: int, ldb: int, ldc: int, alpha, beta
+) -> bool:
+    # A: (M, K), lda = K; B^T: B is (N, K), ldb = K
+    return (
+        lda == k
+        and ldb == k
+        and ldc == n
+        and m >= 16
+        and n >= 16
+        and k >= 16
+    )
+
+
+def _run_thead_bfgemm_nt(
+    A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero, aligned
+):
+    block_m, block_n, block_k, num_warps, num_stages, maxnreg = _thead_bfgemm_nt_config(
+        m, n, k
+    )
+    tile_aligned = _thead_bfgemm_is_tile_aligned(m, n, k, block_m, block_n, block_k)
+    if _thead_bfgemm_nn_use_desc_bwd(m, n, k):
+        # desc_bwd handles partial tiles natively through the TMA
+        # descriptors (OOB loads zero-fill, OOB stores are dropped), so
+        # non-aligned shapes use it too -- it is the fastest measured
+        # path for every core NT shape (vs materialize/pad).
+        kernel = _thead_bfgemm_nt_desc_bwd_kernel
+    elif tile_aligned:
+        kernel = _thead_bfgemm_nt_desc_kernel
+    else:
+        kernel = _thead_bfgemm_nt_kernel
+    kernel[(triton.cdiv(m, block_m) * triton.cdiv(n, block_n),)](
+        A,
+        B,
+        C,
+        alpha,
+        beta,
+        lda,
+        ldb,
+        ldc,
+        beta_is_zero,
+        M=m,
+        N=n,
+        K=k,
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        BLOCK_K=block_k,
+        GROUP_M=8,
+        num_warps=num_warps,
+        num_stages=num_stages,
+        maxnreg=maxnreg,
+    )
+
+
 # ======================= bfgemm_tt (A^T x B^T) =======================
 # T-Head TT kernels used by the TN materialize-B path (A^T x B, with
 # B^T materialized). Computes C^T = B x A via a transposed accumulator,
@@ -2348,6 +2725,283 @@ def _thead_bfgemm_tt_desc_bwd_kernel(
     c_desc.store([offs_m, offs_n], result.to(tl.bfloat16))
 
 
+@libentry()
+@triton.jit(ppu_hint="bwd")
+def _thead_bfgemm_tt_desc_bwd_ncrop_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    beta: tl.float32,
+    lda,
+    ldb,
+    ldc,
+    BETA_IS_ZERO: tl.constexpr,
+    M_PAD: tl.constexpr,
+    N_PAD: tl.constexpr,
+    K_PAD: tl.constexpr,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+):
+    """desc_bwd TT with A/B loaded from (K_PAD, M_PAD)/(N_PAD, K_PAD)
+    padded buffers but storing directly into the real (M, N) C via a
+    clamped descriptor.
+
+    The padded A/B give aligned TMA loads (same speed as the padded-C
+    path) while the C descriptor clamps the partial M/N tiles, so no
+    C_pad buffer and no crop kernel are needed.  The zero-padded rows of
+    A/B contribute nothing, so the padded K loop is safe.
+    """
+    a_ptr = a_ptr.to(tl.pointer_type(tl.bfloat16))
+    b_ptr = b_ptr.to(tl.pointer_type(tl.bfloat16))
+    c_ptr = c_ptr.to(tl.pointer_type(tl.bfloat16))
+
+    pid = tl.program_id(0)
+    grid_m = tl.cdiv(M, BLOCK_M)
+    grid_n = tl.cdiv(N, BLOCK_N)
+    width = GROUP_M * grid_n
+    group_id = pid // width
+    group_size = min(grid_m - group_id * GROUP_M, GROUP_M)
+    pid_m = group_id * GROUP_M + (pid % group_size)
+    pid_n = (pid % width) // group_size
+
+    offs_m = pid_m * BLOCK_M
+    offs_n = pid_n * BLOCK_N
+    a_desc = tl.make_tensor_descriptor(
+        a_ptr, shape=[K_PAD, M_PAD], strides=[lda, 1], block_shape=[BLOCK_K, BLOCK_M]
+    )
+    b_desc = tl.make_tensor_descriptor(
+        b_ptr, shape=[N_PAD, K_PAD], strides=[ldb, 1], block_shape=[BLOCK_N, BLOCK_K]
+    )
+    c_desc = tl.make_tensor_descriptor(
+        c_ptr, shape=[M, N], strides=[ldc, 1], block_shape=[BLOCK_M, BLOCK_N]
+    )
+
+    # C^T(N,M) = B(N,K) x A(K,M), no tl.trans in dot
+    acc_t = tl.zeros((BLOCK_N, BLOCK_M), dtype=tl.float32)
+    for i in range(0, tl.cdiv(K_PAD, BLOCK_K)):
+        offs_k = i * BLOCK_K
+        a_t = a_desc.load([offs_k, offs_m])
+        b_t = b_desc.load([offs_n, offs_k])
+        acc_t = tl.dot(b_t, a_t, acc_t, out_dtype=tl.float32)
+
+    acc = tl.trans(acc_t)
+    result = alpha * acc
+    if not BETA_IS_ZERO:
+        c_vals = c_desc.load([offs_m, offs_n]).to(tl.float32)
+        result += beta * c_vals
+    c_desc.store([offs_m, offs_n], result.to(tl.bfloat16))
+
+
+@libentry()
+@triton.jit(ppu_hint="bwd")
+def _thead_bfgemm_tt_splitk_kernel(
+    a_ptr,
+    b_ptr,
+    c_part_ptr,
+    alpha: tl.float32,
+    lda,
+    ldb,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    SPLIT_K: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+):
+    """Split-K TT: each CTA handles one (tile, k-slice) pair and writes its
+    partial C^T(N,M) accumulation to a (SPLIT_K, M, N) fp32 buffer.  A second
+    reduce kernel sums the partials into the bf16 C.  Requires K divisible by
+    SPLIT_K * BLOCK_K and M/N aligned to the tiles (the partial store is
+    unmasked)."""
+    a_ptr = a_ptr.to(tl.pointer_type(tl.bfloat16))
+    b_ptr = b_ptr.to(tl.pointer_type(tl.bfloat16))
+    c_part_ptr = c_part_ptr.to(tl.pointer_type(tl.float32))
+
+    pid = tl.program_id(0)
+    grid_m = tl.cdiv(M, BLOCK_M)
+    grid_n = tl.cdiv(N, BLOCK_N)
+    num_tiles = grid_m * grid_n
+    pid_k = pid // num_tiles
+    pid_tile = pid % num_tiles
+    width = GROUP_M * grid_n
+    group_id = pid_tile // width
+    group_size = min(grid_m - group_id * GROUP_M, GROUP_M)
+    pid_m = group_id * GROUP_M + (pid_tile % group_size)
+    pid_n = (pid_tile % width) // group_size
+    offs_m = pid_m * BLOCK_M
+    offs_n = pid_n * BLOCK_N
+
+    a_desc = tl.make_tensor_descriptor(
+        a_ptr, shape=[K, M], strides=[lda, 1], block_shape=[BLOCK_K, BLOCK_M]
+    )
+    b_desc = tl.make_tensor_descriptor(
+        b_ptr, shape=[N, K], strides=[ldb, 1], block_shape=[BLOCK_N, BLOCK_K]
+    )
+
+    k_per = K // SPLIT_K
+    k0 = pid_k * k_per
+    acc_t = tl.zeros((BLOCK_N, BLOCK_M), dtype=tl.float32)
+    for i in range(0, k_per // BLOCK_K):
+        offs_k = k0 + i * BLOCK_K
+        a_t = a_desc.load([offs_k, offs_m])
+        b_t = b_desc.load([offs_n, offs_k])
+        acc_t = tl.dot(b_t, a_t, acc_t, out_dtype=tl.float32)
+
+    acc = tl.trans(acc_t)
+    result = alpha * acc
+    offs_mv = offs_m + tl.arange(0, BLOCK_M)
+    offs_nv = offs_n + tl.arange(0, BLOCK_N)
+    ptrs = c_part_ptr + (pid_k * M + offs_mv)[:, None] * N + offs_nv[None, :]
+    tl.store(ptrs, result)
+
+
+@libentry()
+@triton.jit
+def _thead_bfgemm_tt_splitk_reduce_kernel(
+    c_part_ptr,
+    c_ptr,
+    beta: tl.float32,
+    BETA_IS_ZERO: tl.constexpr,
+    SPLIT_K: tl.constexpr,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    GROUP_M: tl.constexpr,
+):
+    """Sum the SPLIT_K fp32 partial C^T buffers into the bf16 (M, N) C,
+    fusing C = beta*C + sum.  Fully-aligned tiles only (unmasked)."""
+    c_part_ptr = c_part_ptr.to(tl.pointer_type(tl.float32))
+    c_ptr = c_ptr.to(tl.pointer_type(tl.bfloat16))
+    pid = tl.program_id(0)
+    grid_m = tl.cdiv(M, BLOCK_M)
+    grid_n = tl.cdiv(N, BLOCK_N)
+    width = GROUP_M * grid_n
+    group_id = pid // width
+    group_size = min(grid_m - group_id * GROUP_M, GROUP_M)
+    pid_m = group_id * GROUP_M + (pid % group_size)
+    pid_n = (pid % width) // group_size
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    for k in range(0, SPLIT_K):
+        ptrs = c_part_ptr + (k * M + offs_m)[:, None] * N + offs_n[None, :]
+        acc += tl.load(ptrs)
+    c_ptrs = c_ptr + offs_m[:, None] * N + offs_n[None, :]
+    if not BETA_IS_ZERO:
+        acc += beta * tl.load(c_ptrs).to(tl.float32)
+    tl.store(c_ptrs, acc.to(tl.bfloat16))
+
+
+def _thead_bfgemm_tt_splitk_config(m: int, n: int, k: int):
+    """SPLIT_K, BLOCK_M, BLOCK_N, BLOCK_K, num_warps, num_stages, maxnreg.
+
+    Split-K choice measured on Zhenwu with (128,128,64) tiles:
+      - (2048,2048,16384) 256 tiles -> SK=4: 1129 us (SK=2: 1137 us)
+      - (2048,4096,11008) 512 tiles -> SK=2: 1447 us (SK=4: 1541 us)
+    Smaller tile grids benefit from more split slices; larger ones only
+    from a modest split (the extra fp32 partial write/read would otherwise
+    outweigh the added CTAs)."""
+    tiles = (m + 127) // 128 * ((n + 127) // 128)
+    split_k = 4 if tiles <= 256 else 2
+    return split_k, 128, 128, 64, 4, 3, 128
+
+
+def _thead_bfgemm_tt_should_splitk(m: int, n: int, k: int) -> bool:
+    """Split-K for large-K TT shapes whose MxN tile grid under-utilizes the
+    device (few CTAs, very long K loops).  Requires full tile alignment (the
+    partial-accumulator store and the reduce kernel are unmasked)."""
+    split_k, block_m, block_n, block_k, *_ = _thead_bfgemm_tt_splitk_config(m, n, k)
+    if k < 8192 or min(m, n) > 2048:
+        return False
+    tiles = (m + block_m - 1) // block_m * ((n + block_n - 1) // block_n)
+    return (
+        m % block_m == 0
+        and n % block_n == 0
+        and k % (split_k * block_k) == 0
+        # Beyond 512 tiles the MxN grid already saturates the device and the
+        # fp32 partial write+read of split-K is pure overhead.
+        and tiles <= 512
+    )
+
+
+def _run_thead_bfgemm_tt_splitk(
+    A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero
+):
+    split_k, block_m, block_n, block_k, num_warps, num_stages, maxnreg = (
+        _thead_bfgemm_tt_splitk_config(m, n, k)
+    )
+    c_part = torch.empty((split_k, m, n), dtype=torch.float32, device=C.device)
+    num_tiles = triton.cdiv(m, block_m) * triton.cdiv(n, block_n)
+    _thead_bfgemm_tt_splitk_kernel[(num_tiles * split_k,)](
+        A, B, c_part, alpha, lda, ldb, M=m, N=n, K=k, SPLIT_K=split_k,
+        BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k, GROUP_M=16,
+        num_warps=num_warps, num_stages=num_stages, maxnreg=maxnreg,
+    )
+    _thead_bfgemm_tt_splitk_reduce_kernel[(num_tiles,)](
+        c_part, C, beta, beta_is_zero, SPLIT_K=split_k, M=m, N=n,
+        BLOCK_M=block_m, BLOCK_N=block_n, GROUP_M=16,
+        num_warps=num_warps, num_stages=2, maxnreg=maxnreg,
+    )
+
+
+def _run_thead_bfgemm_tt_padded_ncrop(
+    A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero
+):
+    """Pad A(K,M) and B(N,K) to multiples of 64, run the aligned desc_bwd
+    TT kernel, and write C directly through a clamped descriptor (no
+    C_pad buffer, no crop kernel)."""
+    m_pad = _round_up(m, 64)
+    n_pad = _round_up(n, 64)
+    k_pad = _round_up(k, 64)
+    A_pad = torch.empty((k_pad, m_pad), dtype=A.dtype, device=A.device)
+    B_pad = torch.empty((n_pad, k_pad), dtype=B.dtype, device=B.device)
+
+    pad_block = 1024
+    _thead_bfgemm_pad2d_kernel[(triton.cdiv(k_pad * m_pad, pad_block),)](
+        A, A_pad, k, m, lda, m_pad, k_pad, m_pad, BLOCK_SIZE=pad_block
+    )
+    _thead_bfgemm_pad2d_kernel[(triton.cdiv(n_pad * k_pad, pad_block),)](
+        B, B_pad, n, k, ldb, k_pad, n_pad, k_pad, BLOCK_SIZE=pad_block
+    )
+    block_m, block_n, block_k, num_warps, num_stages, maxnreg = (
+        _thead_bfgemm_tt_config(m, n, k)
+    )
+    _thead_bfgemm_tt_desc_bwd_ncrop_kernel[
+        (triton.cdiv(m, block_m) * triton.cdiv(n, block_n),)
+    ](
+        A_pad,
+        B_pad,
+        C,
+        alpha,
+        beta,
+        m_pad,
+        k_pad,
+        ldc,
+        beta_is_zero,
+        M_PAD=m_pad,
+        N_PAD=n_pad,
+        K_PAD=k_pad,
+        M=m,
+        N=n,
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        BLOCK_K=block_k,
+        GROUP_M=16,
+        num_warps=num_warps,
+        num_stages=num_stages,
+        maxnreg=maxnreg,
+    )
+
+
 def _thead_bfgemm_tt_config(m: int, n: int, k: int):
     """T-Head TT config for the TN materialize-B path.
 
@@ -2362,6 +3016,13 @@ def _thead_bfgemm_tt_config(m: int, n: int, k: int):
 
     if max(m, n, k) <= 512:
         return 64, 64, 64, 4, 3, 128
+
+    if m % 64 != 0 or n % 64 != 0 or k % 64 != 0:
+        # Non-aligned cubes ~1023^3: desc_bwd (128,128,32,4,4) = 33.1 us
+        # (the default 128,256,64 tile is ~30% slower for the transposed
+        # accumulator on partial tiles).
+        if max(m, n, k) <= 1024:
+            return 128, 128, 32, 4, 4, 128
 
     if min_mn <= 64:
         return 64, 64, 128, 4, 3, 128
@@ -2387,7 +3048,10 @@ def _run_thead_bfgemm_tt(
     tile_aligned = _thead_bfgemm_is_tile_aligned(
         m, n, k, block_m, block_n, block_k
     )
-    if _thead_bfgemm_nn_use_desc_bwd(m, n, k) and tile_aligned:
+    if _thead_bfgemm_nn_use_desc_bwd(m, n, k):
+        # desc_bwd handles partial tiles natively through the TMA
+        # descriptors; it is the fastest measured TT path for aligned and
+        # non-aligned shapes alike.
         kernel = _thead_bfgemm_tt_desc_bwd_kernel
     elif tile_aligned:
         kernel = _thead_bfgemm_tt_desc_kernel
@@ -2409,7 +3073,7 @@ def _run_thead_bfgemm_tt(
         BLOCK_M=block_m,
         BLOCK_N=block_n,
         BLOCK_K=block_k,
-        GROUP_M=8,
+        GROUP_M=16,
         num_warps=num_warps,
         num_stages=num_stages,
         maxnreg=maxnreg,
@@ -2423,23 +3087,144 @@ def _run_thead_bfgemm_tt_padded(
     m_pad = _round_up(m, 64)
     n_pad = _round_up(n, 64)
     k_pad = _round_up(k, 64)
-    A_pad = torch.empty((k_pad, m_pad), dtype=A.dtype, device=A.device)
-    B_pad = torch.empty((n_pad, k_pad), dtype=B.dtype, device=B.device)
+    cached = _tt_pad_cache_get(m, n, k, A, B)
+    if cached is None:
+        A_pad = torch.empty((k_pad, m_pad), dtype=A.dtype, device=A.device)
+        B_pad = torch.empty((n_pad, k_pad), dtype=B.dtype, device=B.device)
+        pad_block = 1024
+        _thead_bfgemm_pad2d_kernel[(triton.cdiv(k_pad * m_pad, pad_block),)](
+            A, A_pad, k, m, lda, m_pad, k_pad, m_pad, BLOCK_SIZE=pad_block
+        )
+        _thead_bfgemm_pad2d_kernel[(triton.cdiv(n_pad * k_pad, pad_block),)](
+            B, B_pad, n, k, ldb, k_pad, n_pad, k_pad, BLOCK_SIZE=pad_block
+        )
+        _tt_pad_cache_put(m, n, k, A, B, A_pad, B_pad)
+    else:
+        A_pad, B_pad = cached
     C_pad = torch.empty((m_pad, n_pad), dtype=C.dtype, device=C.device)
 
-    pad_block = 1024
-    _thead_bfgemm_pad2d_kernel[(triton.cdiv(k_pad * m_pad, pad_block),)](
-        A, A_pad, k, m, lda, m_pad, k_pad, m_pad, BLOCK_SIZE=pad_block
-    )
-    _thead_bfgemm_pad2d_kernel[(triton.cdiv(n_pad * k_pad, pad_block),)](
-        B, B_pad, n, k, ldb, k_pad, n_pad, k_pad, BLOCK_SIZE=pad_block
-    )
     _run_thead_bfgemm_tt(
         A_pad, m_pad, B_pad, k_pad, C_pad, n_pad,
         m_pad, n_pad, k_pad, alpha, 0.0, True, True,
     )
+    pad_block = 1024
     _thead_bfgemm_crop_c_kernel[(triton.cdiv(m * n, pad_block),)](
         C_pad, C, beta, m, n, n_pad, ldc, beta_is_zero, BLOCK_SIZE=pad_block,
+    )
+
+
+def _can_use_thead_bfgemm_tt(
+    m: int, n: int, k: int, lda: int, ldb: int, ldc: int, alpha, beta
+) -> bool:
+    # A^T: A is (K, M), lda = M; B^T: B is (N, K), ldb = K
+    return (
+        lda == m
+        and ldb == k
+        and ldc == n
+        and m >= 16
+        and n >= 16
+        and k >= 16
+    )
+
+
+def _thead_bfgemm_tt_should_pad(m: int, n: int, k: int) -> bool:
+    """Pad TT when non-aligned and overhead is reasonable."""
+    if m % 64 == 0 and n % 64 == 0 and k % 64 == 0:
+        return False
+    if max(m, n, k) <= 1024:
+        # Small non-aligned shapes (e.g. 511^3, 1023^3) are fastest via
+        # direct desc_bwd; padding adds pad/crop overhead for no gain.
+        return False
+    m_pad = _round_up(m, 64)
+    n_pad = _round_up(n, 64)
+    k_pad = _round_up(k, 64)
+    extra = m_pad * k_pad + k_pad * n_pad + m_pad * n_pad
+    original = m * k + k * n + m * n
+    return m * n * k >= 256 * 256 * 256 and extra <= original * 1.15
+
+
+def _thead_bfgemm_tt_should_materialize(m: int, n: int, k: int) -> bool:
+    """Materialize C^T for odd TT cases where padding overhead dominates."""
+    if m % 64 == 0:
+        return False
+    if max(m, n, k) <= 1024:
+        # Small non-aligned shapes are fastest via direct desc_bwd.
+        return False
+    if m == n and n == k:
+        # Large cubes: padded desc_bwd wins over materialize+transpose.
+        return False
+    if m != n and m * n * k >= 256 * 256 * 256:
+        return True
+    return False
+
+
+@libentry()
+@triton.jit
+def _thead_bfgemm_transpose_c_kernel(
+    src_ptr,
+    dst_ptr,
+    beta: tl.float32,
+    rows,
+    cols,
+    src_ld,
+    dst_ld,
+    BETA_IS_ZERO: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    """Transpose the (N, M) C_T buffer into the real (M, N) C, fusing
+    C = beta*C + src^T."""
+    src_ptr = src_ptr.to(tl.pointer_type(tl.bfloat16))
+    dst_ptr = dst_ptr.to(tl.pointer_type(tl.bfloat16))
+
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    mask = (offs_m[:, None] < rows) & (offs_n[None, :] < cols)
+
+    src_offsets = offs_n[None, :] * src_ld + offs_m[:, None]
+    vals = tl.load(src_ptr + src_offsets, mask=mask, other=0.0).to(tl.float32)
+    dst_offsets = offs_m[:, None] * dst_ld + offs_n[None, :]
+    if not BETA_IS_ZERO:
+        dst_vals = tl.load(dst_ptr + dst_offsets, mask=mask, other=0.0).to(tl.float32)
+        vals += beta * dst_vals
+    tl.store(dst_ptr + dst_offsets, vals.to(tl.bfloat16), mask=mask)
+
+
+def _run_thead_bfgemm_tt_materialized(
+    A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero
+):
+    C_T = torch.empty((n, m), dtype=C.dtype, device=C.device)
+    if _thead_bfgemm_nn_should_pad(n, m, k):
+        _run_thead_bfgemm_nn_padded(
+            B, ldb, A, lda, C_T, m, n, m, k, alpha, 0.0, True
+        )
+    else:
+        _run_thead_bfgemm_nn(
+            B, ldb, A, lda, C_T, m, n, m, k, alpha, 0.0, True, True
+        )
+
+    if m <= 512 and n <= 512:
+        block_m, block_n = 8, 64
+    elif m * n >= 2048 * 2048 and m != n:
+        block_m, block_n = 16, 128
+    else:
+        block_m, block_n = 16, 64
+    _thead_bfgemm_transpose_c_kernel[
+        (triton.cdiv(m, block_m), triton.cdiv(n, block_n))
+    ](
+        C_T,
+        C,
+        beta,
+        m,
+        n,
+        m,
+        ldc,
+        beta_is_zero,
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        num_warps=4,
     )
 
 
@@ -2600,13 +3385,42 @@ def bfgemm(
                     A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero
                 )
         elif transa == CUBLAS_OP_N and transb == CUBLAS_OP_T:
-            _bfgemm_nt_kernel[grid](
-                A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero
-            )
+            if _can_use_thead_bfgemm_nt(m, n, k, lda, ldb, ldc, alpha, beta):
+                aligned = _is_gemm_aligned(A, lda, B, ldb, C, ldc)
+                # desc_bwd is the fastest NT path for aligned and
+                # non-aligned shapes alike, so dispatch straight to it.
+                _run_thead_bfgemm_nt(
+                    A, lda, B, ldb, C, ldc, m, n, k,
+                    alpha, beta, beta_is_zero, aligned,
+                )
+            else:
+                _bfgemm_nt_kernel[grid](
+                    A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero
+                )
         else:
-            _bfgemm_tt_kernel[grid](
-                A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero
-            )
+            if _can_use_thead_bfgemm_tt(m, n, k, lda, ldb, ldc, alpha, beta):
+                aligned = _is_gemm_aligned(A, lda, B, ldb, C, ldc)
+                if _thead_bfgemm_tt_should_splitk(m, n, k):
+                    _run_thead_bfgemm_tt_splitk(
+                        A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero
+                    )
+                elif _thead_bfgemm_tt_should_pad(m, n, k):
+                    _run_thead_bfgemm_tt_padded(
+                        A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero
+                    )
+                elif _thead_bfgemm_tt_should_materialize(m, n, k):
+                    _run_thead_bfgemm_tt_materialized(
+                        A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero
+                    )
+                else:
+                    _run_thead_bfgemm_tt(
+                        A, lda, B, ldb, C, ldc, m, n, k,
+                        alpha, beta, beta_is_zero, aligned,
+                    )
+            else:
+                _bfgemm_tt_kernel[grid](
+                    A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero
+                )
 
 
 bgemm = bfgemm
