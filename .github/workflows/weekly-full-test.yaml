@@ -12,20 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import triton
+name: Weekly Full Test
 
-if triton.__version__ >= "3.5":
-    from .bfgemm import bfgemm  # noqa: F401
-    from .cgemm import cgemm  # noqa: F401
-    from .dgemm import dgemm  # noqa: F401
-    from .group_gemm import (  # noqa: F401
-        group_bfgemm,
-        group_hgemm,
-        group_mm,
-        group_tf32gemm,
-    )
-    from .hgemm import hgemm  # noqa: F401
-    from .sgemm import sgemm  # noqa: F401
-    from .zgemm import zgemm  # noqa: F401
+on:
+  schedule:
+    # 每周一下午 17:00 Asia/Shanghai (UTC+8) = 周一 09:00 UTC
+    - cron: '0 9 * * 1'
+  workflow_dispatch:
 
-__all__ = ["*"]
+jobs:
+  test-nvidia:
+    uses: ./.github/workflows/backend-test.yaml
+    with:
+      vendor: 'nvidia'
+      runner_label: 'h100'
+      gpu_check_script: 'tools/check_nvidia_gpu.sh'
+      changed_files: '__ALL__'
+      pr_id: 'weekly'
