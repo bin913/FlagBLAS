@@ -16,8 +16,8 @@ name: Weekly Full Test
 
 on:
   schedule:
-    # 每周二凌晨 00:00 Asia/Shanghai (UTC+8) = 周一 16:00 UTC
-    - cron: '0 16 * * 1'
+    # 每周一下午 17:00 Asia/Shanghai (UTC+8) = 周一 09:00 UTC
+    - cron: '0 9 * * 1'
   workflow_dispatch:
 
 jobs:
