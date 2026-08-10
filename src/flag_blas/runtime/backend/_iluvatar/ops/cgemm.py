@@ -27,6 +27,7 @@ from flag_blas.runtime.backend._iluvatar.ops.sgemm import sgemm as _sgemm_iluvat
 
 
 _CGEMM_WORKSPACE = {"key": None, "buffers": None}
+_CGEMM_AUG_WORKSPACE = {"key": None, "buffers": None, "pack_key": None}
 
 
 @triton.jit
@@ -151,6 +152,57 @@ def _cgemm_merge_3m_kernel(dst, prod_r, prod_i, prod_sum, total, BLOCK: tl.const
 
 
 @triton.jit
+def _cgemm_aug_pack_kernel(
+    a_ptr,
+    b_ptr,
+    a_aug,
+    b_aug,
+    total_a: tl.constexpr,
+    total_b: tl.constexpr,
+    size: tl.constexpr,
+    lda: tl.constexpr,
+    ldb: tl.constexpr,
+    TRANS_A: tl.constexpr,
+    TRANS_B: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    offsets = pid * BLOCK + tl.arange(0, BLOCK)
+
+    mask_a = offsets < total_a
+    a_row = offsets // (2 * size)
+    a_col2 = offsets - a_row * (2 * size)
+    a_k = a_col2 % size
+    a_is_imag = a_col2 >= size
+    if TRANS_A == 0:
+        a_src = a_row * lda + a_k
+    else:
+        a_src = a_k * lda + a_row
+    ar = tl.load(a_ptr + 2 * a_src, mask=mask_a, other=0.0)
+    ai = tl.load(a_ptr + 2 * a_src + 1, mask=mask_a, other=0.0)
+    aval = tl.where(a_is_imag, ai, ar)
+    tl.store(a_aug + offsets, aval, mask=mask_a)
+
+    mask_b = offsets < total_b
+    b_row2 = offsets // (2 * size)
+    b_col2 = offsets - b_row2 * (2 * size)
+    b_k = b_row2 % size
+    b_n = b_col2 // 2
+    b_is_imag_col = (b_col2 % 2) == 1
+    b_bottom = b_row2 >= size
+    if TRANS_B == 0:
+        b_src = b_k * ldb + b_n
+    else:
+        b_src = b_n * ldb + b_k
+    br = tl.load(b_ptr + 2 * b_src, mask=mask_b, other=0.0)
+    bi = tl.load(b_ptr + 2 * b_src + 1, mask=mask_b, other=0.0)
+    top_val = tl.where(b_is_imag_col, bi, br)
+    bottom_val = tl.where(b_is_imag_col, br, -bi)
+    bval = tl.where(b_bottom, bottom_val, top_val)
+    tl.store(b_aug + offsets, bval, mask=mask_b)
+
+
+@triton.jit
 def _cgemm_3m_nomask_kernel(
     a_ptr,
     b_ptr,
@@ -229,6 +281,113 @@ def _get_cgemm_workspace(A: torch.Tensor, m: int, n: int, k: int):
     return _CGEMM_WORKSPACE["buffers"]
 
 
+def _get_cgemm_aug_workspace(A: torch.Tensor, size: int):
+    key = (A.device, size)
+    if _CGEMM_AUG_WORKSPACE["key"] != key:
+        _CGEMM_AUG_WORKSPACE["key"] = key
+        _CGEMM_AUG_WORKSPACE["buffers"] = (
+            torch.empty((size, 2 * size), device=A.device, dtype=torch.float32),
+            torch.empty((2 * size, 2 * size), device=A.device, dtype=torch.float32),
+        )
+        _CGEMM_AUG_WORKSPACE["pack_key"] = None
+    return _CGEMM_AUG_WORKSPACE["buffers"]
+
+
+def _tensor_version(t: torch.Tensor):
+    return getattr(t, "_version", None)
+
+
+def _launch_cgemm_aug_sgemm(
+    transa: int,
+    transb: int,
+    size: int,
+    A: torch.Tensor,
+    lda: int,
+    B: torch.Tensor,
+    ldb: int,
+    C: torch.Tensor,
+    ldc: int,
+) -> None:
+    a_aug, b_aug = _get_cgemm_aug_workspace(A, size)
+    pack_key = (
+        A.data_ptr(),
+        _tensor_version(A),
+        B.data_ptr(),
+        _tensor_version(B),
+        transa,
+        transb,
+        lda,
+        ldb,
+        size,
+    )
+    if _CGEMM_AUG_WORKSPACE["pack_key"] != pack_key:
+        A_real = torch.view_as_real(A).reshape(-1)
+        B_real = torch.view_as_real(B).reshape(-1)
+        total_a = size * 2 * size
+        total_b = 2 * size * 2 * size
+        block = 256
+        grid = (triton.cdiv(max(total_a, total_b), block),)
+        _cgemm_aug_pack_kernel[grid](
+            A_real,
+            B_real,
+            a_aug,
+            b_aug,
+            total_a,
+            total_b,
+            size,
+            lda,
+            ldb,
+            transa,
+            transb,
+            BLOCK=block,
+        )
+        _CGEMM_AUG_WORKSPACE["pack_key"] = pack_key
+
+    C_real = torch.view_as_real(C).reshape(-1)
+    _sgemm_iluvatar(
+        0,
+        0,
+        size,
+        2 * size,
+        2 * size,
+        1.0,
+        a_aug,
+        2 * size,
+        b_aug,
+        2 * size,
+        0.0,
+        C_real,
+        2 * ldc,
+    )
+
+
+def _try_cgemm_aug_sgemm(
+    transa: int,
+    transb: int,
+    m: int,
+    n: int,
+    k: int,
+    alpha_is_one: bool,
+    beta_is_zero: bool,
+    A: torch.Tensor,
+    lda: int,
+    B: torch.Tensor,
+    ldb: int,
+    C: torch.Tensor,
+    ldc: int,
+) -> bool:
+    if not (alpha_is_one and beta_is_zero):
+        return False
+    if transa not in (0, 1) or transb not in (0, 1):
+        return False
+    if not (m == n == k and m in (128, 256)):
+        return False
+    if not (lda == m and ldb == n and ldc == n):
+        return False
+    _launch_cgemm_aug_sgemm(transa, transb, m, A, lda, B, ldb, C, ldc)
+    return True
+
+
 def _use_cgemm_tiled_pack(transa: int, transb: int, m: int, n: int, k: int) -> bool:
     if not (m == n == k):
         return False
@@ -246,9 +405,17 @@ def _use_cgemm_tiled_pack(transa: int, transb: int, m: int, n: int, k: int) -> b
 def _select_cgemm_pack_trans_tile(transa: int, transb: int, size: int):
     if size == 512:
         return 32, 16
+    if size == 1536 and transa == 1 and transb == 0:
+        return 16, 16
     if transa == 1 and transb == 1:
         return 16, 16
     return 32, 16
+
+
+def _select_cgemm_pack_block(transa: int, transb: int, size: int) -> int:
+    if size == 1536 and transa == 1 and transb == 1:
+        return 128
+    return 256
 
 
 def _split_cgemm_pack_operand(
@@ -311,7 +478,7 @@ def _launch_cgemm_pack_sgemm(
     B_real = torch.view_as_real(B).reshape(-1)
     C_real = torch.view_as_real(C).reshape(-1)
 
-    pack_block = 256
+    pack_block = _select_cgemm_pack_block(transa, transb, m)
     merge_grid = (triton.cdiv(m * n, pack_block),)
 
     if _use_cgemm_tiled_pack(transa, transb, m, n, k):
@@ -373,7 +540,8 @@ def _try_cgemm_pack_sgemm(
     if ldc != n:
         return False
     if max(m, n, k) < 511:
-        return False
+        if not (m == n == k == 256 and transa == 0 and transb == 0):
+            return False
     _launch_cgemm_pack_sgemm(transa, transb, m, n, k, A, lda, B, ldb, C)
     return True
 
@@ -381,27 +549,27 @@ def _try_cgemm_pack_sgemm(
 def _select_iluvatar_cgemm_3m_config(transa: int, transb: int, size: int):
     if size == 64:
         if transa == 1 and transb == 0:
-            return 32, 16, 32, 8, 8, 4
+            return 16, 16, 32, 8, 4, 3
         if transa == 0 and transb == 1:
-            return 16, 16, 64, 8, 2, 2
+            return 16, 16, 64, 8, 1, 3
         if transa == 1 and transb == 1:
-            return 32, 16, 64, 8, 1, 4
-        return 16, 16, 32, 8, 8, 3
+            return 16, 16, 64, 8, 1, 3
+        return 16, 16, 32, 8, 4, 3
     if size == 128:
         if transa == 0 and transb == 0:
             return 32, 16, 32, 8, 4, 3
         if transa == 1 and transb == 0:
-            return 32, 16, 32, 8, 4, 3
+            return 32, 16, 32, 8, 2, 3
         if transa == 0 and transb == 1:
-            return 16, 16, 64, 4, 8, 4
-        return 32, 16, 64, 8, 4, 4
+            return 16, 16, 64, 4, 2, 3
+        return 32, 32, 64, 8, 1, 3
     if size == 256:
         if transa == 1 and transb == 0:
             return 64, 32, 32, 8, 4, 3
         if transa == 0 and transb == 1:
-            return 32, 64, 64, 8, 2, 3
+            return 32, 64, 32, 8, 2, 3
         if transa == 1 and transb == 1:
-            return 32, 32, 64, 4, 4, 4
+            return 32, 32, 32, 4, 1, 3
         return 32, 64, 32, 8, 2, 3
     if size == 512 and transa == 1 and transb == 1:
         return 32, 64, 32, 4, 4, 3
@@ -508,6 +676,22 @@ def cgemm(
     alpha_is_one = alpha_r == 1.0 and alpha_i == 0.0
 
     with torch_device_fn.device(A.device):
+        if _try_cgemm_aug_sgemm(
+            transa,
+            transb,
+            m,
+            n,
+            k,
+            alpha_is_one,
+            beta_is_zero,
+            A,
+            lda,
+            B,
+            ldb,
+            C,
+            ldc,
+        ):
+            return
         if _try_cgemm_pack_sgemm(
             transa,
             transb,
