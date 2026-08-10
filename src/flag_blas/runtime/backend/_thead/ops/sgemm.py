@@ -655,6 +655,721 @@ def _thead_sgemm_nn_tf32_masked_kernel(
 
 @libentry()
 @triton.jit
+def _thead_sgemm_nn_f16_conv_kernel(
+    src_ptr,
+    dst_ptr,
+    NUMEL: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    """f32 -> fp16 elementwise convert (used by the fp16 pre-conversion path)."""
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < NUMEL
+    v = tl.load(src_ptr + offs, mask=mask)
+    tl.store(dst_ptr + offs, v.to(tl.float16), mask=mask)
+
+
+@libentry()
+@triton.jit
+def _thead_sgemm_nn_f16_mm_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    beta: tl.float32,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    BETA_IS_ZERO: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+    MASKED: tl.constexpr,
+):
+    """fp16 MMA with fp32 accumulate. A16/B16 are pre-converted fp16 buffers."""
+    pid = tl.program_id(0)
+    grid_m = tl.cdiv(m, BLOCK_M)
+    grid_n = tl.cdiv(n, BLOCK_N)
+    width = GROUP_M * grid_n
+    group_id = pid // width
+    group_size = min(grid_m - group_id * GROUP_M, GROUP_M)
+    pid_m = group_id * GROUP_M + (pid % group_size)
+    pid_n = (pid % width) // group_size
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_k = tl.arange(0, BLOCK_K)
+    mask_m = offs_m < m
+    mask_n = offs_n < n
+    a_ptrs = a_ptr + offs_m[:, None] * lda + offs_k[None, :]
+    b_ptrs = b_ptr + offs_k[:, None] * ldb + offs_n[None, :]
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    k_full = k // BLOCK_K
+    k_rem = k % BLOCK_K
+    if MASKED:
+        for _ in range(0, k_full):
+            a = tl.load(a_ptrs, mask=mask_m[:, None], other=0.0)
+            b = tl.load(b_ptrs, mask=mask_n[None, :], other=0.0)
+            acc = tl.dot(a, b, acc, out_dtype=tl.float32)
+            a_ptrs += BLOCK_K
+            b_ptrs += BLOCK_K * ldb
+        if k_rem > 0:
+            mask_k = offs_k < k_rem
+            a = tl.load(a_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0)
+            b = tl.load(b_ptrs, mask=mask_k[:, None] & mask_n[None, :], other=0.0)
+            acc = tl.dot(a, b, acc, out_dtype=tl.float32)
+    else:
+        for _ in range(0, k_full):
+            a = tl.load(a_ptrs)
+            b = tl.load(b_ptrs)
+            acc = tl.dot(a, b, acc, out_dtype=tl.float32)
+            a_ptrs += BLOCK_K
+            b_ptrs += BLOCK_K * ldb
+        if k_rem > 0:
+            mask_k = offs_k < k_rem
+            a = tl.load(a_ptrs, mask=mask_k[None, :], other=0.0)
+            b = tl.load(b_ptrs, mask=mask_k[:, None], other=0.0)
+            acc = tl.dot(a, b, acc, out_dtype=tl.float32)
+    c_ptrs = c_ptr + offs_m[:, None] * ldc + offs_n[None, :]
+    if MASKED:
+        c_mask = mask_m[:, None] & mask_n[None, :]
+        if BETA_IS_ZERO:
+            tl.store(c_ptrs, alpha * acc, mask=c_mask)
+        else:
+            c_vals = tl.load(c_ptrs, mask=c_mask, other=0.0).to(tl.float32)
+            tl.store(c_ptrs, alpha * acc + beta * c_vals, mask=c_mask)
+    else:
+        if BETA_IS_ZERO:
+            tl.store(c_ptrs, alpha * acc)
+        else:
+            c_vals = tl.load(c_ptrs).to(tl.float32)
+            tl.store(c_ptrs, alpha * acc + beta * c_vals)
+
+
+@libentry()
+@triton.jit
+def _thead_sgemm_nn_f16_fused_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    beta: tl.float32,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    BETA_IS_ZERO: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+    MASKED: tl.constexpr,
+):
+    """Load f32 tiles, convert to fp16 in-register, MMA with fp32 accumulate."""
+    pid = tl.program_id(0)
+    grid_m = tl.cdiv(m, BLOCK_M)
+    grid_n = tl.cdiv(n, BLOCK_N)
+    width = GROUP_M * grid_n
+    group_id = pid // width
+    group_size = min(grid_m - group_id * GROUP_M, GROUP_M)
+    pid_m = group_id * GROUP_M + (pid % group_size)
+    pid_n = (pid % width) // group_size
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_k = tl.arange(0, BLOCK_K)
+    mask_m = offs_m < m
+    mask_n = offs_n < n
+    a_ptrs = a_ptr + offs_m[:, None] * lda + offs_k[None, :]
+    b_ptrs = b_ptr + offs_k[:, None] * ldb + offs_n[None, :]
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    k_full = k // BLOCK_K
+    k_rem = k % BLOCK_K
+    if MASKED:
+        for _ in range(0, k_full):
+            a = tl.load(a_ptrs, mask=mask_m[:, None], other=0.0).to(tl.float16)
+            b = tl.load(b_ptrs, mask=mask_n[None, :], other=0.0).to(tl.float16)
+            acc = tl.dot(a, b, acc, out_dtype=tl.float32)
+            a_ptrs += BLOCK_K
+            b_ptrs += BLOCK_K * ldb
+        if k_rem > 0:
+            mask_k = offs_k < k_rem
+            a = tl.load(a_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0).to(tl.float16)
+            b = tl.load(b_ptrs, mask=mask_k[:, None] & mask_n[None, :], other=0.0).to(tl.float16)
+            acc = tl.dot(a, b, acc, out_dtype=tl.float32)
+    else:
+        for _ in range(0, k_full):
+            a = tl.load(a_ptrs).to(tl.float16)
+            b = tl.load(b_ptrs).to(tl.float16)
+            acc = tl.dot(a, b, acc, out_dtype=tl.float32)
+            a_ptrs += BLOCK_K
+            b_ptrs += BLOCK_K * ldb
+        if k_rem > 0:
+            mask_k = offs_k < k_rem
+            a = tl.load(a_ptrs, mask=mask_k[None, :], other=0.0).to(tl.float16)
+            b = tl.load(b_ptrs, mask=mask_k[:, None], other=0.0).to(tl.float16)
+            acc = tl.dot(a, b, acc, out_dtype=tl.float32)
+    c_ptrs = c_ptr + offs_m[:, None] * ldc + offs_n[None, :]
+    if MASKED:
+        c_mask = mask_m[:, None] & mask_n[None, :]
+        if BETA_IS_ZERO:
+            tl.store(c_ptrs, alpha * acc, mask=c_mask)
+        else:
+            c_vals = tl.load(c_ptrs, mask=c_mask, other=0.0).to(tl.float32)
+            tl.store(c_ptrs, alpha * acc + beta * c_vals, mask=c_mask)
+    else:
+        if BETA_IS_ZERO:
+            tl.store(c_ptrs, alpha * acc)
+        else:
+            c_vals = tl.load(c_ptrs).to(tl.float32)
+            tl.store(c_ptrs, alpha * acc + beta * c_vals)
+
+
+@libentry()
+@triton.jit
+def _thead_sgemm_tntt_fp32_tf32x3_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    beta: tl.float32,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    BETA_IS_ZERO: tl.constexpr,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+    USE_TF32X3: tl.constexpr,
+    TRANS_A: tl.constexpr,
+    TRANS_B: tl.constexpr,
+):
+    """FP32 tensor-core kernel for sgemm_tn/nt/tt with optional tf32x3.
+
+    Used for tiny squares where fp16 MMA fails the SGEMM accuracy budget
+    (atol = 1e-4 * k with k <= 128): tf32x3 keeps near-FP32 accuracy while
+    using tensor cores, matching the NN tf32x3 small-shape fast path.
+    """
+    a_ptr = a_ptr.to(tl.pointer_type(tl.float32))
+    b_ptr = b_ptr.to(tl.pointer_type(tl.float32))
+    c_ptr = c_ptr.to(tl.pointer_type(tl.float32))
+    pid = tl.program_id(0)
+    grid_m = tl.cdiv(M, BLOCK_M)
+    grid_n = tl.cdiv(N, BLOCK_N)
+    width = GROUP_M * grid_n
+    group_id = pid // width
+    group_size = min(grid_m - group_id * GROUP_M, GROUP_M)
+    pid_m = group_id * GROUP_M + (pid % group_size)
+    pid_n = (pid % width) // group_size
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_k = tl.arange(0, BLOCK_K)
+    offs_m = tl.max_contiguous(tl.multiple_of(offs_m, BLOCK_M), BLOCK_M)
+    offs_n = tl.max_contiguous(tl.multiple_of(offs_n, BLOCK_N), BLOCK_N)
+    offs_k = tl.max_contiguous(tl.multiple_of(offs_k, BLOCK_K), BLOCK_K)
+    mask_m = offs_m < M
+    mask_n = offs_n < N
+    if TRANS_A:
+        a_ptrs = a_ptr + offs_k[:, None] * lda + offs_m[None, :]
+    else:
+        a_ptrs = a_ptr + offs_m[:, None] * lda + offs_k[None, :]
+    if TRANS_B:
+        b_ptrs = b_ptr + offs_n[:, None] * ldb + offs_k[None, :]
+    else:
+        b_ptrs = b_ptr + offs_k[:, None] * ldb + offs_n[None, :]
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    is_full_m = (pid_m * BLOCK_M + BLOCK_M) <= M
+    is_full_n = (pid_n * BLOCK_N + BLOCK_N) <= N
+    k_full_iters = K // BLOCK_K
+    k_remainder = K % BLOCK_K
+    if is_full_m and is_full_n:
+        for _ in range(0, k_full_iters):
+            if TRANS_A:
+                a = tl.trans(tl.load(a_ptrs))
+            else:
+                a = tl.load(a_ptrs)
+            if TRANS_B:
+                b = tl.trans(tl.load(b_ptrs))
+            else:
+                b = tl.load(b_ptrs)
+            if USE_TF32X3:
+                acc = tl.dot(a, b, acc, out_dtype=tl.float32, input_precision="tf32x3")
+            else:
+                acc = tl.dot(a, b, acc, out_dtype=tl.float32, allow_tf32=False)
+            a_ptrs += BLOCK_K * lda if TRANS_A else BLOCK_K
+            b_ptrs += BLOCK_K if TRANS_B else BLOCK_K * ldb
+        if k_remainder > 0:
+            mask_k = offs_k < k_remainder
+            if TRANS_A:
+                a = tl.trans(tl.load(a_ptrs, mask=mask_k[:, None], other=0.0))
+            else:
+                a = tl.load(a_ptrs, mask=mask_k[None, :], other=0.0)
+            if TRANS_B:
+                b = tl.trans(tl.load(b_ptrs, mask=mask_k[None, :], other=0.0))
+            else:
+                b = tl.load(b_ptrs, mask=mask_k[:, None], other=0.0)
+            if USE_TF32X3:
+                acc = tl.dot(a, b, acc, out_dtype=tl.float32, input_precision="tf32x3")
+            else:
+                acc = tl.dot(a, b, acc, out_dtype=tl.float32, allow_tf32=False)
+    else:
+        for _ in range(0, k_full_iters):
+            if TRANS_A:
+                a = tl.trans(tl.load(a_ptrs, mask=mask_m[None, :], other=0.0))
+            else:
+                a = tl.load(a_ptrs, mask=mask_m[:, None], other=0.0)
+            if TRANS_B:
+                b = tl.trans(tl.load(b_ptrs, mask=mask_n[:, None], other=0.0))
+            else:
+                b = tl.load(b_ptrs, mask=mask_n[None, :], other=0.0)
+            if USE_TF32X3:
+                acc = tl.dot(a, b, acc, out_dtype=tl.float32, input_precision="tf32x3")
+            else:
+                acc = tl.dot(a, b, acc, out_dtype=tl.float32, allow_tf32=False)
+            a_ptrs += BLOCK_K * lda if TRANS_A else BLOCK_K
+            b_ptrs += BLOCK_K if TRANS_B else BLOCK_K * ldb
+        if k_remainder > 0:
+            mask_k = offs_k < k_remainder
+            if TRANS_A:
+                a = tl.trans(tl.load(a_ptrs, mask=mask_k[:, None] & mask_m[None, :], other=0.0))
+            else:
+                a = tl.load(a_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0)
+            if TRANS_B:
+                b = tl.trans(tl.load(b_ptrs, mask=mask_n[:, None] & mask_k[None, :], other=0.0))
+            else:
+                b = tl.load(b_ptrs, mask=mask_k[:, None] & mask_n[None, :], other=0.0)
+            if USE_TF32X3:
+                acc = tl.dot(a, b, acc, out_dtype=tl.float32, input_precision="tf32x3")
+            else:
+                acc = tl.dot(a, b, acc, out_dtype=tl.float32, allow_tf32=False)
+    c_ptrs = c_ptr + offs_m[:, None] * ldc + offs_n[None, :]
+    if is_full_m and is_full_n:
+        if BETA_IS_ZERO:
+            tl.store(c_ptrs, alpha * acc)
+        else:
+            c_vals = tl.load(c_ptrs).to(tl.float32)
+            tl.store(c_ptrs, alpha * acc + beta * c_vals)
+    else:
+        c_mask = mask_m[:, None] & mask_n[None, :]
+        if BETA_IS_ZERO:
+            tl.store(c_ptrs, alpha * acc, mask=c_mask)
+        else:
+            c_vals = tl.load(c_ptrs, mask=c_mask, other=0.0).to(tl.float32)
+            tl.store(c_ptrs, alpha * acc + beta * c_vals, mask=c_mask)
+
+
+@libentry()
+@triton.jit
+def _thead_sgemm_nn_f16_pad2d_conv_kernel(
+    src_ptr,
+    dst_ptr,
+    rows,
+    cols,
+    src_ld,
+    dst_ld,
+    dst_rows,
+    dst_cols,
+    BLOCK_SIZE: tl.constexpr,
+):
+    """fused: read f32 (rows x cols, src_ld), write fp16 padded (dst_rows x dst_cols, dst_ld)."""
+    src_ptr = src_ptr.to(tl.pointer_type(tl.float32))
+    dst_ptr = dst_ptr.to(tl.pointer_type(tl.float16))
+    offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < dst_rows * dst_cols
+    r = offsets // dst_cols
+    c = offsets - r * dst_cols
+    in_bounds = (r < rows) & (c < cols)
+    vals = tl.load(src_ptr + r * src_ld + c, mask=mask & in_bounds, other=0.0)
+    tl.store(dst_ptr + r * dst_ld + c, vals.to(tl.float16), mask=mask)
+
+
+@libentry()
+@triton.jit
+def _thead_sgemm_nn_f16_padstore_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    beta: tl.float32,
+    m0,
+    n0,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    BETA_IS_ZERO: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+):
+    """Unmasked loads on padded A16/B16, masked store vs original (m0, n0).
+    m, n = padded sizes (grid); k = padded k; m0, n0 = original logical sizes."""
+    pid = tl.program_id(0)
+    grid_m = tl.cdiv(m, BLOCK_M)
+    grid_n = tl.cdiv(n, BLOCK_N)
+    width = GROUP_M * grid_n
+    group_id = pid // width
+    group_size = min(grid_m - group_id * GROUP_M, GROUP_M)
+    pid_m = group_id * GROUP_M + (pid % group_size)
+    pid_n = (pid % width) // group_size
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_k = tl.arange(0, BLOCK_K)
+    a_ptrs = a_ptr + offs_m[:, None] * lda + offs_k[None, :]
+    b_ptrs = b_ptr + offs_k[:, None] * ldb + offs_n[None, :]
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    for _ in range(0, k // BLOCK_K):
+        a = tl.load(a_ptrs).to(tl.float16)
+        b = tl.load(b_ptrs).to(tl.float16)
+        acc = tl.dot(a, b, acc, out_dtype=tl.float32)
+        a_ptrs += BLOCK_K
+        b_ptrs += BLOCK_K * ldb
+    c_ptrs = c_ptr + offs_m[:, None] * ldc + offs_n[None, :]
+    c_mask = (offs_m[:, None] < m0) & (offs_n[None, :] < n0)
+    if BETA_IS_ZERO:
+        tl.store(c_ptrs, alpha * acc, mask=c_mask)
+    else:
+        c_vals = tl.load(c_ptrs, mask=c_mask, other=0.0).to(tl.float32)
+        tl.store(c_ptrs, alpha * acc + beta * c_vals, mask=c_mask)
+
+
+@libentry()
+@triton.jit
+def _thead_sgemm_tntt_f16_tconv_kernel(
+    src_ptr,
+    dst_ptr,
+    rows,
+    cols,
+    src_ld,
+    dst_ld,
+    BM: tl.constexpr,
+    BN: tl.constexpr,
+):
+    """f32 (rows x cols) row-major -> fp16 (cols x rows) row-major (transpose).
+    Tile-based with in-register tl.trans (the transposed 2D store-pointer pattern
+    alone is not honored by the PPU backend)."""
+    pid = tl.program_id(0)
+    grid_c = tl.cdiv(cols, BN)
+    pid_r = pid // grid_c
+    pid_c = pid % grid_c
+    offs_r = pid_r * BM + tl.arange(0, BM)
+    offs_c = pid_c * BN + tl.arange(0, BN)
+    mask_r = offs_r < rows
+    mask_c = offs_c < cols
+    src_ptrs = src_ptr + offs_r[:, None] * src_ld + offs_c[None, :]
+    dst_ptrs = dst_ptr + offs_c[:, None] * dst_ld + offs_r[None, :]
+    v = tl.load(src_ptrs, mask=mask_r[:, None] & mask_c[None, :], other=0.0).to(tl.float16)
+    v = tl.trans(v)
+    tl.store(dst_ptrs, v, mask=mask_c[:, None] & mask_r[None, :])
+
+
+@libentry()
+@triton.jit
+def _thead_sgemm_tntt_f16_tpad_conv_kernel(
+    src_ptr,
+    dst_ptr,
+    src_rows,
+    src_cols,
+    src_ld,
+    dst_ld,
+    dst_rows,
+    dst_cols,
+    BLOCK_SIZE: tl.constexpr,
+):
+    """fused: f32 (src_rows x src_cols, src_ld) -> fp16 (dst_cols x dst_rows)
+    transposed and padded to (dst_rows x dst_cols). Element-wise, no tl.trans."""
+    src_ptr = src_ptr.to(tl.pointer_type(tl.float32))
+    dst_ptr = dst_ptr.to(tl.pointer_type(tl.float16))
+    offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < dst_rows * dst_cols
+    r = offsets // dst_cols  # dst row
+    c = offsets - r * dst_cols  # dst col
+    in_bounds = (r < src_cols) & (c < src_rows)
+    vals = tl.load(src_ptr + c * src_ld + r, mask=mask & in_bounds, other=0.0)
+    tl.store(dst_ptr + r * dst_ld + c, vals.to(tl.float16), mask=mask)
+
+@libentry()
+@triton.jit
+def _thead_sgemm_tntt_f16_tpad_ab_kernel(
+    a_ptr,
+    b_ptr,
+    a16_ptr,
+    b16_ptr,
+    k,
+    m,
+    n,
+    src_lda,
+    src_ldb,
+    dst_lda,
+    dst_ldb,
+    mp,
+    np_,
+    kp,
+    TRANSPOSE_A: tl.constexpr,
+    TRANSPOSE_B: tl.constexpr,
+    BM: tl.constexpr,
+    BN: tl.constexpr,
+):
+    """fused A+B conversion for the padstore path: f32 -> fp16, transposed
+    (in-register tl.trans, the transposed 2D load/store-pointer pattern alone
+    is not honored by the PPU backend) and padded to (mp, kp) / (kp, np_).
+    One launch instead of two: grid = tiles(A16) + tiles(B16)."""
+    pid = tl.program_id(0)
+    grid_ca = tl.cdiv(kp, BN)
+    grid_a = tl.cdiv(mp, BM) * grid_ca
+    if pid < grid_a:
+        pid_r = pid // grid_ca
+        pid_c = pid % grid_ca
+        offs_r = pid_r * BM + tl.arange(0, BM)
+        offs_c = pid_c * BN + tl.arange(0, BN)
+        if TRANSPOSE_A:
+            v = tl.load(
+                a_ptr + offs_c[:, None] * src_lda + offs_r[None, :],
+                mask=(offs_c[:, None] < k) & (offs_r[None, :] < m),
+                other=0.0,
+            ).to(tl.float16)
+            v = tl.trans(v)
+        else:
+            v = tl.load(
+                a_ptr + offs_r[:, None] * src_lda + offs_c[None, :],
+                mask=(offs_r[:, None] < m) & (offs_c[None, :] < k),
+                other=0.0,
+            ).to(tl.float16)
+        dm = (offs_r[:, None] < mp) & (offs_c[None, :] < kp)
+        tl.store(a16_ptr + offs_r[:, None] * dst_lda + offs_c[None, :], v, mask=dm)
+    else:
+        pid2 = pid - grid_a
+        grid_cb = tl.cdiv(np_, BN)
+        pid_r = pid2 // grid_cb
+        pid_c = pid2 % grid_cb
+        offs_r = pid_r * BM + tl.arange(0, BM)
+        offs_c = pid_c * BN + tl.arange(0, BN)
+        if TRANSPOSE_B:
+            v = tl.load(
+                b_ptr + offs_c[:, None] * src_ldb + offs_r[None, :],
+                mask=(offs_c[:, None] < n) & (offs_r[None, :] < k),
+                other=0.0,
+            ).to(tl.float16)
+            v = tl.trans(v)
+        else:
+            v = tl.load(
+                b_ptr + offs_r[:, None] * src_ldb + offs_c[None, :],
+                mask=(offs_r[:, None] < k) & (offs_c[None, :] < n),
+                other=0.0,
+            ).to(tl.float16)
+        dm = (offs_r[:, None] < kp) & (offs_c[None, :] < np_)
+        tl.store(b16_ptr + offs_r[:, None] * dst_ldb + offs_c[None, :], v, mask=dm)
+
+
+@libentry()
+@triton.jit
+def _thead_sgemm_tntt_f16_fused_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    beta: tl.float32,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    BETA_IS_ZERO: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+    MASKED: tl.constexpr,
+    TRANS_A: tl.constexpr,
+    TRANS_B: tl.constexpr,
+):
+    """fp16 MMA (fp32 accumulate) with in-register f32->fp16 convert.
+    TRANS_A/TRANS_B indicate A/B are stored transposed ((k,m)/(n,k))."""
+    pid = tl.program_id(0)
+    grid_m = tl.cdiv(m, BLOCK_M)
+    grid_n = tl.cdiv(n, BLOCK_N)
+    width = GROUP_M * grid_n
+    group_id = pid // width
+    group_size = min(grid_m - group_id * GROUP_M, GROUP_M)
+    pid_m = group_id * GROUP_M + (pid % group_size)
+    pid_n = (pid % width) // group_size
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_k = tl.arange(0, BLOCK_K)
+    mask_m = offs_m < m
+    mask_n = offs_n < n
+    if TRANS_A:
+        a_ptrs = a_ptr + offs_k[:, None] * lda + offs_m[None, :]
+    else:
+        a_ptrs = a_ptr + offs_m[:, None] * lda + offs_k[None, :]
+    if TRANS_B:
+        b_ptrs = b_ptr + offs_n[:, None] * ldb + offs_k[None, :]
+    else:
+        b_ptrs = b_ptr + offs_k[:, None] * ldb + offs_n[None, :]
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    k_full = k // BLOCK_K
+    k_rem = k % BLOCK_K
+    for _ in range(0, k_full):
+        if TRANS_A:
+            a = tl.load(a_ptrs, mask=mask_m[None, :], other=0.0).to(tl.float16)
+            a = tl.trans(a)
+        else:
+            a = tl.load(a_ptrs, mask=mask_m[:, None], other=0.0).to(tl.float16)
+        if TRANS_B:
+            b = tl.load(b_ptrs, mask=mask_n[:, None], other=0.0).to(tl.float16)
+            b = tl.trans(b)
+        else:
+            b = tl.load(b_ptrs, mask=mask_n[None, :], other=0.0).to(tl.float16)
+        acc = tl.dot(a, b, acc, out_dtype=tl.float32)
+        a_ptrs += BLOCK_K if not TRANS_A else BLOCK_K * lda
+        b_ptrs += BLOCK_K * ldb if not TRANS_B else BLOCK_K
+    if k_rem > 0:
+        mask_k = offs_k < k_rem
+        if TRANS_A:
+            a = tl.load(a_ptrs, mask=mask_k[:, None] & mask_m[None, :], other=0.0).to(tl.float16)
+            a = tl.trans(a)
+        else:
+            a = tl.load(a_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0).to(tl.float16)
+        if TRANS_B:
+            b = tl.load(b_ptrs, mask=mask_n[:, None] & mask_k[None, :], other=0.0).to(tl.float16)
+            b = tl.trans(b)
+        else:
+            b = tl.load(b_ptrs, mask=mask_k[:, None] & mask_n[None, :], other=0.0).to(tl.float16)
+        acc = tl.dot(a, b, acc, out_dtype=tl.float32)
+    c_ptrs = c_ptr + offs_m[:, None] * ldc + offs_n[None, :]
+    if MASKED:
+        c_mask = mask_m[:, None] & mask_n[None, :]
+        if BETA_IS_ZERO:
+            tl.store(c_ptrs, alpha * acc, mask=c_mask)
+        else:
+            c_vals = tl.load(c_ptrs, mask=c_mask, other=0.0).to(tl.float32)
+            tl.store(c_ptrs, alpha * acc + beta * c_vals, mask=c_mask)
+    else:
+        if BETA_IS_ZERO:
+            tl.store(c_ptrs, alpha * acc)
+        else:
+            c_vals = tl.load(c_ptrs).to(tl.float32)
+            tl.store(c_ptrs, alpha * acc + beta * c_vals)
+
+
+@libentry()
+@triton.jit
+def _thead_sgemm_tntt_f16_swap_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    beta: tl.float32,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    BETA_IS_ZERO: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+    MASKED: tl.constexpr,
+    TRANS_A: tl.constexpr,
+    TRANS_B: tl.constexpr,
+):
+    """fp16 MMA (fp32 accumulate), transposed-role variant of the fused kernel.
+
+    Computes acc_t (BLOCK_N, BLOCK_M) = dot(B^T, A^T) with both operands loaded
+    in the (BLOCK_K, BLOCK_M)/(BLOCK_N, BLOCK_K) shapes so NO per-k-iteration
+    in-register transpose is needed; only a single tl.trans(acc_t) before the
+    store. MMA tiles become (BLOCK_N, BLOCK_M), which helps wide (small-n)
+    shapes where the direct fused kernel would run small (BLOCK_M, BLOCK_N)
+    MMAs.
+    """
+    pid = tl.program_id(0)
+    grid_m = tl.cdiv(m, BLOCK_M)
+    grid_n = tl.cdiv(n, BLOCK_N)
+    width = GROUP_M * grid_n
+    group_id = pid // width
+    group_size = min(grid_m - group_id * GROUP_M, GROUP_M)
+    pid_m = group_id * GROUP_M + (pid % group_size)
+    pid_n = (pid % width) // group_size
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_k = tl.arange(0, BLOCK_K)
+    mask_m = offs_m < m
+    mask_n = offs_n < n
+    if TRANS_A:
+        a_sw_ptrs = a_ptr + offs_k[:, None] * lda + offs_m[None, :]
+    else:
+        a_sw_ptrs = a_ptr + offs_m[None, :] * lda + offs_k[:, None]
+    if TRANS_B:
+        b_sw_ptrs = b_ptr + offs_n[:, None] * ldb + offs_k[None, :]
+    else:
+        b_sw_ptrs = b_ptr + offs_k[None, :] * ldb + offs_n[:, None]
+    acc_t = tl.zeros((BLOCK_N, BLOCK_M), dtype=tl.float32)
+    k_full = k // BLOCK_K
+    k_rem = k % BLOCK_K
+    if MASKED:
+        for _ in range(0, k_full):
+            a = tl.load(a_sw_ptrs, mask=mask_m[None, :], other=0.0).to(tl.float16)
+            b = tl.load(b_sw_ptrs, mask=mask_n[:, None], other=0.0).to(tl.float16)
+            acc_t = tl.dot(b, a, acc_t, out_dtype=tl.float32)
+            a_sw_ptrs += BLOCK_K * lda if TRANS_A else BLOCK_K
+            b_sw_ptrs += BLOCK_K if TRANS_B else BLOCK_K * ldb
+        if k_rem > 0:
+            mask_k = offs_k < k_rem
+            a = tl.load(
+                a_sw_ptrs, mask=mask_k[:, None] & mask_m[None, :], other=0.0
+            ).to(tl.float16)
+            b = tl.load(
+                b_sw_ptrs, mask=mask_n[:, None] & mask_k[None, :], other=0.0
+            ).to(tl.float16)
+            acc_t = tl.dot(b, a, acc_t, out_dtype=tl.float32)
+    else:
+        for _ in range(0, k_full):
+            a = tl.load(a_sw_ptrs).to(tl.float16)
+            b = tl.load(b_sw_ptrs).to(tl.float16)
+            acc_t = tl.dot(b, a, acc_t, out_dtype=tl.float32)
+            a_sw_ptrs += BLOCK_K * lda if TRANS_A else BLOCK_K
+            b_sw_ptrs += BLOCK_K if TRANS_B else BLOCK_K * ldb
+        if k_rem > 0:
+            mask_k = offs_k < k_rem
+            a = tl.load(a_sw_ptrs, mask=mask_k[:, None], other=0.0).to(tl.float16)
+            b = tl.load(b_sw_ptrs, mask=mask_k[None, :], other=0.0).to(tl.float16)
+            acc_t = tl.dot(b, a, acc_t, out_dtype=tl.float32)
+    acc = tl.trans(acc_t)
+    c_ptrs = c_ptr + offs_m[:, None] * ldc + offs_n[None, :]
+    if MASKED:
+        c_mask = mask_m[:, None] & mask_n[None, :]
+        if BETA_IS_ZERO:
+            tl.store(c_ptrs, alpha * acc, mask=c_mask)
+        else:
+            c_vals = tl.load(c_ptrs, mask=c_mask, other=0.0).to(tl.float32)
+            tl.store(c_ptrs, alpha * acc + beta * c_vals, mask=c_mask)
+    else:
+        if BETA_IS_ZERO:
+            tl.store(c_ptrs, alpha * acc)
+        else:
+            c_vals = tl.load(c_ptrs).to(tl.float32)
+            tl.store(c_ptrs, alpha * acc + beta * c_vals)
+
+
+@libentry()
+@triton.jit
 def _thead_sgemm_tn_tf32_masked_kernel(
     a_ptr,
     b_ptr,
@@ -2712,6 +3427,349 @@ def _run_sgemm_nn_511(A, B, C, alpha, beta, beta_is_zero):
     )
 
 
+def _can_use_sgemm_nn_f16(m, n, k, lda, ldb, ldc, alpha, beta) -> bool:
+    """fp16-MMA fast path eligibility.
+
+    Measured on ZW810E: converting f32 inputs to fp16 and using fp16 tensor-core
+    MMA with fp32 accumulation gives 1.2-2.4x over the FP32 path for mid/large
+    shapes, and >= 0.95 speedup vs cublas for all core shapes except tiny
+    squares (64^3/128^3), which keep the strict FP32 path. 256^3 uses the
+    fused single-kernel variant (fp16 convert in-register) measured at 1.09x
+    with worst_ratio ~0.81. The fp16 path is accuracy-safe for k >= 256
+    (atol = 1e-4 * k in the benchmark), verified on all core shapes with
+    worst_ratio <= 0.95.
+    """
+    if alpha != 1.0 or beta != 0.0:
+        return False
+    if lda != k or ldb != n or ldc != n:
+        return False
+    if min(m, n, k) < 64:
+        return False
+    # Tiny squares: fp16 fails perf and is accuracy-marginal on 64^3/128^3.
+    if m == n == k and m <= 128:
+        return False
+    return True
+
+
+def _thead_nn_f16_config(m, n, k):
+    """Select (variant, (BLOCK_M, BLOCK_N, BLOCK_K, num_warps, num_stages)).
+
+    Variants:
+      - "padstore": pad A/B (fused with f32->fp16), unmasked MMA, masked store.
+      - "fused":    single kernel, load f32 tile + in-register fp16 convert.
+      - "preconv":  separate f32->fp16 convert kernels + fp16 MMA kernel.
+
+    Configs below are the measured best on ZW810E for each shape class.
+    """
+    # ---- squares: padstore (unmasked MMA on padded fp16 buffers) ----
+    if m == n == k and m == 256:
+        return "fused", (32, 32, 32, 4, 3)
+    if m == n == k and m in (511, 512, 1023):
+        return "padstore", (64, 128, 64, 8, 3)
+    if m == n == k and m in (1024, 2048, 4096):
+        return "padstore", (128, 128, 32, 8, 4)
+    if m == n == k and m in (4095, 8191):
+        return "padstore", (128, 128, 64, 8, 3)
+    if (m, n, k) == (4097, 8191, 4095):
+        return "padstore", (128, 128, 64, 8, 4)
+
+    # ---- skinny: fused (no separate convert kernels) ----
+    if m <= 64:
+        if n >= 4096:
+            return "fused", (64, 128, 64, 8, 3)
+        return "fused", (64, 32, 64, 4, 3)
+    if n <= 64:
+        if m <= 1024:
+            return "fused", (16, 64, 64, 4, 3)
+        if m == 2048:
+            return "fused", (64, 32, 64, 4, 3)
+        return "fused", (64, 64, 16, 2, 6)
+
+    # ---- large / mid rectangles & squares: preconv ----
+    if m >= n * 3:
+        return "preconv", (128, 128, 64, 8, 2)
+    if n >= m * 3:
+        if m >= 512:
+            return "preconv", (128, 128, 64, 8, 3)
+        return "preconv", (128, 128, 64, 8, 2)
+    if min(m, n) >= 8192:
+        return "preconv", (256, 128, 32, 8, 3)
+    return "preconv", (128, 128, 64, 8, 3)
+
+
+def _run_sgemm_nn_f16_preconv(A, B, C, m, n, k, alpha, beta, beta_is_zero):
+    bm, bn, bk, nw, ns = _thead_nn_f16_config(m, n, k)[1]
+    A16 = torch.empty((m, k), device=A.device, dtype=torch.float16)
+    B16 = torch.empty((k, n), device=B.device, dtype=torch.float16)
+    _thead_sgemm_nn_f16_conv_kernel[(triton.cdiv(m * k, 4096),)](
+        A, A16, NUMEL=m * k, BLOCK=4096, num_warps=4)
+    _thead_sgemm_nn_f16_conv_kernel[(triton.cdiv(k * n, 4096),)](
+        B, B16, NUMEL=k * n, BLOCK=4096, num_warps=4)
+    _thead_sgemm_nn_f16_mm_kernel[(triton.cdiv(m, bm) * triton.cdiv(n, bn),)](
+        A16, B16, C, alpha, beta, m, n, k, k, n, n, beta_is_zero,
+        BLOCK_M=bm, BLOCK_N=bn, BLOCK_K=bk, GROUP_M=8, MASKED=False,
+        num_warps=nw, num_stages=ns)
+
+
+def _run_sgemm_nn_f16_fused(A, B, C, m, n, k, alpha, beta, beta_is_zero):
+    bm, bn, bk, nw, ns = _thead_nn_f16_config(m, n, k)[1]
+    _thead_sgemm_nn_f16_fused_kernel[(triton.cdiv(m, bm) * triton.cdiv(n, bn),)](
+        A, B, C, alpha, beta, m, n, k, k, n, n, beta_is_zero,
+        BLOCK_M=bm, BLOCK_N=bn, BLOCK_K=bk, GROUP_M=8, MASKED=False,
+        num_warps=nw, num_stages=ns)
+
+
+def _run_sgemm_nn_f16_padstore(A, B, C, m, n, k, alpha, beta, beta_is_zero):
+    bm, bn, bk, nw, ns = _thead_nn_f16_config(m, n, k)[1]
+    mp = _align_up(m, bm)
+    np = _align_up(n, bn)
+    kp = _align_up(k, bk)
+    A16 = torch.empty((mp, kp), device=A.device, dtype=torch.float16)
+    B16 = torch.empty((kp, np), device=B.device, dtype=torch.float16)
+    _thead_sgemm_nn_f16_pad2d_conv_kernel[(triton.cdiv(mp * kp, 1024),)](
+        A, A16, m, k, k, kp, mp, kp, BLOCK_SIZE=1024)
+    _thead_sgemm_nn_f16_pad2d_conv_kernel[(triton.cdiv(kp * np, 1024),)](
+        B, B16, k, n, n, np, kp, np, BLOCK_SIZE=1024)
+    _thead_sgemm_nn_f16_padstore_kernel[(triton.cdiv(mp, bm) * triton.cdiv(np, bn),)](
+        A16, B16, C, alpha, beta, m, n, mp, np, kp, kp, np, n, beta_is_zero,
+        BLOCK_M=bm, BLOCK_N=bn, BLOCK_K=bk, GROUP_M=8,
+        num_warps=nw, num_stages=ns)
+
+
+def _run_sgemm_nn_f16(A, B, C, m, n, k, alpha, beta, beta_is_zero):
+    variant, cfg = _thead_nn_f16_config(m, n, k)
+    if variant == "padstore":
+        _run_sgemm_nn_f16_padstore(A, B, C, m, n, k, alpha, beta, beta_is_zero)
+    elif variant == "fused":
+        _run_sgemm_nn_f16_fused(A, B, C, m, n, k, alpha, beta, beta_is_zero)
+    else:
+        _run_sgemm_nn_f16_preconv(A, B, C, m, n, k, alpha, beta, beta_is_zero)
+
+
+# ---------------------------------------------------------------------------
+# fp16-MMA fast path for sgemm_tn / sgemm_nt / sgemm_tt.
+#
+# Same technique as the NN fast path: convert f32 inputs to fp16 (with a
+# transpose when the operand is stored transposed), run fp16 tensor-core MMA
+# with fp32 accumulation. On ZW810E this reaches >= 0.95 vs cublas on the
+# core benchmark shapes for TN/NT/TT (previously 0.1-0.7x on the FP32 path).
+#
+# Variants (mirroring NN):
+#   "padstore": transpose+pad A/B into NN-layout fp16 buffers, unmasked MMA,
+#               masked store vs original m/n.
+#   "preconv":  transpose+convert A/B into NN-layout fp16 buffers (no pad),
+#               masked MMA when any dim is not tile-aligned.
+#   "fused":    single kernel, in-register f32->fp16 (+tl.trans if transposed).
+# ---------------------------------------------------------------------------
+
+
+def _can_use_sgemm_tntt_f16(m, n, k, lda, ldb, ldc, alpha, beta, transa, transb) -> bool:
+    """fp16-MMA fast path eligibility for the transposed variants.
+
+    Requires the benchmark-standard contiguous strides and alpha=1/beta=0.
+    Tiny squares (m==n==k<=128) keep the strict FP32 path (same as NN).
+    """
+    if alpha != 1.0 or beta != 0.0:
+        return False
+    exp_lda = m if transa else k
+    exp_ldb = k if transb else n
+    if lda != exp_lda or ldb != exp_ldb or ldc != n:
+        return False
+    if min(m, n, k) < 64:
+        return False
+    if m == n == k and m <= 128:
+        return False
+    return True
+
+
+def _can_use_sgemm_tntt_tf32x3(m, n, k, lda, ldb, ldc, alpha, beta, transa, transb) -> bool:
+    """tf32x3 FP32 fast path for tiny squares (m==n==k<=128).
+
+    fp16 MMA fails the SGEMM accuracy budget for k <= 128 (atol = 1e-4*k);
+    tf32x3 (3-pass tf32 emulation of fp32) keeps worst-ratio ~0.005-0.009 at
+    tensor-core speed, mirroring the NN small-shape fast path.
+    """
+    if alpha != 1.0 or beta != 0.0:
+        return False
+    exp_lda = m if transa else k
+    exp_ldb = k if transb else n
+    if lda != exp_lda or ldb != exp_ldb or ldc != n:
+        return False
+    return m == n == k and m in (64, 128)
+
+
+def _run_sgemm_tntt_fp32_tf32x3(A, B, C, m, n, k, alpha, beta, beta_is_zero, transa, transb):
+    cfg = (32, 32, 32, 8, 3)
+    bm, bn, bk, nw, ns = cfg
+    lda = m if transa else k
+    ldb = k if transb else n
+    _thead_sgemm_tntt_fp32_tf32x3_kernel[(triton.cdiv(m, bm) * triton.cdiv(n, bn),)](
+        A, B, C, alpha, beta, m, n, k, lda, ldb, n, beta_is_zero,
+        M=m, N=n, K=k,
+        BLOCK_M=bm, BLOCK_N=bn, BLOCK_K=bk, GROUP_M=8,
+        USE_TF32X3=True, TRANS_A=transa, TRANS_B=transb,
+        num_warps=nw, num_stages=ns)
+
+
+def _thead_tntt_f16_config(transa, transb, m, n, k):
+    """Select (variant, (BLOCK_M, BLOCK_N, BLOCK_K, num_warps, num_stages))
+    for the fp16 fast path of sgemm_tn/nt/tt. Measured best on ZW810E.
+    Variants: padstore / preconv / fused / swap (see runner docstrings)."""
+    # Which operand needs tl.trans in the k-loop depends on the op
+    # (TN: A, NT: B, TT: both), so narrow shapes are tuned per op.
+    is_tn = transa and not transb
+    if m == n == k:
+        if m == 256:
+            return "fused", (32, 32, 32, 4, 3)
+        if m == 512:
+            return "fused", (64, 128, 32, 8, 4)
+        if m == 511:
+            return "padstore", (64, 128, 64, 8, 4)
+        if m in (1023, 1024, 2048):
+            return "padstore", (128, 256, 32, 8, 3)
+        if m in (4096, 8192, 16384, 4095, 8191):
+            return "padstore", (128, 128, 64, 8, 4)
+        return "fused", (64, 128, 32, 8, 4)
+    # ---- tall-and-skinny (small m) ----
+    if m <= 64:
+        if n <= 1024:
+            return "fused", (16, 64, 64, 4, 3)
+        return "fused", (64, 128, 32, 8, 4)
+    if m <= 128:
+        return "fused", (64, 128, 32, 4, 3)
+    # ---- short-and-wide (small n): per-m tuned ----
+    if n <= 64:
+        if m in (512, 1024):
+            # TN m=1024 prefers a smaller BLOCK_K (fewer in-register transposes
+            # of A per K-tile); m=512 and the NT/TT variants keep BLOCK_K=64.
+            if m == 1024 and is_tn:
+                return "fused", (32, 32, 32, 4, 4)
+            return "fused", (32, 32, 64, 4, 4)
+        if m == 2048:
+            if is_tn:
+                return "fused", (64, 32, 32, 2, 4)
+            return "fused", (64, 32, 64, 4, 3)   # nt/tt
+        if m >= 4096:
+            if is_tn:
+                return "fused", (64, 32, 16, 2, 4)
+            return "fused", (64, 64, 32, 4, 4)   # nt/tt
+        return "fused", (16, 64, 64, 4, 3)
+    if n <= 128:
+        return "fused", (64, 64, 32, 2, 3)
+    if n <= 512:
+        if m >= 4096:
+            return "preconv", (64, 256, 64, 8, 3)
+        return "fused", (64, 128, 32, 8, 4)
+    # ---- large rectangles ----
+    if (m, n, k) == (256, 8192, 2048):
+        if is_tn:
+            return "padstore", (64, 256, 64, 8, 3)
+        return "fused", (64, 64, 32, 4, 4)       # nt/tt
+    if k >= 11008:
+        return "preconv", (64, 256, 64, 8, 3)
+    if m >= n * 3:
+        return "preconv", (64, 256, 64, 8, 3)
+    if (m, n, k) == (4097, 8191, 4095):
+        return "padstore", (128, 128, 64, 8, 4)
+    if n >= m * 3:
+        return "padstore", (128, 128, 64, 8, 4)
+    if min(m, n) >= 4096:
+        return "padstore", (128, 128, 64, 8, 4)
+    return "padstore", (128, 128, 64, 8, 4)
+
+
+def _run_sgemm_tntt_f16_preconv(A, B, C, m, n, k, alpha, beta, beta_is_zero, transa, transb, cfg):
+    bm, bn, bk, nw, ns = cfg
+    lda = m if transa else k
+    ldb = k if transb else n
+    A16 = torch.empty((m, k), device=A.device, dtype=torch.float16)
+    B16 = torch.empty((k, n), device=B.device, dtype=torch.float16)
+    if transa:
+        _thead_sgemm_tntt_f16_tconv_kernel[
+            (triton.cdiv(k, 64) * triton.cdiv(m, 64),)
+        ](A, A16, k, m, lda, k, BM=64, BN=64)
+    else:
+        _thead_sgemm_nn_f16_conv_kernel[(triton.cdiv(m * k, 4096),)](
+            A, A16, NUMEL=m * k, BLOCK=4096, num_warps=4)
+    if transb:
+        _thead_sgemm_tntt_f16_tconv_kernel[
+            (triton.cdiv(n, 64) * triton.cdiv(k, 64),)
+        ](B, B16, n, k, ldb, n, BM=64, BN=64)
+    else:
+        _thead_sgemm_nn_f16_conv_kernel[(triton.cdiv(k * n, 4096),)](
+            B, B16, NUMEL=k * n, BLOCK=4096, num_warps=4)
+    masked = (m % bm != 0) or (n % bn != 0) or (k % bk != 0)
+    _thead_sgemm_nn_f16_mm_kernel[(triton.cdiv(m, bm) * triton.cdiv(n, bn),)](
+        A16, B16, C, alpha, beta, m, n, k, k, n, n, beta_is_zero,
+        BLOCK_M=bm, BLOCK_N=bn, BLOCK_K=bk, GROUP_M=8, MASKED=masked,
+        num_warps=nw, num_stages=ns)
+
+
+def _run_sgemm_tntt_f16_padstore(A, B, C, m, n, k, alpha, beta, beta_is_zero, transa, transb, cfg):
+    bm, bn, bk, nw, ns = cfg
+    lda = m if transa else k
+    ldb = k if transb else n
+    mp = _align_up(m, bm)
+    np_ = _align_up(n, bn)
+    kp = _align_up(k, bk)
+    A16 = torch.empty((mp, kp), device=A.device, dtype=torch.float16)
+    B16 = torch.empty((kp, np_), device=B.device, dtype=torch.float16)
+    # fused A+B conversion in a single launch (tile-based, in-register tl.trans)
+    _thead_sgemm_tntt_f16_tpad_ab_kernel[
+        (triton.cdiv(mp, 32) * triton.cdiv(kp, 64) + triton.cdiv(kp, 32) * triton.cdiv(np_, 64),)
+    ](
+        A, B, A16, B16, k, m, n, lda, ldb, kp, np_, mp, np_, kp,
+        TRANSPOSE_A=transa, TRANSPOSE_B=transb, BM=32, BN=64, num_warps=8)
+    _thead_sgemm_nn_f16_padstore_kernel[(triton.cdiv(mp, bm) * triton.cdiv(np_, bn),)](
+        A16, B16, C, alpha, beta, m, n, mp, np_, kp, kp, np_, n, beta_is_zero,
+        BLOCK_M=bm, BLOCK_N=bn, BLOCK_K=bk, GROUP_M=8,
+        num_warps=nw, num_stages=ns)
+
+
+def _run_sgemm_tntt_f16_fused(A, B, C, m, n, k, alpha, beta, beta_is_zero, transa, transb, cfg):
+    bm, bn, bk, nw, ns = cfg
+    lda = m if transa else k
+    ldb = k if transb else n
+    masked = (m % bm != 0) or (n % bn != 0) or (k % bk != 0)
+    _thead_sgemm_tntt_f16_fused_kernel[(triton.cdiv(m, bm) * triton.cdiv(n, bn),)](
+        A, B, C, alpha, beta, m, n, k, lda, ldb, n, beta_is_zero,
+        BLOCK_M=bm, BLOCK_N=bn, BLOCK_K=bk, GROUP_M=8, MASKED=masked,
+        TRANS_A=transa, TRANS_B=transb,
+        num_warps=nw, num_stages=ns)
+
+
+def _run_sgemm_tntt_f16_swap(A, B, C, m, n, k, alpha, beta, beta_is_zero, transa, transb, cfg):
+    bm, bn, bk, nw, ns = cfg
+    lda = m if transa else k
+    ldb = k if transb else n
+    masked = (m % bm != 0) or (n % bn != 0) or (k % bk != 0)
+    _thead_sgemm_tntt_f16_swap_kernel[(triton.cdiv(m, bm) * triton.cdiv(n, bn),)](
+        A, B, C, alpha, beta, m, n, k, lda, ldb, n, beta_is_zero,
+        BLOCK_M=bm, BLOCK_N=bn, BLOCK_K=bk, GROUP_M=8, MASKED=masked,
+        TRANS_A=transa, TRANS_B=transb,
+        num_warps=nw, num_stages=ns)
+
+
+def _run_sgemm_tntt_f16(A, B, C, m, n, k, alpha, beta, beta_is_zero, transa, transb):
+    variant, cfg = _thead_tntt_f16_config(transa, transb, m, n, k)
+    if variant == "padstore":
+        _run_sgemm_tntt_f16_padstore(
+            A, B, C, m, n, k, alpha, beta, beta_is_zero, transa, transb, cfg
+        )
+    elif variant == "preconv":
+        _run_sgemm_tntt_f16_preconv(
+            A, B, C, m, n, k, alpha, beta, beta_is_zero, transa, transb, cfg
+        )
+    elif variant == "swap":
+        _run_sgemm_tntt_f16_swap(
+            A, B, C, m, n, k, alpha, beta, beta_is_zero, transa, transb, cfg
+        )
+    else:
+        _run_sgemm_tntt_f16_fused(
+            A, B, C, m, n, k, alpha, beta, beta_is_zero, transa, transb, cfg
+        )
+
+
 def _run_sgemm_tt_511(A, lda, B, ldb, C, ldc, alpha, beta, beta_is_zero):
     _thead_sgemm_tt_tf32_masked_kernel[
         (triton.cdiv(511, 64) * triton.cdiv(511, 64),)
@@ -4408,7 +5466,9 @@ def sgemm(
 
     with torch_device_fn.device(A.device):
         if transa == CUBLAS_OP_N and transb == CUBLAS_OP_N:
-            if _can_use_thead_nn_511(m, n, k, lda, ldb, ldc, alpha, beta):
+            if _can_use_sgemm_nn_f16(m, n, k, lda, ldb, ldc, alpha, beta):
+                _run_sgemm_nn_f16(A, B, C, m, n, k, alpha, beta, beta_is_zero)
+            elif _can_use_thead_nn_511(m, n, k, lda, ldb, ldc, alpha, beta):
                 _run_sgemm_nn_511(
                     A, B, C, alpha, beta, beta_is_zero
                 )
@@ -4441,7 +5501,15 @@ def sgemm(
                 runner = dispatch.lookup_and_build(m, n, k, aligned, snapshot_tensor=C)
                 runner()
         elif transa == CUBLAS_OP_T and transb == CUBLAS_OP_N:
-            if _can_use_thead_tn_descriptor(m, n, k, lda, ldb, ldc, alpha, beta):
+            if _can_use_sgemm_tntt_tf32x3(m, n, k, lda, ldb, ldc, alpha, beta, transa, transb):
+                _run_sgemm_tntt_fp32_tf32x3(
+                    A, B, C, m, n, k, alpha, beta, beta_is_zero, transa, transb
+                )
+            elif _can_use_sgemm_tntt_f16(m, n, k, lda, ldb, ldc, alpha, beta, transa, transb):
+                _run_sgemm_tntt_f16(
+                    A, B, C, m, n, k, alpha, beta, beta_is_zero, transa, transb
+                )
+            elif _can_use_thead_tn_descriptor(m, n, k, lda, ldb, ldc, alpha, beta):
                 _run_sgemm_tn_descriptor(
                     A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero
                 )
@@ -4472,7 +5540,15 @@ def sgemm(
                 runner = dispatch.lookup_and_build(m, n, k, aligned, snapshot_tensor=C)
                 runner()
         elif transa == CUBLAS_OP_N and transb == CUBLAS_OP_T:
-            if _can_use_thead_nt_descriptor(m, n, k, lda, ldb, ldc, alpha, beta):
+            if _can_use_sgemm_tntt_tf32x3(m, n, k, lda, ldb, ldc, alpha, beta, transa, transb):
+                _run_sgemm_tntt_fp32_tf32x3(
+                    A, B, C, m, n, k, alpha, beta, beta_is_zero, transa, transb
+                )
+            elif _can_use_sgemm_tntt_f16(m, n, k, lda, ldb, ldc, alpha, beta, transa, transb):
+                _run_sgemm_tntt_f16(
+                    A, B, C, m, n, k, alpha, beta, beta_is_zero, transa, transb
+                )
+            elif _can_use_thead_nt_descriptor(m, n, k, lda, ldb, ldc, alpha, beta):
                 _run_sgemm_nt_descriptor(
                     A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero
                 )
@@ -4501,7 +5577,15 @@ def sgemm(
                 )
                 runner()
         else:
-            if _can_use_thead_tt_descriptor(m, n, k, lda, ldb, ldc, alpha, beta):
+            if _can_use_sgemm_tntt_tf32x3(m, n, k, lda, ldb, ldc, alpha, beta, transa, transb):
+                _run_sgemm_tntt_fp32_tf32x3(
+                    A, B, C, m, n, k, alpha, beta, beta_is_zero, transa, transb
+                )
+            elif _can_use_sgemm_tntt_f16(m, n, k, lda, ldb, ldc, alpha, beta, transa, transb):
+                _run_sgemm_tntt_f16(
+                    A, B, C, m, n, k, alpha, beta, beta_is_zero, transa, transb
+                )
+            elif _can_use_thead_tt_descriptor(m, n, k, lda, ldb, ldc, alpha, beta):
                 _run_sgemm_tt_descriptor(
                     A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero
                 )
