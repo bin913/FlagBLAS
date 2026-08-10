@@ -58,6 +58,37 @@ def _cgemm_split_sum_op_kernel(
 
 
 @triton.jit
+def _cgemm_split_sum_trans_tile_kernel(
+    src,
+    dst_r,
+    dst_i,
+    dst_sum,
+    rows: tl.constexpr,
+    cols: tl.constexpr,
+    ld: tl.constexpr,
+    BLOCK_R: tl.constexpr,
+    BLOCK_C: tl.constexpr,
+):
+    pid_r = tl.program_id(0)
+    pid_c = tl.program_id(1)
+    offs_r = pid_r * BLOCK_R + tl.arange(0, BLOCK_R)
+    offs_c = pid_c * BLOCK_C + tl.arange(0, BLOCK_C)
+
+    src_offsets = offs_c[:, None] * ld + offs_r[None, :]
+    src_mask = (offs_c[:, None] < cols) & (offs_r[None, :] < rows)
+    real_t = tl.load(src + 2 * src_offsets, mask=src_mask, other=0.0)
+    imag_t = tl.load(src + 2 * src_offsets + 1, mask=src_mask, other=0.0)
+    real = tl.trans(real_t)
+    imag = tl.trans(imag_t)
+
+    dst_offsets = offs_r[:, None] * cols + offs_c[None, :]
+    dst_mask = (offs_r[:, None] < rows) & (offs_c[None, :] < cols)
+    tl.store(dst_r + dst_offsets, real, mask=dst_mask)
+    tl.store(dst_i + dst_offsets, imag, mask=dst_mask)
+    tl.store(dst_sum + dst_offsets, real + imag, mask=dst_mask)
+
+
+@triton.jit
 def _cgemm_split_sum2_op_kernel(
     src_a,
     src_b,
@@ -119,6 +150,67 @@ def _cgemm_merge_3m_kernel(dst, prod_r, prod_i, prod_sum, total, BLOCK: tl.const
     tl.store(dst + 2 * offsets + 1, sum_prod - real_prod - imag_prod, mask=mask)
 
 
+@triton.jit
+def _cgemm_3m_nomask_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    SIZE: tl.constexpr,
+    TRANS_A: tl.constexpr,
+    TRANS_B: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    grid_m = tl.cdiv(SIZE, BLOCK_M)
+    grid_n = tl.cdiv(SIZE, BLOCK_N)
+    width = GROUP_M * grid_n
+    group_id = pid // width
+    group_size = tl.minimum(grid_m - group_id * GROUP_M, GROUP_M)
+    pid_m = group_id * GROUP_M + (pid % group_size)
+    pid_n = (pid % width) // group_size
+
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_k_base = tl.arange(0, BLOCK_K)
+
+    prod_r = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    prod_i = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    prod_sum = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    for k_start in range(0, SIZE, BLOCK_K):
+        cur_k = k_start + offs_k_base
+        if TRANS_A == 0:
+            a_elem = offs_m[:, None] * SIZE + cur_k[None, :]
+        else:
+            a_elem = cur_k[None, :] * SIZE + offs_m[:, None]
+
+        if TRANS_B == 0:
+            b_elem = cur_k[:, None] * SIZE + offs_n[None, :]
+        else:
+            b_elem = offs_n[None, :] * SIZE + cur_k[:, None]
+
+        ar = tl.load(a_ptr + 2 * a_elem)
+        ai = tl.load(a_ptr + 2 * a_elem + 1)
+        br = tl.load(b_ptr + 2 * b_elem)
+        bi = tl.load(b_ptr + 2 * b_elem + 1)
+
+        prod_r += tl.dot(ar, br, out_dtype=tl.float32, input_precision="tf32x3")
+        prod_i += tl.dot(ai, bi, out_dtype=tl.float32, input_precision="tf32x3")
+        prod_sum += tl.dot(
+            ar + ai,
+            br + bi,
+            out_dtype=tl.float32,
+            input_precision="tf32x3",
+        )
+
+    c_elem = offs_m[:, None] * SIZE + offs_n[None, :]
+    tl.store(c_ptr + 2 * c_elem, prod_r - prod_i)
+    tl.store(c_ptr + 2 * c_elem + 1, prod_sum - prod_r - prod_i)
+
+
+
 def _get_cgemm_workspace(A: torch.Tensor, m: int, n: int, k: int):
     key = (A.device, m, n, k)
     if _CGEMM_WORKSPACE["key"] != key:
@@ -135,6 +227,71 @@ def _get_cgemm_workspace(A: torch.Tensor, m: int, n: int, k: int):
             torch.empty((m, n), device=A.device, dtype=torch.float32),
         )
     return _CGEMM_WORKSPACE["buffers"]
+
+
+def _use_cgemm_tiled_pack(transa: int, transb: int, m: int, n: int, k: int) -> bool:
+    if not (m == n == k):
+        return False
+    if transa == 0 and transb == 0:
+        return False
+    if m == 512:
+        return True
+    if m == 1024 and transa == 1 and transb == 1:
+        return True
+    if m == 1536 and transa == 1:
+        return True
+    return False
+
+
+def _select_cgemm_pack_trans_tile(transa: int, transb: int, size: int):
+    if size == 512:
+        return 32, 16
+    if transa == 1 and transb == 1:
+        return 16, 16
+    return 32, 16
+
+
+def _split_cgemm_pack_operand(
+    src: torch.Tensor,
+    dst_r: torch.Tensor,
+    dst_i: torch.Tensor,
+    dst_sum: torch.Tensor,
+    rows: int,
+    cols: int,
+    ld: int,
+    trans: int,
+    pack_block: int,
+    tile_r: int,
+    tile_c: int,
+) -> None:
+    if trans == 0:
+        grid = (triton.cdiv(rows * cols, pack_block),)
+        _cgemm_split_sum_op_kernel[grid](
+            src,
+            dst_r,
+            dst_i,
+            dst_sum,
+            rows * cols,
+            cols,
+            ld,
+            0,
+            BLOCK=pack_block,
+        )
+    else:
+        grid = (triton.cdiv(rows, tile_r), triton.cdiv(cols, tile_c))
+        _cgemm_split_sum_trans_tile_kernel[grid](
+            src,
+            dst_r,
+            dst_i,
+            dst_sum,
+            rows,
+            cols,
+            ld,
+            BLOCK_R=tile_r,
+            BLOCK_C=tile_c,
+            num_warps=4,
+            num_stages=3,
+        )
 
 
 def _launch_cgemm_pack_sgemm(
@@ -154,36 +311,45 @@ def _launch_cgemm_pack_sgemm(
     B_real = torch.view_as_real(B).reshape(-1)
     C_real = torch.view_as_real(C).reshape(-1)
 
-    split_grid = (triton.cdiv(max(m * k, k * n), 1024),)
-    merge_grid = (triton.cdiv(m * n, 1024),)
+    pack_block = 256
+    merge_grid = (triton.cdiv(m * n, pack_block),)
 
-    _cgemm_split_sum2_op_kernel[split_grid](
-        A_real,
-        B_real,
-        Ar,
-        Ai,
-        As,
-        Br,
-        Bi,
-        Bs,
-        m * k,
-        k * n,
-        k,
-        n,
-        lda,
-        ldb,
-        transa,
-        transb,
-        BLOCK=1024,
-    )
+    if _use_cgemm_tiled_pack(transa, transb, m, n, k):
+        tile_r, tile_c = _select_cgemm_pack_trans_tile(transa, transb, m)
+        _split_cgemm_pack_operand(
+            A_real, Ar, Ai, As, m, k, lda, transa, pack_block, tile_r, tile_c
+        )
+        _split_cgemm_pack_operand(
+            B_real, Br, Bi, Bs, k, n, ldb, transb, pack_block, tile_r, tile_c
+        )
+    else:
+        split_grid = (triton.cdiv(max(m * k, k * n), pack_block),)
+        _cgemm_split_sum2_op_kernel[split_grid](
+            A_real,
+            B_real,
+            Ar,
+            Ai,
+            As,
+            Br,
+            Bi,
+            Bs,
+            m * k,
+            k * n,
+            k,
+            n,
+            lda,
+            ldb,
+            transa,
+            transb,
+            BLOCK=pack_block,
+        )
 
     _sgemm_iluvatar(0, 0, m, n, k, 1.0, Ar, k, Br, n, 0.0, prod_r, n)
     _sgemm_iluvatar(0, 0, m, n, k, 1.0, Ai, k, Bi, n, 0.0, prod_i, n)
     _sgemm_iluvatar(0, 0, m, n, k, 1.0, As, k, Bs, n, 0.0, prod_sum, n)
     _cgemm_merge_3m_kernel[merge_grid](
-        C_real, prod_r, prod_i, prod_sum, m * n, BLOCK=1024
+        C_real, prod_r, prod_i, prod_sum, m * n, BLOCK=pack_block
     )
-
 
 def _try_cgemm_pack_sgemm(
     transa: int,
@@ -204,13 +370,105 @@ def _try_cgemm_pack_sgemm(
         return False
     if transa not in (0, 1) or transb not in (0, 1):
         return False
-    if ldc != n or max(m, n, k) < 1023:
+    if ldc != n:
+        return False
+    if max(m, n, k) < 511:
         return False
     _launch_cgemm_pack_sgemm(transa, transb, m, n, k, A, lda, B, ldb, C)
     return True
 
 
-def _select_iluvatar_cgemm_config(m: int, n: int, k: int):
+def _select_iluvatar_cgemm_3m_config(transa: int, transb: int, size: int):
+    if size == 64:
+        if transa == 1 and transb == 0:
+            return 32, 16, 32, 8, 8, 4
+        if transa == 0 and transb == 1:
+            return 16, 16, 64, 8, 2, 2
+        if transa == 1 and transb == 1:
+            return 32, 16, 64, 8, 1, 4
+        return 16, 16, 32, 8, 8, 3
+    if size == 128:
+        if transa == 0 and transb == 0:
+            return 32, 16, 32, 8, 4, 3
+        if transa == 1 and transb == 0:
+            return 32, 16, 32, 8, 4, 3
+        if transa == 0 and transb == 1:
+            return 16, 16, 64, 4, 8, 4
+        return 32, 16, 64, 8, 4, 4
+    if size == 256:
+        if transa == 1 and transb == 0:
+            return 64, 32, 32, 8, 4, 3
+        if transa == 0 and transb == 1:
+            return 32, 64, 64, 8, 2, 3
+        if transa == 1 and transb == 1:
+            return 32, 32, 64, 4, 4, 4
+        return 32, 64, 32, 8, 2, 3
+    if size == 512 and transa == 1 and transb == 1:
+        return 32, 64, 32, 4, 4, 3
+    return None
+
+
+def _try_cgemm_3m_nomask(
+    transa: int,
+    transb: int,
+    m: int,
+    n: int,
+    k: int,
+    alpha_is_one: bool,
+    beta_is_zero: bool,
+    A: torch.Tensor,
+    lda: int,
+    B: torch.Tensor,
+    ldb: int,
+    C: torch.Tensor,
+    ldc: int,
+) -> bool:
+    if not (alpha_is_one and beta_is_zero):
+        return False
+    if transa not in (0, 1) or transb not in (0, 1):
+        return False
+    if not (m == n == k and lda == m and ldb == n and ldc == n):
+        return False
+    config = _select_iluvatar_cgemm_3m_config(transa, transb, m)
+    if config is None:
+        return False
+
+    block_m, block_n, block_k, num_warps, group_m, num_stages = config
+    A_real = torch.view_as_real(A).reshape(-1)
+    B_real = torch.view_as_real(B).reshape(-1)
+    C_real = torch.view_as_real(C).reshape(-1)
+    grid = (triton.cdiv(m, block_m) * triton.cdiv(n, block_n),)
+    _cgemm_3m_nomask_kernel[grid](
+        A_real,
+        B_real,
+        C_real,
+        m,
+        transa,
+        transb,
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        BLOCK_K=block_k,
+        GROUP_M=group_m,
+        num_warps=num_warps,
+        num_stages=num_stages,
+    )
+    return True
+
+
+def _select_iluvatar_cgemm_config(transa: int, transb: int, m: int, n: int, k: int):
+    if m == n == k:
+        if m <= 64:
+            if transa == 1:
+                return 32, 16, 32, 8, 2
+            return 16, 16, 32, 8, 2
+        if m == 128 and transa == 1:
+            return 32, 16, 32, 8, 2
+        if m == 256:
+            if transa == 0 and transb in (0, 1):
+                return 32, 64, 32, 8, 4
+            if transa == 1 and transb == 0:
+                return 64, 32, 32, 8, 4
+
     max_dim = max(m, n, k)
     if max_dim <= 128:
         return 16, 16, 32, 4, 1
@@ -266,9 +524,25 @@ def cgemm(
             ldc,
         ):
             return
+        if _try_cgemm_3m_nomask(
+            transa,
+            transb,
+            m,
+            n,
+            k,
+            alpha_is_one,
+            beta_is_zero,
+            A,
+            lda,
+            B,
+            ldb,
+            C,
+            ldc,
+        ):
+            return
 
     block_m, block_n, block_k, num_warps, group_m = _select_iluvatar_cgemm_config(
-        m, n, k
+        transa, transb, m, n, k
     )
     grid = (triton.cdiv(m, block_m) * triton.cdiv(n, block_n),)
 
