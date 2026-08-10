@@ -1,18 +1,13 @@
+import cupy as cp
 import pytest
 import torch
-import cupy as cp
 from cupy_backends.cuda.libs import cublas
 from scipy.linalg import blas as cpu_blas
 
 import flag_blas
-from .accuracy_utils import DOTU_SHAPES, L1_PAIR_STRIDES
+
+from .accuracy_utils import DOTU_SHAPES, L1_PAIR_STRIDES, blas_assert_close
 from .conftest import TO_CPU
-
-
-def _dotu_tolerances(dtype):
-    if dtype == torch.complex64:
-        return (1e-3, 1e-3) if TO_CPU else (1e-4, 1e-4)
-    return (1e-10, 1e-10) if TO_CPU else (1e-12, 1e-12)
 
 
 def cublas_dotu_reference(n, x, incx, y, incy, result):
@@ -58,9 +53,12 @@ def cpu_dotu_reference(n, x, incx, y, incy, result):
 
 def dotu_reference(n, x, incx, y, incy, result):
     if TO_CPU:
-        cpu_dotu_reference(n, x, incx, y, incy, result)
-    else:
-        cublas_dotu_reference(n, x, incx, y, incy, result)
+        ref_result = torch.zeros(result.shape, dtype=result.dtype, device="cpu")
+        cpu_dotu_reference(n, x, incx, y, incy, ref_result)
+        return ref_result
+
+    cublas_dotu_reference(n, x, incx, y, incy, result)
+    return result
 
 
 @pytest.mark.dotu
@@ -79,15 +77,14 @@ def test_accuracy_dotu_complex(dtype, shape, incx, incy):
     result = torch.zeros(1, dtype=dtype, device=flag_blas.device)
     ref_result = torch.zeros(1, dtype=dtype, device=flag_blas.device)
 
-    dotu_reference(n, x.clone(), incx, y.clone(), incy, ref_result)
+    ref_result = dotu_reference(n, x.clone(), incx, y.clone(), incy, ref_result)
 
     if dtype == torch.complex64:
         flag_blas.ops.cdotu(n, x, incx, y, incy, result)
     else:
         flag_blas.ops.zdotu(n, x, incx, y, incy, result)
 
-    rtol, atol = _dotu_tolerances(dtype)
-    torch.testing.assert_close(result, ref_result, rtol=rtol, atol=atol)
+    blas_assert_close(result, ref_result, dtype, reduce_dim=n)
 
 
 @pytest.mark.dotu
@@ -129,12 +126,11 @@ def test_accuracy_dotu_different_n(dtype, n, vec_size):
     ref_result = torch.zeros(1, dtype=dtype, device=flag_blas.device)
 
     # Reference uses only the first n elements
-    dotu_reference(n, x[:n].clone(), 1, y[:n].clone(), 1, ref_result)
+    ref_result = dotu_reference(n, x[:n].clone(), 1, y[:n].clone(), 1, ref_result)
 
     if dtype == torch.complex64:
         flag_blas.ops.cdotu(n, x, 1, y, 1, result)
     else:
         flag_blas.ops.zdotu(n, x, 1, y, 1, result)
 
-    rtol, atol = _dotu_tolerances(dtype)
-    torch.testing.assert_close(result, ref_result, rtol=rtol, atol=atol)
+    blas_assert_close(result, ref_result, dtype, reduce_dim=n)

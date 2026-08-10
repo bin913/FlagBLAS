@@ -7,7 +7,8 @@ import torch
 from scipy.linalg import blas as cpu_blas
 
 import flag_blas
-from .accuracy_utils import L1_PAIR_STRIDES, SWAP_SHAPES
+
+from .accuracy_utils import L1_PAIR_STRIDES, SWAP_SHAPES, blas_assert_close
 from .conftest import TO_CPU
 
 
@@ -86,14 +87,19 @@ def cpu_swap_reference(n, x, incx, y, incy):
 
 def swap_reference(n, x, incx, y, incy):
     if TO_CPU:
-        cpu_swap_reference(n, x, incx, y, incy)
-    else:
-        cublas_swap_reference(n, x, incx, y, incy)
+        ref_x = x.detach().cpu().clone()
+        ref_y = y.detach().cpu().clone()
+        cpu_swap_reference(n, ref_x, incx, ref_y, incy)
+        return ref_x, ref_y
+
+    cublas_swap_reference(n, x, incx, y, incy)
+    return x, y
 
 
 # ==============================
 # Accuracy tests - real dtypes
 # ==============================
+
 
 @pytest.mark.swap
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
@@ -109,25 +115,21 @@ def test_accuracy_swap_real(dtype, shape, incx, incy):
 
     ref_x = x.clone()
     ref_y = y.clone()
-    swap_reference(n, ref_x, incx, ref_y, incy)
+    ref_x, ref_y = swap_reference(n, ref_x, incx, ref_y, incy)
 
     if dtype == torch.float32:
         flag_blas.ops.sswap(n, x, incx, y, incy)
     else:
         flag_blas.ops.dswap(n, x, incx, y, incy)
 
-    tol = (
-        {"rtol": 1e-5, "atol": 1e-5}
-        if dtype == torch.float32
-        else {"rtol": 1e-15, "atol": 1e-15}
-    )
-    torch.testing.assert_close(x, ref_x, **tol)
-    torch.testing.assert_close(y, ref_y, **tol)
+    blas_assert_close(x, ref_x, dtype)
+    blas_assert_close(y, ref_y, dtype)
 
 
 # ==============================
 # Accuracy tests - complex dtypes
 # ==============================
+
 
 @pytest.mark.swap
 @pytest.mark.parametrize("dtype", [torch.complex64, torch.complex128])
@@ -143,25 +145,21 @@ def test_accuracy_swap_complex(dtype, shape, incx, incy):
 
     ref_x = x.clone()
     ref_y = y.clone()
-    swap_reference(n, ref_x, incx, ref_y, incy)
+    ref_x, ref_y = swap_reference(n, ref_x, incx, ref_y, incy)
 
     if dtype == torch.complex64:
         flag_blas.ops.cswap(n, x, incx, y, incy)
     else:
         flag_blas.ops.zswap(n, x, incx, y, incy)
 
-    tol = (
-        {"rtol": 1e-5, "atol": 1e-5}
-        if dtype == torch.complex64
-        else {"rtol": 1e-15, "atol": 1e-15}
-    )
-    torch.testing.assert_close(x, ref_x, **tol)
-    torch.testing.assert_close(y, ref_y, **tol)
+    blas_assert_close(x, ref_x, dtype)
+    blas_assert_close(y, ref_y, dtype)
 
 
 # ==============================
 # Edge case: n <= 0 (empty tensor)
 # ==============================
+
 
 @pytest.mark.swap
 @pytest.mark.parametrize(
@@ -197,6 +195,7 @@ def test_accuracy_swap_empty_tensor(dtype):
 # Different n: n smaller than allocated length (real)
 # ==============================
 
+
 @pytest.mark.swap
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
 @pytest.mark.parametrize(
@@ -211,25 +210,21 @@ def test_accuracy_swap_different_n_real(dtype, n, vec_size):
 
     ref_x = x.clone()
     ref_y = y.clone()
-    swap_reference(n, ref_x, 1, ref_y, 1)
+    ref_x, ref_y = swap_reference(n, ref_x, 1, ref_y, 1)
 
     if dtype == torch.float32:
         flag_blas.ops.sswap(n, x, 1, y, 1)
     else:
         flag_blas.ops.dswap(n, x, 1, y, 1)
 
-    tol = (
-        {"rtol": 1e-5, "atol": 1e-5}
-        if dtype == torch.float32
-        else {"rtol": 1e-15, "atol": 1e-15}
-    )
-    torch.testing.assert_close(x, ref_x, **tol)
-    torch.testing.assert_close(y, ref_y, **tol)
+    blas_assert_close(x, ref_x, dtype)
+    blas_assert_close(y, ref_y, dtype)
 
 
 # ==============================
 # Different n: n smaller than allocated length (complex)
 # ==============================
+
 
 @pytest.mark.swap
 @pytest.mark.parametrize("dtype", [torch.complex64, torch.complex128])
@@ -245,17 +240,12 @@ def test_accuracy_swap_different_n_complex(dtype, n, vec_size):
 
     ref_x = x.clone()
     ref_y = y.clone()
-    swap_reference(n, ref_x, 1, ref_y, 1)
+    ref_x, ref_y = swap_reference(n, ref_x, 1, ref_y, 1)
 
     if dtype == torch.complex64:
         flag_blas.ops.cswap(n, x, 1, y, 1)
     else:
         flag_blas.ops.zswap(n, x, 1, y, 1)
 
-    tol = (
-        {"rtol": 1e-5, "atol": 1e-5}
-        if dtype == torch.complex64
-        else {"rtol": 1e-15, "atol": 1e-15}
-    )
-    torch.testing.assert_close(x, ref_x, **tol)
-    torch.testing.assert_close(y, ref_y, **tol)
+    blas_assert_close(x, ref_x, dtype)
+    blas_assert_close(y, ref_y, dtype)
