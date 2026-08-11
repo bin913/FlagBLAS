@@ -333,44 +333,51 @@ def _select_hgemm_config(m: int, n: int, k: int, transa: int, transb: int):
         return 64, 64, 128, 4, 8, 4, 1
 
     # ---- Exact core-shape fixes for previously under-threshold cases ----
+    # NN configurations derived from corrected-layout sweeps on Iluvatar BI-V150.
+    # (128, 128, 64, nw=16) is the consistent winner; this backend does not
+    # support multi-stage shared-memory pipelining (num_stages and tl.range
+    # num_stages are both no-ops), so group_m (4 or 8) is the main occupancy
+    # lever. nw=8 wins only for a couple of M-asymmetric shapes.
     if transa == CUBLAS_OP_N and transb == CUBLAS_OP_N:
         if m == 2048 and n == 2048 and k == 2048:
-            return 128, 128, 64, 8, 4, 5, 1
+            return 128, 128, 64, 16, 4, 1, 1
         if m == 4096 and n == 4096 and k == 4096:
-            return 128, 128, 64, 8, 4, 3, 1
+            return 128, 128, 64, 16, 4, 1, 2
         if m == 8192 and n == 8192 and k == 8192:
-            return 128, 128, 64, 8, 8, 2, 1
+            return 128, 128, 64, 16, 4, 1, 2
         if m == 16384 and n == 16384 and k == 16384:
-            return 256, 256, 64, 8, 8, 2, 1
+            return 128, 128, 64, 16, 4, 1, 1
         if m == 2048 and n == 12288 and k == 4096:
-            return 128, 128, 64, 8, 8, 5, 1
+            return 128, 128, 64, 16, 4, 1, 2
         if m == 2048 and n == 11008 and k == 4096:
-            return 128, 128, 64, 8, 8, 3, 1
+            return 128, 128, 64, 16, 8, 1, 1
         if m == 2048 and n == 4096 and k == 11008:
-            return 128, 128, 64, 8, 8, 4, 1
+            return 128, 128, 64, 16, 4, 1, 2
         if m == 4096 and n == 24576 and k == 8192:
-            return 128, 128, 64, 8, 8, 2, 1
+            return 128, 128, 64, 16, 8, 2, 1
         if m == 4096 and n == 8192 and k == 28672:
-            return 128, 128, 64, 8, 8, 4, 1
+            return 128, 128, 64, 16, 4, 1, 1
         if m == 8192 and n == 28672 and k == 8192:
-            return 128, 128, 64, 8, 8, 4, 1
+            return 128, 128, 64, 16, 4, 2, 2
         if m == 16384 and n == 2048 and k == 2048:
-            return 128, 128, 64, 8, 4, 3, 1
+            return 128, 128, 64, 16, 2, 1, 1
         if m == 2048 and n == 16384 and k == 2048:
-            return 128, 128, 64, 8, 16, 3, 1
+            return 128, 128, 64, 16, 4, 1, 2
+        if m == 2048 and n == 2048 and k == 16384:
+            return 128, 128, 64, 16, 4, 1, 1
         if m == 32768 and n == 1024 and k == 1024:
-            return 128, 128, 64, 8, 8, 5, 1
+            return 128, 128, 64, 16, 8, 2, 1
         if m == 4096 and n == 128 and k == 1024:
             return 128, 128, 128, 16, 16, 3, 4
         if m == 8192 and n == 256 and k == 2048:
-            return 128, 128, 64, 16, 4, 2, 1
+            return 128, 128, 64, 16, 4, 1, 2
         if m == 16384 and n == 512 and k == 4096:
-            return 128, 128, 64, 8, 8, 4, 1
+            return 128, 128, 64, 16, 8, 2, 1
         if m == 512 and n == 16384 and k == 4096:
-            return 128, 128, 64, 8, 8, 5, 1
+            return 128, 128, 64, 16, 8, 2, 1
     if transa == CUBLAS_OP_T and transb == CUBLAS_OP_N:
         if m == 2048 and n == 2048 and k == 2048:
-            return 128, 128, 64, 16, 4, 2, 1
+            return 128, 128, 64, 16, 2, 2, 1
         if m == 4096 and n == 4096 and k == 4096:
             return 128, 128, 64, 16, 8, 2, 1
         if m == 8192 and n == 8192 and k == 8192:
@@ -378,7 +385,7 @@ def _select_hgemm_config(m: int, n: int, k: int, transa: int, transb: int):
         if m == 16384 and n == 16384 and k == 16384:
             return 128, 128, 64, 16, 8, 3, 1
         if m == 2048 and n == 16384 and k == 2048:
-            return 128, 128, 64, 16, 16, 2, 1
+            return 128, 128, 64, 8, 16, 6, 1
         if m == 16384 and n == 2048 and k == 2048:
             return 128, 128, 64, 16, 4, 10, 1
         if m == 16384 and n == 512 and k == 4096:
@@ -449,6 +456,8 @@ def _select_hgemm_tn_transpose_dot_config(m: int, n: int, k: int):
     where the one-time fp32 accumulator transpose is more expensive than
     the strided-A savings (e.g. big tiles / extreme aspect ratios).
     """
+    if m == 2048 and n == 2048 and k == 2048:
+        return 128, 128, 64, 16, 2, 2
     if m == 4096 and n == 4096 and k == 4096:
         return 128, 128, 64, 16, 8, 4
     if m == 8192 and n == 8192 and k == 8192:
@@ -468,7 +477,7 @@ def _select_hgemm_tn_transpose_dot_config(m: int, n: int, k: int):
     if m == 4096 and n == 24576 and k == 8192:
         return 128, 128, 64, 16, 4, 4
     if m == 2048 and n == 11008 and k == 4096:
-        return 128, 128, 64, 16, 8, 2
+        return 128, 128, 64, 16, 8, 3
     if m == 8192 and n == 28672 and k == 8192:
         return 128, 128, 64, 16, 4, 4
     return None
