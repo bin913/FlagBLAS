@@ -49,6 +49,7 @@ def _hgemm_kernel(
     FULL_GRID_M: tl.constexpr,
     FULL_GRID_N: tl.constexpr,
     CACHE: tl.constexpr,
+    N_MAJOR_ORDER: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
@@ -58,11 +59,15 @@ def _hgemm_kernel(
     pid = tl.program_id(0)
     grid_m = tl.cdiv(m, BLOCK_M)
     grid_n = tl.cdiv(n, BLOCK_N)
-    width = GROUP_M * grid_n
-    group_id = pid // width
-    group_size = tl.minimum(grid_m - group_id * GROUP_M, GROUP_M)
-    pid_m = group_id * GROUP_M + (pid % group_size)
-    pid_n = (pid % width) // group_size
+    if N_MAJOR_ORDER:
+        pid_n = pid // grid_m
+        pid_m = pid - pid_n * grid_m
+    else:
+        width = GROUP_M * grid_n
+        group_id = pid // width
+        group_size = tl.minimum(grid_m - group_id * GROUP_M, GROUP_M)
+        pid_m = group_id * GROUP_M + (pid % group_size)
+        pid_n = (pid % width) // group_size
 
     if SKIP_FULL and pid_m < FULL_GRID_M and pid_n < FULL_GRID_N:
         return
@@ -196,6 +201,81 @@ def _hgemm_kernel(
 
 
 @triton.jit
+def _hgemm_nn_splitk_kernel(
+    a_ptr,
+    b_ptr,
+    partial_ptr,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+    K_TILES_PER_SPLIT: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    split_id = tl.program_id(1)
+    grid_m = tl.cdiv(m, BLOCK_M)
+    grid_n = tl.cdiv(n, BLOCK_N)
+    width = GROUP_M * grid_n
+    group_id = pid // width
+    group_size = tl.minimum(grid_m - group_id * GROUP_M, GROUP_M)
+    pid_m = group_id * GROUP_M + (pid % group_size)
+    pid_n = (pid % width) // group_size
+
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_k_base = tl.arange(0, BLOCK_K)
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+
+    for ki in range(0, K_TILES_PER_SPLIT):
+        offs_k = (split_id * K_TILES_PER_SPLIT + ki) * BLOCK_K + offs_k_base
+        a = tl.load(
+            a_ptr + offs_m[:, None] * lda + offs_k[None, :],
+            cache_modifier=".cg",
+        )
+        b = tl.load(
+            b_ptr + offs_k[:, None] * ldb + offs_n[None, :],
+            cache_modifier=".cg",
+        )
+        acc = tl.dot(a, b, acc, out_dtype=tl.float32, allow_tf32=False)
+
+    partial_ptrs = partial_ptr + split_id * m * n + offs_m[:, None] * n + offs_n[None, :]
+    tl.store(partial_ptrs, acc)
+
+
+@triton.jit
+def _hgemm_nn_splitk_reduce_kernel(
+    partial_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    m,
+    n,
+    ldc,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    SPLIT_K: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    grid_n = tl.cdiv(n, BLOCK_N)
+    pid_m = pid // grid_n
+    pid_n = pid - pid_m * grid_n
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    partial_offsets = offs_m[:, None] * n + offs_n[None, :]
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+
+    for split_id in range(0, SPLIT_K):
+        acc += tl.load(partial_ptr + split_id * m * n + partial_offsets)
+
+    c_ptrs = c_ptr + offs_m[:, None] * ldc + offs_n[None, :]
+    tl.store(c_ptrs, (alpha * acc).to(tl.float16))
+
+
+@triton.jit
 def _hgemm_tt_transpose_dot_kernel(
     a_ptr,
     b_ptr,
@@ -311,6 +391,14 @@ def _hgemm_tn_transpose_dot_kernel(
     tl.store(c_ptrs, result.to(tl.float16))
 
 
+def _select_hgemm_nn_splitk_config(m: int, n: int, k: int):
+    if m == 8192 and n == 256 and k == 2048:
+        return 128, 128, 64, 16, 4, 2, 4
+    if m == 16384 and n == 512 and k == 4096:
+        return 128, 128, 64, 16, 4, 2, 8
+    return None
+
+
 def _select_hgemm_config(m: int, n: int, k: int, transa: int, transb: int):
     """Select (BLOCK_M, BLOCK_N, BLOCK_K, num_warps, group_m, num_stages).
 
@@ -340,9 +428,9 @@ def _select_hgemm_config(m: int, n: int, k: int, transa: int, transb: int):
     # lever. nw=8 wins only for a couple of M-asymmetric shapes.
     if transa == CUBLAS_OP_N and transb == CUBLAS_OP_N:
         if m == 2048 and n == 2048 and k == 2048:
-            return 128, 128, 64, 16, 4, 1, 1
+            return 128, 128, 64, 16, 8, 2, 1
         if m == 4096 and n == 4096 and k == 4096:
-            return 128, 128, 64, 16, 4, 1, 2
+            return 128, 128, 64, 16, 4, 4, 1
         if m == 8192 and n == 8192 and k == 8192:
             return 128, 128, 64, 16, 4, 1, 2
         if m == 16384 and n == 16384 and k == 16384:
@@ -374,7 +462,7 @@ def _select_hgemm_config(m: int, n: int, k: int, transa: int, transb: int):
         if m == 16384 and n == 512 and k == 4096:
             return 128, 128, 64, 16, 8, 2, 1
         if m == 512 and n == 16384 and k == 4096:
-            return 128, 128, 64, 16, 8, 2, 1
+            return 128, 128, 64, 16, 2, 4, 1
     if transa == CUBLAS_OP_T and transb == CUBLAS_OP_N:
         if m == 2048 and n == 2048 and k == 2048:
             return 128, 128, 64, 16, 2, 2, 1
@@ -487,6 +575,16 @@ def _can_use_fast_hgemm(m: int, n: int, k: int, block_m: int, block_n: int, bloc
     return (m % block_m == 0) and (n % block_n == 0) and (k % block_k == 0)
 
 
+def _select_hgemm_n_major_order(m: int, n: int, k: int, transa: int, transb: int) -> bool:
+    if transa != CUBLAS_OP_N or transb != CUBLAS_OP_N:
+        return False
+    if m == 2048 and n == 2048 and k == 2048:
+        return True
+    if m == 512 and n == 16384 and k == 4096:
+        return True
+    return False
+
+
 def _should_pretranspose_b(m: int, n: int, k: int) -> bool:
     """Transposing B is profitable only when B is large enough that the
     transposed-load software gather (per-element) dominates the one-time
@@ -520,13 +618,50 @@ def _launch_hgemm(
     group_m: int,
     num_stages: int,
     unroll: int,
+    n_major_order: bool = False,
 ) -> None:
     _hgemm_kernel[grid](
         A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero,
         transa == CUBLAS_OP_T, transb == CUBLAS_OP_T, check_bounds, False, 0, 0,
-        ".cg",
+        ".cg", n_major_order,
         BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k, GROUP_M=group_m,
         UNROLL=unroll, num_warps=num_warps, num_stages=num_stages,
+    )
+
+
+def _launch_hgemm_nn_splitk(
+    grid,
+    reduce_grid,
+    A: torch.Tensor,
+    B: torch.Tensor,
+    C: torch.Tensor,
+    alpha: float,
+    m: int,
+    n: int,
+    k: int,
+    lda: int,
+    ldb: int,
+    ldc: int,
+    block_m: int,
+    block_n: int,
+    block_k: int,
+    num_warps: int,
+    group_m: int,
+    num_stages: int,
+    split_k: int,
+    beta: float,
+) -> None:
+    partial = torch.empty((split_k, m, n), device=C.device, dtype=torch.float32)
+    k_tiles_per_split = k // (block_k * split_k)
+    _hgemm_nn_splitk_kernel[grid](
+        A, B, partial, m, n, k, lda, ldb,
+        BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k, GROUP_M=group_m,
+        K_TILES_PER_SPLIT=k_tiles_per_split, num_warps=num_warps, num_stages=num_stages,
+    )
+    _hgemm_nn_splitk_reduce_kernel[reduce_grid](
+        partial, C, alpha, beta, m, n, ldc,
+        BLOCK_M=block_m, BLOCK_N=block_n, SPLIT_K=split_k,
+        num_warps=num_warps, num_stages=1,
     )
 
 
@@ -666,6 +801,7 @@ def hgemm(
         m, n, k, transa, transb
     )
     check_bounds = not _can_use_fast_hgemm(m, n, k, block_m, block_n, block_k)
+    n_major_order = _select_hgemm_n_major_order(m, n, k, transa, transb)
 
     with torch_device_fn.device(A.device):
         # ---- Padding path: pad to block-aligned dims and run fast no-bounds kernel ----
@@ -694,7 +830,7 @@ def hgemm(
                 transa, transb, grid_pad, A_pad, B_pad, C_pad, alpha, beta,
                 padded_m, padded_n, padded_k, lda_pad, ldb_pad, padded_n,
                 beta_is_zero, False, block_m, block_n, block_k, num_warps,
-                group_m, num_stages, unroll,
+                group_m, num_stages, unroll, n_major_order,
             )
             C.copy_(C_pad[:m, :n])
             return
@@ -704,5 +840,5 @@ def hgemm(
         _launch_hgemm(
             transa, transb, grid, A, B, C, alpha, beta, m, n, k, lda, ldb, ldc,
             beta_is_zero, check_bounds, block_m, block_n, block_k, num_warps,
-            group_m, num_stages, unroll,
+            group_m, num_stages, unroll, n_major_order,
         )
