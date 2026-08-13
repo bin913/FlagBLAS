@@ -20,6 +20,7 @@ VENDOR=$1
 SUPPORTED_VENDORS=(
   "nvidia"
   "iluvatar"
+  "hygon"
 )
 export FLAGOS_PYPI="https://resource.flagos.net/repository/flagos-pypi-${VENDOR}/simple"
 
@@ -59,6 +60,21 @@ case $VENDOR in
     # Install PyTorch with Corex support
     uv pip install \
       "torch>=2.6.0"
+
+    # Install FlagBLAS in editable mode
+    uv pip install -e .
+    uv pip install ".[test]"
+    ;;
+
+  hygon)
+    # Install PyTorch for Hygon DCU (ROCm/HIP)
+    uv pip install torch==2.9.0+das.opt1.dtk2604 \
+        --index-url https://resource.flagos.net/repository/flagos-pypi-hygon/simple
+
+    # Install FlagTree compiler for Hygon DCU
+    uv pip uninstall triton || true
+    uv pip install flagtree==0.5.1+hcu3.1 \
+        --index-url https://resource.flagos.net/repository/flagos-pypi-hygon/simple
 
     # Install FlagBLAS in editable mode
     uv pip install -e .

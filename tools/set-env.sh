@@ -18,6 +18,7 @@
 SUPPORTED_VENDORS=(
   "nvidia"
   "iluvatar"
+  "hygon"
 )
 
 valid_vendor() {
@@ -50,6 +51,11 @@ case $VENDOR in
     export COREX_ROOT=${COREX_ROOT:-/usr/local/corex}
     export PATH="${COREX_ROOT}/bin:${PATH}"
     export LD_LIBRARY_PATH="${COREX_ROOT}/lib:${LD_LIBRARY_PATH}"
+    ;;
+  hygon)
+    if [ -f /opt/dtk-26.04/env.sh ]; then
+      source /opt/dtk-26.04/env.sh || true
+    fi
     ;;
 esac
 
