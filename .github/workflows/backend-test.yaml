@@ -52,7 +52,7 @@ jobs:
     concurrency:
       group: >-
         op-test-${{ inputs.vendor }}-
-        ${{ github.event.pull_request.number || github.ref }}
+        ${{ inputs.pr_id || github.event.pull_request.number || github.ref }}
       cancel-in-progress: true
     steps:
       - id: checkout-attempt-1
