@@ -18,11 +18,13 @@
 SUPPORTED_VENDORS=(
   "nvidia"
   "iluvatar"
+  "ascend"
 )
 
 declare -A PYTHON_SUPPORTED=(
   ["nvidia"]="3.12"
   ["iluvatar"]="3.12"
+  ["ascend"]="3.11"
 )
 
 RED='\033[0;31m'

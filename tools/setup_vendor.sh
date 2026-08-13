@@ -20,6 +20,7 @@ VENDOR=$1
 SUPPORTED_VENDORS=(
   "nvidia"
   "iluvatar"
+  "ascend"
 )
 export FLAGOS_PYPI="https://resource.flagos.net/repository/flagos-pypi-${VENDOR}/simple"
 
@@ -59,6 +60,21 @@ case $VENDOR in
     # Install PyTorch with Corex support
     uv pip install \
       "torch>=2.6.0"
+
+    # Install FlagBLAS in editable mode
+    uv pip install -e .
+    uv pip install ".[test]"
+    ;;
+
+  ascend)
+    # Install PyTorch (CPU build) and torch-npu for Ascend NPU
+    uv pip install torch==2.10.0+cpu torch-npu==2.10.0 \
+        --index-url https://resource.flagos.net/repository/flagos-pypi-ascend/simple
+
+    # Install FlagTree compiler for Ascend
+    uv pip uninstall triton || true
+    uv pip install flagtree==0.6.0+ascend3.5 \
+        --index-url https://resource.flagos.net/repository/flagos-pypi-ascend/simple
 
     # Install FlagBLAS in editable mode
     uv pip install -e .

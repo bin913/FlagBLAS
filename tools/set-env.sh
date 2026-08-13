@@ -18,6 +18,7 @@
 SUPPORTED_VENDORS=(
   "nvidia"
   "iluvatar"
+  "ascend"
 )
 
 valid_vendor() {
@@ -50,6 +51,11 @@ case $VENDOR in
     export COREX_ROOT=${COREX_ROOT:-/usr/local/corex}
     export PATH="${COREX_ROOT}/bin:${PATH}"
     export LD_LIBRARY_PATH="${COREX_ROOT}/lib:${LD_LIBRARY_PATH}"
+    ;;
+  ascend)
+    if [ -f /usr/local/Ascend/cann/set_env.sh ]; then
+      source /usr/local/Ascend/cann/set_env.sh || true
+    fi
     ;;
 esac
 
