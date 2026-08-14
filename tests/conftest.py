@@ -40,16 +40,12 @@ REPORT_FILE = "accuracy_result.json"
 
 
 def pytest_addoption(parser):
-    reference_choices = [device, "cpu"]
-    if flag_blas.vendor_name == "hygon":
-        reference_choices.append("hip")
-
     parser.addoption(
         "--ref",
         action="store",
         default=device,
         required=False,
-        choices=reference_choices,
+        choices=[device, "cpu"],
         help="device to run reference tests on",
     )
     parser.addoption(
@@ -93,14 +89,8 @@ def pytest_addoption(parser):
 
 def pytest_configure(config):
     global TO_CPU
-    reference = config.getoption("--ref")
-    TO_CPU = reference == "cpu"
-    if TO_CPU:
-        ref_backend = "CPU (--ref cpu)"
-    elif flag_blas.vendor_name == "hygon":
-        ref_backend = f"hipBLAS (--ref {reference})"
-    else:
-        ref_backend = f"{device} (--ref {device})"
+    TO_CPU = config.getoption("--ref") == "cpu"
+    ref_backend = "CPU (--ref cpu)" if TO_CPU else f"{device} (--ref {device})"
     print(f"[correctness] reference backend: {ref_backend}", flush=True)
 
     global QUICK_MODE

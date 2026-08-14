@@ -20,8 +20,14 @@ from scipy.linalg import blas as cpu_blas
 
 import flag_blas
 
-from .accuracy_utils import DOTC_SHAPES, L1_PAIR_STRIDES, blas_assert_close
+from .accuracy_utils import DOTC_SHAPES, L1_PAIR_STRIDES
 from .conftest import TO_CPU
+
+
+def _dotc_tolerances(dtype):
+    if dtype == torch.complex64:
+        return (1e-3, 1e-3) if TO_CPU else (1e-5, 1e-5)
+    return (1e-10, 1e-10) if TO_CPU else (1e-12, 1e-12)
 
 
 def cublas_dotc_reference(n, x, incx, y, incy, result):
@@ -63,12 +69,9 @@ def cpu_dotc_reference(n, x, incx, y, incy, result):
 
 def dotc_reference(n, x, incx, y, incy, result):
     if TO_CPU:
-        ref_result = torch.zeros(result.shape, dtype=result.dtype, device="cpu")
-        cpu_dotc_reference(n, x, incx, y, incy, ref_result)
-        return ref_result
-
-    cublas_dotc_reference(n, x, incx, y, incy, result)
-    return result
+        cpu_dotc_reference(n, x, incx, y, incy, result)
+    else:
+        cublas_dotc_reference(n, x, incx, y, incy, result)
 
 
 @pytest.mark.dotc
@@ -88,13 +91,14 @@ def test_accuracy_dotc_complex(dtype, shape, incx, incy):
     ref_result = torch.zeros(1, dtype=dtype, device=flag_blas.device)
     result = torch.zeros(1, dtype=dtype, device=flag_blas.device)
 
-    ref_result = dotc_reference(n, ref_x, incx, ref_y, incy, ref_result)
+    dotc_reference(n, ref_x, incx, ref_y, incy, ref_result)
 
     if dtype == torch.complex64:
         flag_blas.ops.cdotc(n, x, incx, y, incy, result)
     else:
         flag_blas.ops.zdotc(n, x, incx, y, incy, result)
-    blas_assert_close(result, ref_result, dtype, reduce_dim=n)
+    rtol, atol = _dotc_tolerances(dtype)
+    torch.testing.assert_close(result, ref_result, rtol=rtol, atol=atol)
 
 
 @pytest.mark.dotc
@@ -135,13 +139,14 @@ def test_accuracy_dotc_different_n(dtype, n, vec_size):
     ref_result = torch.zeros(1, dtype=dtype, device=flag_blas.device)
     result = torch.zeros(1, dtype=dtype, device=flag_blas.device)
 
-    ref_result = dotc_reference(n, ref_x, 1, ref_y, 1, ref_result)
+    dotc_reference(n, ref_x, 1, ref_y, 1, ref_result)
 
     if dtype == torch.complex64:
         flag_blas.ops.cdotc(n, x, 1, y, 1, result)
     else:
         flag_blas.ops.zdotc(n, x, 1, y, 1, result)
-    blas_assert_close(result, ref_result, dtype, reduce_dim=n)
+    rtol, atol = _dotc_tolerances(dtype)
+    torch.testing.assert_close(result, ref_result, rtol=rtol, atol=atol)
 
 
 @pytest.mark.dotc
