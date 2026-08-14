@@ -84,12 +84,7 @@ class AminBenchmark(Benchmark):
 
         for shape in self.shapes:
             n = shape[0]
-            try:
-                x = torch.randn(n * self.incx, dtype=cur_dtype, device=self.device)
-            except torch.OutOfMemoryError as exc:
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                pytest.skip(f"Insufficient GPU memory for {self.op_name}: {exc}")
+            x = torch.randn(n * self.incx, dtype=cur_dtype, device=self.device)
             result = torch.zeros(1, dtype=torch.int32, device=self.device)
             yield x, {
                 "n": n,
