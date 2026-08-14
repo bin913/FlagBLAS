@@ -1,22 +1,8 @@
-# Copyright 2026 FlagOS Contributors
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 from typing import Generator
 
-import cupy as cp
 import pytest
 import torch
+import cupy as cp
 from cupy_backends.cuda.libs import cublas
 
 import flag_blas
@@ -33,13 +19,9 @@ def cublas_dotc(x, y, result, n=None, incx=1, incy=1, handle=None):
         result.zero_()
         return result
     if x.dtype == torch.complex64:
-        cublas.cdotc(
-            handle, n, x.data_ptr(), incx, y.data_ptr(), incy, result.data_ptr()
-        )
+        cublas.cdotc(handle, n, x.data_ptr(), incx, y.data_ptr(), incy, result.data_ptr())
     elif x.dtype == torch.complex128:
-        cublas.zdotc(
-            handle, n, x.data_ptr(), incx, y.data_ptr(), incy, result.data_ptr()
-        )
+        cublas.zdotc(handle, n, x.data_ptr(), incx, y.data_ptr(), incy, result.data_ptr())
     else:
         raise TypeError(f"Unsupported dtype for dotc: {x.dtype}")
     return result
@@ -91,6 +73,34 @@ class DotcBenchmark(Benchmark):
 
     def get_correctness_reduce_dim(self, args, kwargs):
         return kwargs["n"]
+
+    def validate_results(self, reference_result, blas_result, dtype, reduce_dim=1):
+        if dtype == torch.complex64:
+            rtol = 1e-5
+            atol = max(1e-5, 1e-5 * (max(reduce_dim, 1) ** 0.5))
+            tolerance_desc = "rtol=1e-5,atol=max(1e-5,sqrt(n)*1e-5)"
+        else:
+            rtol = 1e-12
+            atol = max(1e-12, 1e-12 * (max(reduce_dim, 1) ** 0.5))
+            tolerance_desc = "rtol=1e-12,atol=max(1e-12,sqrt(n)*1e-12)"
+
+        try:
+            torch.testing.assert_close(blas_result, reference_result, rtol=rtol, atol=atol)
+        except AssertionError as e:
+            ref_cpu = reference_result.cpu()
+            res_cpu = blas_result.cpu()
+            max_abs_diff = torch.max(torch.abs(ref_cpu - res_cpu))
+            max_rel_diff = torch.max(
+                torch.abs((ref_cpu - res_cpu) / (torch.abs(ref_cpu) + 1e-9))
+            )
+            raise AssertionError(
+                f"Results differ beyond rtol={rtol}, atol={atol} "
+                f"for dtype {dtype} reduce_dim={reduce_dim}:\n"
+                f"Max absolute difference: {max_abs_diff}\n"
+                f"Max relative difference: {max_rel_diff}\n"
+                f"Shape: {ref_cpu.shape}"
+            ) from e
+        return {(str(dtype), tolerance_desc)}
 
 
 @pytest.mark.dotc
