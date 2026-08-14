@@ -122,6 +122,7 @@ class DotuBenchmark(Benchmark):
             ) from e
         return {(str(dtype), tolerance_desc)}
 
+
 @pytest.mark.dotu
 def test_perf_cdotu():
     bench = DotuBenchmark(
