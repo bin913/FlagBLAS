@@ -84,8 +84,14 @@ class AminBenchmark(Benchmark):
 
         for shape in self.shapes:
             n = shape[0]
-            
             x = torch.randn(n * self.incx, dtype=cur_dtype, device=self.device)
+            result = torch.zeros(1, dtype=torch.int32, device=self.device)
+            yield x, {
+                "n": n,
+                "incx": self.incx,
+                "handle": handle,
+                "result": result,
+            }
 
     def get_gbps(self, args, latency):
         x = args[0]
