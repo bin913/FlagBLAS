@@ -1,3 +1,17 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import logging
 from typing import Generator
 
@@ -69,6 +83,10 @@ class AxpyBenchmark(Benchmark):
         super().__init__(*args, **kwargs)
         self.alpha = alpha
 
+    def init_user_config(self):
+        super().init_user_config()
+        self.shapes = L1_VECTOR_SHAPES
+
     def set_more_metrics(self):
         return ["gbps"]
 
@@ -109,31 +127,6 @@ class AxpyBenchmark(Benchmark):
             inp2
         )
         return io_amount * 1e-9 / (latency * 1e-3)
-
-    def validate_results(self, torch_result, blas_result, dtype):
-        tolerance = flag_blas.testing.RESOLUTION[dtype]
-        try:
-            flag_blas.testing.assert_close(
-                blas_result,
-                torch_result,
-                dtype,
-                equal_nan=False,
-                reduce_dim=1,
-                atol=tolerance,
-            )
-        except AssertionError as e:
-            torch_cpu = torch_result.cpu()
-            blas_cpu = blas_result.cpu()
-            max_abs_diff = torch.max(torch.abs(torch_cpu - blas_cpu))
-            max_rel_diff = torch.max(
-                torch.abs((torch_cpu - blas_cpu) / (torch.abs(torch_cpu) + 1e-9))
-            )
-            raise AssertionError(
-                f"Results differ beyond tolerance {tolerance} for dtype {dtype}:\n"
-                f"Max absolute difference: {max_abs_diff}\n"
-                f"Max relative difference: {max_rel_diff}\n"
-                f"Shape: {torch_cpu.shape}"
-            ) from e
 
     def run_correctness_check(self):
         if self.blas_op is None:
@@ -176,6 +169,10 @@ class AxpyStrideBenchmark(AxpyBenchmark):
         self.incx = incx
         self.incy = incy
         self.alpha = alpha
+
+    def init_user_config(self):
+        super().init_user_config()
+        self.shapes = L1_STRIDE_SHAPES
 
     def set_more_metrics(self):
         return ["gbps"]

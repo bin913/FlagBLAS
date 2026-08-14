@@ -1,17 +1,37 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import ctypes
 import ctypes.util
 from typing import Generator
 
-import cupy as cp
 import numpy as np
 import pytest
 import torch
-from cupy_backends.cuda.libs import cublas
 
 import flag_blas
 from benchmark.performance_utils import Benchmark, run_correctness_then_benchmark
 from flag_blas.ops import CUBLAS_OP_C, CUBLAS_OP_N, CUBLAS_OP_T
 from flag_blas.utils import shape_utils
+
+IS_HYGON = flag_blas.vendor_name == "hygon"
+
+if IS_HYGON:
+    import atexit
+else:
+    import cupy as cp
+    from cupy_backends.cuda.libs import cublas
 
 GBMV_BANDS = [
     (0, 0),
@@ -51,9 +71,6 @@ def load_cublas():
     raise RuntimeError("Unable to find libcublas.so on the system.")
 
 
-_cublas = load_cublas()
-
-
 class cuComplex(ctypes.Structure):
     _fields_ = [("x", ctypes.c_float), ("y", ctypes.c_float)]
 
@@ -62,12 +79,115 @@ class cuDoubleComplex(ctypes.Structure):
     _fields_ = [("x", ctypes.c_double), ("y", ctypes.c_double)]
 
 
-_CUBLAS_GBMV_FUNCS = {
-    torch.float32: (_cublas.cublasSgbmv_v2, ctypes.c_float, None),
-    torch.float64: (_cublas.cublasDgbmv_v2, ctypes.c_double, None),
-    torch.complex64: (_cublas.cublasCgbmv_v2, cuComplex, True),
-    torch.complex128: (_cublas.cublasZgbmv_v2, cuDoubleComplex, True),
-}
+if IS_HYGON:
+    _HIPBLAS_LIBRARY = None
+    _HIPBLAS_HANDLES = {}
+    _HIPBLAS_GBMV_FUNCS = {
+        torch.float32: ("hipblasSgbmv", ctypes.c_float, None),
+        torch.float64: ("hipblasDgbmv", ctypes.c_double, None),
+        torch.complex64: ("hipblasCgbmv_v2", cuComplex, True),
+        torch.complex128: ("hipblasZgbmv_v2", cuDoubleComplex, True),
+    }
+
+    def _check_hipblas_status(status, operation):
+        if status != 0:
+            raise RuntimeError(f"{operation} failed with hipBLAS status {status}")
+
+    def _load_hipblas():
+        global _HIPBLAS_LIBRARY
+        if _HIPBLAS_LIBRARY is None:
+            library_name = ctypes.util.find_library("hipblas")
+            if library_name is None:
+                raise RuntimeError("Unable to find the hipBLAS shared library")
+            library = ctypes.CDLL(library_name)
+            library.hipblasCreate.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
+            library.hipblasCreate.restype = ctypes.c_int
+            library.hipblasDestroy.argtypes = [ctypes.c_void_p]
+            library.hipblasDestroy.restype = ctypes.c_int
+            library.hipblasSetStream.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+            library.hipblasSetStream.restype = ctypes.c_int
+            library.hipblasSetPointerMode.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            library.hipblasSetPointerMode.restype = ctypes.c_int
+            _HIPBLAS_LIBRARY = library
+        return _HIPBLAS_LIBRARY
+
+    def _prepare_hipblas(device):
+        library = _load_hipblas()
+        torch_device = torch.device(device)
+        device_index = torch_device.index
+        if device_index is None:
+            device_index = torch.cuda.current_device()
+        handle = _HIPBLAS_HANDLES.get(device_index)
+        if handle is None:
+            with torch.cuda.device(device_index):
+                handle = ctypes.c_void_p()
+                _check_hipblas_status(
+                    library.hipblasCreate(ctypes.byref(handle)), "hipblasCreate"
+                )
+                _check_hipblas_status(
+                    library.hipblasSetPointerMode(handle, 0),
+                    "hipblasSetPointerMode",
+                )
+            _HIPBLAS_HANDLES[device_index] = handle
+        stream = torch.cuda.current_stream(device).cuda_stream
+        _check_hipblas_status(
+            library.hipblasSetStream(handle, ctypes.c_void_p(stream)),
+            "hipblasSetStream",
+        )
+        return library, handle
+
+    def _destroy_hipblas_handles():
+        if _HIPBLAS_LIBRARY is None:
+            return
+        for handle in tuple(_HIPBLAS_HANDLES.values()):
+            try:
+                _HIPBLAS_LIBRARY.hipblasDestroy(handle)
+            except Exception:
+                pass
+        _HIPBLAS_HANDLES.clear()
+
+    def _resolve_hipblas_gbmv(library, dtype):
+        try:
+            symbol, scalar_type, is_complex = _HIPBLAS_GBMV_FUNCS[dtype]
+        except KeyError as error:
+            raise ValueError(
+                f"Unsupported Hygon GBMV benchmark dtype: {dtype}"
+            ) from error
+        function = getattr(library, symbol)
+        function.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.POINTER(scalar_type),
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.POINTER(scalar_type),
+            ctypes.c_void_p,
+            ctypes.c_int,
+        ]
+        function.restype = ctypes.c_int
+        return function, scalar_type, is_complex
+
+    atexit.register(_destroy_hipblas_handles)
+
+
+_cublas = None if IS_HYGON else load_cublas()
+
+_CUBLAS_GBMV_FUNCS = (
+    {}
+    if IS_HYGON
+    else {
+        torch.float32: (_cublas.cublasSgbmv_v2, ctypes.c_float, None),
+        torch.float64: (_cublas.cublasDgbmv_v2, ctypes.c_double, None),
+        torch.complex64: (_cublas.cublasCgbmv_v2, cuComplex, True),
+        torch.complex128: (_cublas.cublasZgbmv_v2, cuDoubleComplex, True),
+    }
+)
 
 
 def _make_scalar(ctor, is_complex, value):
@@ -76,50 +196,94 @@ def _make_scalar(ctor, is_complex, value):
     return ctor(value)
 
 
-def cublas_gbmv_baseline(
-    AB,
-    x,
-    y,
-    trans,
-    m,
-    n,
-    kl,
-    ku,
-    alpha,
-    lda,
-    incx,
-    beta,
-    incy,
-    handle,
-    alpha_ptr,
-    beta_ptr,
-    c_func,
-    alpha_c,
-    beta_c,
-    **kwargs,
-):
-    if m == 0 or n == 0:
+if IS_HYGON:
+
+    def cublas_gbmv_baseline(
+        AB,
+        x,
+        y,
+        trans,
+        m,
+        n,
+        kl,
+        ku,
+        alpha,
+        lda,
+        incx,
+        beta,
+        incy,
+        handle,
+        alpha_ptr,
+        beta_ptr,
+        c_func,
+        hip_trans,
+        **kwargs,
+    ):
+        status = c_func(
+            handle,
+            hip_trans,
+            m,
+            n,
+            kl,
+            ku,
+            alpha_ptr,
+            ctypes.c_void_p(AB.data_ptr()),
+            lda,
+            ctypes.c_void_p(x.data_ptr()),
+            incx,
+            beta_ptr,
+            ctypes.c_void_p(y.data_ptr()),
+            incy,
+        )
+        _check_hipblas_status(status, "hipBLAS GBMV")
         return y
 
-    status = c_func(
-        ctypes.c_void_p(handle),
-        ctypes.c_int(trans),
-        ctypes.c_int(m),
-        ctypes.c_int(n),
-        ctypes.c_int(kl),
-        ctypes.c_int(ku),
-        ctypes.byref(alpha_c),
-        ctypes.c_void_p(AB.data_ptr()),
-        ctypes.c_int(lda),
-        ctypes.c_void_p(x.data_ptr()),
-        ctypes.c_int(incx),
-        ctypes.byref(beta_c),
-        ctypes.c_void_p(y.data_ptr()),
-        ctypes.c_int(incy),
-    )
-    if status != 0:
-        raise RuntimeError(f"cublasXgbmv_v2 failed with status code: {status}")
-    return y
+else:
+
+    def cublas_gbmv_baseline(
+        AB,
+        x,
+        y,
+        trans,
+        m,
+        n,
+        kl,
+        ku,
+        alpha,
+        lda,
+        incx,
+        beta,
+        incy,
+        handle,
+        alpha_ptr,
+        beta_ptr,
+        c_func,
+        alpha_c,
+        beta_c,
+        **kwargs,
+    ):
+        if m == 0 or n == 0:
+            return y
+
+        status = c_func(
+            ctypes.c_void_p(handle),
+            ctypes.c_int(trans),
+            ctypes.c_int(m),
+            ctypes.c_int(n),
+            ctypes.c_int(kl),
+            ctypes.c_int(ku),
+            ctypes.byref(alpha_c),
+            ctypes.c_void_p(AB.data_ptr()),
+            ctypes.c_int(lda),
+            ctypes.c_void_p(x.data_ptr()),
+            ctypes.c_int(incx),
+            ctypes.byref(beta_c),
+            ctypes.c_void_p(y.data_ptr()),
+            ctypes.c_int(incy),
+        )
+        if status != 0:
+            raise RuntimeError(f"cublasXgbmv_v2 failed with status code: {status}")
+        return y
 
 
 def _gems_wrapper(op):
@@ -148,10 +312,10 @@ def _gems_wrapper(op):
     return _impl
 
 
-gems_sgbmv_wrapper = _gems_wrapper(flag_blas.ops.sgbmv)
-gems_dgbmv_wrapper = _gems_wrapper(flag_blas.ops.dgbmv)
-gems_cgbmv_wrapper = _gems_wrapper(flag_blas.ops.cgbmv)
-gems_zgbmv_wrapper = _gems_wrapper(flag_blas.ops.zgbmv)
+gems_sgbmv_wrapper = _gems_wrapper(flag_blas.sgbmv)
+gems_dgbmv_wrapper = _gems_wrapper(flag_blas.dgbmv)
+gems_cgbmv_wrapper = _gems_wrapper(flag_blas.cgbmv)
+gems_zgbmv_wrapper = _gems_wrapper(flag_blas.zgbmv)
 
 
 def _generate_banded_AB(m, n, kl, ku, lda, dtype, device):
@@ -184,6 +348,7 @@ class GbmvBenchmark(Benchmark):
         self.alpha = alpha
         self.beta = beta
         self.bands = GBMV_BANDS
+        self.correctness_reference = "hipBLAS" if IS_HYGON else "cuBLAS"
 
     def set_more_metrics(self):
         return ["tflops", "gbps"]
@@ -193,30 +358,43 @@ class GbmvBenchmark(Benchmark):
         return None
 
     def get_input_iter(self, cur_dtype) -> Generator:
-        handle = cp.cuda.device.get_cublas_handle()
-        cublas.setPointerMode(handle, cublas.CUBLAS_POINTER_MODE_HOST)
-
-        if cur_dtype == torch.float32:
-            np_dtype = np.float32
-        elif cur_dtype == torch.float64:
-            np_dtype = np.float64
-        elif cur_dtype == torch.complex64:
-            np_dtype = np.complex64
-        elif cur_dtype == torch.complex128:
-            np_dtype = np.complex128
+        if IS_HYGON:
+            library, handle = _prepare_hipblas(self.device)
+            c_func, ctor, is_complex = _resolve_hipblas_gbmv(library, cur_dtype)
+            hip_trans = {
+                CUBLAS_OP_N: 111,
+                CUBLAS_OP_T: 112,
+                CUBLAS_OP_C: 113,
+            }[self.trans]
+            alpha_c = _make_scalar(ctor, is_complex, self.alpha)
+            beta_c = _make_scalar(ctor, is_complex, self.beta)
+            alpha_ptr = ctypes.byref(alpha_c)
+            beta_ptr = ctypes.byref(beta_c)
         else:
-            raise ValueError(f"Unsupported dtype: {cur_dtype}")
+            handle = cp.cuda.device.get_cublas_handle()
+            cublas.setPointerMode(handle, cublas.CUBLAS_POINTER_MODE_HOST)
 
-        alpha_np = np.array(self.alpha, dtype=np_dtype)
-        beta_np = np.array(self.beta, dtype=np_dtype)
-        alpha_ptr = alpha_np.ctypes.data
-        beta_ptr = beta_np.ctypes.data
+            if cur_dtype == torch.float32:
+                np_dtype = np.float32
+            elif cur_dtype == torch.float64:
+                np_dtype = np.float64
+            elif cur_dtype == torch.complex64:
+                np_dtype = np.complex64
+            elif cur_dtype == torch.complex128:
+                np_dtype = np.complex128
+            else:
+                raise ValueError(f"Unsupported dtype: {cur_dtype}")
 
-        if cur_dtype not in _CUBLAS_GBMV_FUNCS:
-            raise ValueError(f"Unsupported dtype: {cur_dtype}")
-        c_func, ctor, is_complex = _CUBLAS_GBMV_FUNCS[cur_dtype]
-        alpha_c = _make_scalar(ctor, is_complex, self.alpha)
-        beta_c = _make_scalar(ctor, is_complex, self.beta)
+            alpha_np = np.array(self.alpha, dtype=np_dtype)
+            beta_np = np.array(self.beta, dtype=np_dtype)
+            alpha_ptr = alpha_np.ctypes.data
+            beta_ptr = beta_np.ctypes.data
+
+            if cur_dtype not in _CUBLAS_GBMV_FUNCS:
+                raise ValueError(f"Unsupported dtype: {cur_dtype}")
+            c_func, ctor, is_complex = _CUBLAS_GBMV_FUNCS[cur_dtype]
+            alpha_c = _make_scalar(ctor, is_complex, self.alpha)
+            beta_c = _make_scalar(ctor, is_complex, self.beta)
 
         seen_configs = set()
 
@@ -239,7 +417,7 @@ class GbmvBenchmark(Benchmark):
                 x = torch.randn(x_len, dtype=cur_dtype, device=self.device)
                 y = torch.randn(y_len, dtype=cur_dtype, device=self.device)
 
-                yield AB, x, y.clone(), {
+                call_kwargs = {
                     "trans": self.trans,
                     "m": m,
                     "n": n,
@@ -254,9 +432,13 @@ class GbmvBenchmark(Benchmark):
                     "alpha_ptr": alpha_ptr,
                     "beta_ptr": beta_ptr,
                     "c_func": c_func,
-                    "alpha_c": alpha_c,
-                    "beta_c": beta_c,
                 }
+                if IS_HYGON:
+                    call_kwargs["hip_trans"] = hip_trans
+                else:
+                    call_kwargs["alpha_c"] = alpha_c
+                    call_kwargs["beta_c"] = beta_c
+                yield AB, x, y.clone(), call_kwargs
 
     def get_tflops(self, op, *args, **kwargs):
         m = kwargs.get("m", 0)
@@ -283,7 +465,8 @@ class GbmvBenchmark(Benchmark):
         return io_amount * 1e-9 / (latency * 1e-3)
 
     def get_correctness_reduce_dim(self, args, kwargs):
-        return kwargs["n"] if kwargs["trans"] == CUBLAS_OP_N else kwargs["m"]
+        input_len = kwargs["n"] if kwargs["trans"] == CUBLAS_OP_N else kwargs["m"]
+        return max(1, min(input_len, kwargs["kl"] + kwargs["ku"] + 1))
 
     def clone_correctness_inputs(self, args, kwargs):
         AB, x, y = args

@@ -1,3 +1,17 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import ctypes
 import ctypes.util
 from typing import Generator
@@ -37,9 +51,7 @@ def _get_cublas_func(*names):
     raise RuntimeError(f"Cannot find any cuBLAS symbol from: {', '.join(names)}")
 
 
-def cublas_swap(x, y, n=None, incx=1, incy=1, tmp=None):
-    x = x.clone()
-    y = y.clone()
+def cublas_swap(x, y, n=None, incx=1, incy=1, handle=None, tmp=None):
     if n is None:
         n = min(x.numel() // incx, y.numel() // incy)
     if n <= 0:
@@ -56,7 +68,8 @@ def cublas_swap(x, y, n=None, incx=1, incy=1, tmp=None):
     else:
         raise TypeError(f"Unsupported dtype for swap: {x.dtype}")
 
-    handle = cp.cuda.device.get_cublas_handle()
+    if handle is None:
+        handle = cp.cuda.device.get_cublas_handle()
     status = func(
         ctypes.c_void_p(handle),
         ctypes.c_int(n),
@@ -70,9 +83,7 @@ def cublas_swap(x, y, n=None, incx=1, incy=1, tmp=None):
     return x, y
 
 
-def gems_swap_wrapper(x, y, n=None, incx=1, incy=1, tmp=None):
-    x = x.clone()
-    y = y.clone()
+def gems_swap_wrapper(x, y, n=None, incx=1, incy=1, handle=None, tmp=None):
     if x.dtype == torch.float32:
         flag_blas.ops.sswap(n, x, incx, y, incy)
     elif x.dtype == torch.float64:
@@ -100,6 +111,7 @@ class SwapBenchmark(Benchmark):
         return None
 
     def get_input_iter(self, cur_dtype) -> Generator:
+        handle = cp.cuda.device.get_cublas_handle()
         for shape in self.shapes:
             n = shape[0]
             x = torch.randn(n * self.incx, dtype=cur_dtype, device=self.device)
@@ -108,6 +120,7 @@ class SwapBenchmark(Benchmark):
                 "n": n,
                 "incx": self.incx,
                 "incy": self.incy,
+                "handle": handle,
             }
 
     def get_gbps(self, args, latency):

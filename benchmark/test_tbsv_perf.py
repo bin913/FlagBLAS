@@ -1,22 +1,34 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import ctypes
 import ctypes.util
 from typing import Generator
 
-import cupy as cp
 import pytest
 import torch
-from cupy_backends.cuda.libs import cublas
-import flag_blas
 
+import flag_blas
+from benchmark.performance_utils import Benchmark, run_correctness_then_benchmark
 from flag_blas.ops import (
+    CUBLAS_DIAG_NON_UNIT,
     CUBLAS_FILL_MODE_LOWER,
     CUBLAS_FILL_MODE_UPPER,
+    CUBLAS_OP_C,
     CUBLAS_OP_N,
     CUBLAS_OP_T,
-    CUBLAS_DIAG_NON_UNIT,
 )
-
-from benchmark.performance_utils import Benchmark
 from flag_blas.utils import shape_utils
 
 STBSV_SIZES = [
@@ -47,6 +59,24 @@ def load_cublas():
 
 
 _cublas = load_cublas()
+_cublas_handle = None
+
+
+def _get_cublas_handle():
+    global _cublas_handle
+    if _cublas_handle is None:
+        handle = ctypes.c_void_p()
+        status = _cublas.cublasCreate_v2(ctypes.byref(handle))
+        if status != 0:
+            raise RuntimeError(f"cublasCreate_v2 failed with status code: {status}")
+        _cublas_handle = handle.value
+    status = _cublas.cublasSetStream_v2(
+        ctypes.c_void_p(_cublas_handle),
+        ctypes.c_void_p(torch.cuda.current_stream().cuda_stream),
+    )
+    if status != 0:
+        raise RuntimeError(f"cublasSetStream_v2 failed with status code: {status}")
+    return _cublas_handle
 
 
 def cublas_stbsv_baseline(
@@ -87,6 +117,22 @@ def gems_stbsv_wrapper(A, x, uplo, trans, diag, n, k, lda, incx, **kwargs):
     return x
 
 
+def _gems_wrapper(op):
+    def _impl(A, x, uplo, trans, diag, n, k, lda, incx, **kwargs):
+        op(uplo, trans, diag, n, k, A, lda, x, incx)
+        return x
+
+    return _impl
+
+
+GEMS_TBSV_WRAPPERS = {
+    "stbsv": gems_stbsv_wrapper,
+    "dtbsv": _gems_wrapper(flag_blas.dtbsv),
+    "ctbsv": _gems_wrapper(flag_blas.ctbsv),
+    "ztbsv": _gems_wrapper(flag_blas.ztbsv),
+}
+
+
 def _make_triangular_banded(n, k, lda, uplo, dtype, device):
     if n == 0:
         return torch.zeros((n, lda), dtype=dtype, device=device).contiguous()
@@ -117,7 +163,6 @@ def _stored_band_nnz(n, k):
 
 
 class StbsvBenchmark(Benchmark):
-
     def __init__(
         self,
         *args,
@@ -140,8 +185,7 @@ class StbsvBenchmark(Benchmark):
         return None
 
     def get_input_iter(self, cur_dtype) -> Generator:
-        handle = cp.cuda.device.get_cublas_handle()
-        cublas.setPointerMode(handle, cublas.CUBLAS_POINTER_MODE_HOST)
+        handle = _get_cublas_handle()
 
         if cur_dtype == torch.float32:
             c_func = _cublas.cublasStbsv_v2
@@ -204,57 +248,168 @@ class StbsvBenchmark(Benchmark):
 # --------------------------------------------------------------------------
 # Top-level perf entry points
 # --------------------------------------------------------------------------
-@pytest.mark.stbsv
-def test_perf_stbsv():
+def _run_tbsv_variant(op_name, dtype, uplo, trans):
+    if (
+        dtype in (torch.float64, torch.complex128)
+        and not flag_blas.runtime.device.support_fp64
+    ):
+        pytest.skip("fp64 is not supported on this device")
     bench = StbsvBenchmark(
-        op_name="stbsv",
+        op_name=f"{op_name}_{uplo}_{trans}",
         torch_op=cublas_stbsv_baseline,
-        gems_op=gems_stbsv_wrapper,
-        dtypes=[torch.float32],
-        uplo=CUBLAS_FILL_MODE_LOWER,
-        trans=CUBLAS_OP_N,
+        gems_op=GEMS_TBSV_WRAPPERS[op_name],
+        dtypes=[dtype],
+        uplo=uplo,
+        trans=trans,
         diag=CUBLAS_DIAG_NON_UNIT,
     )
-    bench.run()
+    run_correctness_then_benchmark(bench)
 
 
-@pytest.mark.stbsv
-def test_perf_stbsv_upper():
-    bench = StbsvBenchmark(
-        op_name="stbsv_upper",
-        torch_op=cublas_stbsv_baseline,
-        gems_op=gems_stbsv_wrapper,
-        dtypes=[torch.float32],
-        uplo=CUBLAS_FILL_MODE_UPPER,
-        trans=CUBLAS_OP_N,
-        diag=CUBLAS_DIAG_NON_UNIT,
-    )
-    bench.run()
+TBSV_PERF_CASES = [
+    pytest.param(
+        "stbsv",
+        torch.float32,
+        CUBLAS_FILL_MODE_LOWER,
+        CUBLAS_OP_N,
+        marks=pytest.mark.stbsv,
+    ),
+    pytest.param(
+        "stbsv",
+        torch.float32,
+        CUBLAS_FILL_MODE_UPPER,
+        CUBLAS_OP_N,
+        marks=pytest.mark.stbsv,
+    ),
+    pytest.param(
+        "stbsv",
+        torch.float32,
+        CUBLAS_FILL_MODE_LOWER,
+        CUBLAS_OP_T,
+        marks=pytest.mark.stbsv,
+    ),
+    pytest.param(
+        "stbsv",
+        torch.float32,
+        CUBLAS_FILL_MODE_UPPER,
+        CUBLAS_OP_T,
+        marks=pytest.mark.stbsv,
+    ),
+    pytest.param(
+        "dtbsv",
+        torch.float64,
+        CUBLAS_FILL_MODE_LOWER,
+        CUBLAS_OP_N,
+        marks=pytest.mark.dtbsv,
+    ),
+    pytest.param(
+        "dtbsv",
+        torch.float64,
+        CUBLAS_FILL_MODE_UPPER,
+        CUBLAS_OP_N,
+        marks=pytest.mark.dtbsv,
+    ),
+    pytest.param(
+        "dtbsv",
+        torch.float64,
+        CUBLAS_FILL_MODE_LOWER,
+        CUBLAS_OP_T,
+        marks=pytest.mark.dtbsv,
+    ),
+    pytest.param(
+        "dtbsv",
+        torch.float64,
+        CUBLAS_FILL_MODE_UPPER,
+        CUBLAS_OP_T,
+        marks=pytest.mark.dtbsv,
+    ),
+    pytest.param(
+        "ctbsv",
+        torch.complex64,
+        CUBLAS_FILL_MODE_LOWER,
+        CUBLAS_OP_N,
+        marks=pytest.mark.ctbsv,
+    ),
+    pytest.param(
+        "ctbsv",
+        torch.complex64,
+        CUBLAS_FILL_MODE_UPPER,
+        CUBLAS_OP_N,
+        marks=pytest.mark.ctbsv,
+    ),
+    pytest.param(
+        "ctbsv",
+        torch.complex64,
+        CUBLAS_FILL_MODE_LOWER,
+        CUBLAS_OP_T,
+        marks=pytest.mark.ctbsv,
+    ),
+    pytest.param(
+        "ctbsv",
+        torch.complex64,
+        CUBLAS_FILL_MODE_UPPER,
+        CUBLAS_OP_T,
+        marks=pytest.mark.ctbsv,
+    ),
+    pytest.param(
+        "ctbsv",
+        torch.complex64,
+        CUBLAS_FILL_MODE_LOWER,
+        CUBLAS_OP_C,
+        marks=pytest.mark.ctbsv,
+    ),
+    pytest.param(
+        "ctbsv",
+        torch.complex64,
+        CUBLAS_FILL_MODE_UPPER,
+        CUBLAS_OP_C,
+        marks=pytest.mark.ctbsv,
+    ),
+    pytest.param(
+        "ztbsv",
+        torch.complex128,
+        CUBLAS_FILL_MODE_LOWER,
+        CUBLAS_OP_N,
+        marks=pytest.mark.ztbsv,
+    ),
+    pytest.param(
+        "ztbsv",
+        torch.complex128,
+        CUBLAS_FILL_MODE_UPPER,
+        CUBLAS_OP_N,
+        marks=pytest.mark.ztbsv,
+    ),
+    pytest.param(
+        "ztbsv",
+        torch.complex128,
+        CUBLAS_FILL_MODE_LOWER,
+        CUBLAS_OP_T,
+        marks=pytest.mark.ztbsv,
+    ),
+    pytest.param(
+        "ztbsv",
+        torch.complex128,
+        CUBLAS_FILL_MODE_UPPER,
+        CUBLAS_OP_T,
+        marks=pytest.mark.ztbsv,
+    ),
+    pytest.param(
+        "ztbsv",
+        torch.complex128,
+        CUBLAS_FILL_MODE_LOWER,
+        CUBLAS_OP_C,
+        marks=pytest.mark.ztbsv,
+    ),
+    pytest.param(
+        "ztbsv",
+        torch.complex128,
+        CUBLAS_FILL_MODE_UPPER,
+        CUBLAS_OP_C,
+        marks=pytest.mark.ztbsv,
+    ),
+]
 
 
-@pytest.mark.stbsv
-def test_perf_stbsv_trans():
-    bench = StbsvBenchmark(
-        op_name="stbsv_trans",
-        torch_op=cublas_stbsv_baseline,
-        gems_op=gems_stbsv_wrapper,
-        dtypes=[torch.float32],
-        uplo=CUBLAS_FILL_MODE_LOWER,
-        trans=CUBLAS_OP_T,
-        diag=CUBLAS_DIAG_NON_UNIT,
-    )
-    bench.run()
-
-
-@pytest.mark.stbsv
-def test_perf_stbsv_upper_trans():
-    bench = StbsvBenchmark(
-        op_name="stbsv_upper_trans",
-        torch_op=cublas_stbsv_baseline,
-        gems_op=gems_stbsv_wrapper,
-        dtypes=[torch.float32],
-        uplo=CUBLAS_FILL_MODE_UPPER,
-        trans=CUBLAS_OP_T,
-        diag=CUBLAS_DIAG_NON_UNIT,
-    )
-    bench.run()
+@pytest.mark.parametrize("op_name,dtype,uplo,trans", TBSV_PERF_CASES)
+def test_perf_tbsv(op_name, dtype, uplo, trans):
+    _run_tbsv_variant(op_name, dtype, uplo, trans)
