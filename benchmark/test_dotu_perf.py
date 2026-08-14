@@ -92,7 +92,7 @@ class DotuBenchmark(Benchmark):
     def get_correctness_reduce_dim(self, args, kwargs):
         return kwargs["n"]
 
-def validate_results(self, reference_result, blas_result, dtype, reduce_dim=1):
+    def validate_results(self, reference_result, blas_result, dtype, reduce_dim=1):
         if dtype == torch.complex64:
             rtol = 1e-4
             atol = max(1e-4, 1e-5 * (max(reduce_dim, 1) ** 0.5))
