@@ -15,13 +15,17 @@
 import ctypes
 import ctypes.util
 
-import cupy as cp
 import pytest
 import torch
-from cupy_backends.cuda.libs import cublas
 from scipy.linalg import blas as cpu_blas
 
 import flag_blas
+
+if flag_blas.vendor_name == "hygon":
+    from .hipblas_reference import check_hipblas_status, get_hipblas_context
+elif flag_blas.vendor_name != "ascend":
+    import cupy as cp
+    from cupy_backends.cuda.libs import cublas
 from flag_blas.ops import CUBLAS_FILL_MODE_LOWER, CUBLAS_FILL_MODE_UPPER
 
 from .accuracy_utils import blas_assert_close, to_cpu_blas_tensor, to_reference
@@ -42,7 +46,55 @@ def load_cublas():
     raise RuntimeError("Unable to find libcublas.so on this system")
 
 
-_cublas = load_cublas()
+_cublas = None if flag_blas.vendor_name in {"ascend", "hygon"} else load_cublas()
+
+
+def hipblas_spmv_reference(uplo, n, alpha, AP, x, incx, beta, y, incy):
+    if n == 0:
+        return
+
+    if AP.dtype == torch.float32:
+        symbol = "hipblasSspmv"
+        scalar_type = ctypes.c_float
+    elif AP.dtype == torch.float64:
+        symbol = "hipblasDspmv"
+        scalar_type = ctypes.c_double
+    else:
+        raise ValueError(f"Unsupported dtype for hipBLAS SPMV: {AP.dtype}")
+
+    library, handle = get_hipblas_context(AP)
+    function = getattr(library, symbol)
+    function.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.POINTER(scalar_type),
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.POINTER(scalar_type),
+        ctypes.c_void_p,
+        ctypes.c_int,
+    ]
+    function.restype = ctypes.c_int
+    alpha_c = scalar_type(alpha)
+    beta_c = scalar_type(beta)
+    hip_uplo = 121 if uplo == CUBLAS_FILL_MODE_UPPER else 122
+    check_hipblas_status(
+        function(
+            handle,
+            hip_uplo,
+            n,
+            ctypes.byref(alpha_c),
+            ctypes.c_void_p(AP.data_ptr()),
+            ctypes.c_void_p(x.data_ptr()),
+            incx,
+            ctypes.byref(beta_c),
+            ctypes.c_void_p(y.data_ptr()),
+            incy,
+        ),
+        symbol,
+    )
 
 
 def cublas_spmv_reference(uplo, n, alpha, AP, x, incx, beta, y, incy):
@@ -111,7 +163,10 @@ def spmv_reference(uplo, n, alpha, AP, x, incx, beta, y, incy):
         return cpu_spmv_reference(uplo, n, alpha, AP, x, incx, beta, y, incy)
 
     ref_y = y.clone()
-    cublas_spmv_reference(uplo, n, alpha, AP, x, incx, beta, ref_y, incy)
+    if flag_blas.vendor_name == "hygon":
+        hipblas_spmv_reference(uplo, n, alpha, AP, x, incx, beta, ref_y, incy)
+    else:
+        cublas_spmv_reference(uplo, n, alpha, AP, x, incx, beta, ref_y, incy)
     return ref_y
 
 
@@ -166,7 +221,7 @@ def test_accuracy_sspmv(n, uplo, beta):
     x = torch.randn(n, dtype=dtype, device=flag_blas.device)
     y = torch.randn(n, dtype=dtype, device=flag_blas.device)
     ref_y = spmv_reference(uplo, n, alpha, AP, x, 1, beta, y, 1)
-    flag_blas.ops.sspmv(uplo, n, alpha, AP, x, 1, beta, y, 1)
+    flag_blas.sspmv(uplo, n, alpha, AP, x, 1, beta, y, 1)
 
     blas_assert_close(y, ref_y, dtype, reduce_dim=_spmv_reduce_dim(n))
 
@@ -182,7 +237,7 @@ def test_accuracy_sspmv_stride(n, uplo, incx, incy):
     x = torch.randn(1 + (n - 1) * incx, dtype=dtype, device=flag_blas.device)
     y = torch.randn(1 + (n - 1) * incy, dtype=dtype, device=flag_blas.device)
     ref_y = spmv_reference(uplo, n, alpha, AP, x, incx, beta, y, incy)
-    flag_blas.ops.sspmv(uplo, n, alpha, AP, x, incx, beta, y, incy)
+    flag_blas.sspmv(uplo, n, alpha, AP, x, incx, beta, y, incy)
 
     blas_assert_close(y, ref_y, dtype, reduce_dim=_spmv_reduce_dim(n))
 
@@ -197,7 +252,7 @@ def test_sspmv_alpha_zero():
     y_orig = y.clone()
 
     y_ref = spmv_reference(CUBLAS_FILL_MODE_UPPER, n, 0.0, AP, x, 1, 2.0, y, 1)
-    flag_blas.ops.sspmv(CUBLAS_FILL_MODE_UPPER, n, 0.0, AP, x, 1, 2.0, y, 1)
+    flag_blas.sspmv(CUBLAS_FILL_MODE_UPPER, n, 0.0, AP, x, 1, 2.0, y, 1)
     blas_assert_close(y, y_ref, dtype, reduce_dim=_spmv_reduce_dim(n))
     blas_assert_close(y, to_reference(y_orig, upcast=TO_CPU) * 2.0, dtype)
 
@@ -212,8 +267,8 @@ def test_sspmv_beta_zero():
     y_nan = torch.full((n,), float("nan"), dtype=dtype, device=flag_blas.device)
     y_zero = torch.zeros(n, dtype=dtype, device=flag_blas.device)
     ref_y_nan = spmv_reference(CUBLAS_FILL_MODE_LOWER, n, 1.0, AP, x, 1, 0.0, y_nan, 1)
-    flag_blas.ops.sspmv(CUBLAS_FILL_MODE_LOWER, n, 1.0, AP, x, 1, 0.0, y_nan, 1)
-    flag_blas.ops.sspmv(CUBLAS_FILL_MODE_LOWER, n, 1.0, AP, x, 1, 0.0, y_zero, 1)
+    flag_blas.sspmv(CUBLAS_FILL_MODE_LOWER, n, 1.0, AP, x, 1, 0.0, y_nan, 1)
+    flag_blas.sspmv(CUBLAS_FILL_MODE_LOWER, n, 1.0, AP, x, 1, 0.0, y_zero, 1)
     blas_assert_close(y_nan, ref_y_nan, dtype, reduce_dim=_spmv_reduce_dim(n))
     blas_assert_close(
         y_nan,
@@ -235,7 +290,7 @@ def test_accuracy_dspmv(n, uplo, beta):
     x = torch.randn(n, dtype=dtype, device=flag_blas.device)
     y = torch.randn(n, dtype=dtype, device=flag_blas.device)
     ref_y = spmv_reference(uplo, n, alpha, AP, x, 1, beta, y, 1)
-    flag_blas.ops.dspmv(uplo, n, alpha, AP, x, 1, beta, y, 1)
+    flag_blas.dspmv(uplo, n, alpha, AP, x, 1, beta, y, 1)
 
     blas_assert_close(y, ref_y, dtype, reduce_dim=_spmv_reduce_dim(n))
 
@@ -252,7 +307,7 @@ def test_accuracy_dspmv_stride(n, uplo, incx, incy):
     x = torch.randn(1 + (n - 1) * incx, dtype=dtype, device=flag_blas.device)
     y = torch.randn(1 + (n - 1) * incy, dtype=dtype, device=flag_blas.device)
     ref_y = spmv_reference(uplo, n, alpha, AP, x, incx, beta, y, incy)
-    flag_blas.ops.dspmv(uplo, n, alpha, AP, x, incx, beta, y, incy)
+    flag_blas.dspmv(uplo, n, alpha, AP, x, incx, beta, y, incy)
 
     blas_assert_close(y, ref_y, dtype, reduce_dim=_spmv_reduce_dim(n))
 
@@ -268,7 +323,7 @@ def test_dspmv_alpha_zero():
     y_orig = y.clone()
 
     y_ref = spmv_reference(CUBLAS_FILL_MODE_UPPER, n, 0.0, AP, x, 1, 2.0, y, 1)
-    flag_blas.ops.dspmv(CUBLAS_FILL_MODE_UPPER, n, 0.0, AP, x, 1, 2.0, y, 1)
+    flag_blas.dspmv(CUBLAS_FILL_MODE_UPPER, n, 0.0, AP, x, 1, 2.0, y, 1)
     blas_assert_close(y, y_ref, dtype, reduce_dim=_spmv_reduce_dim(n))
     blas_assert_close(y, to_reference(y_orig, upcast=TO_CPU) * 2.0, dtype)
 
@@ -284,8 +339,8 @@ def test_dspmv_beta_zero():
     y_nan = torch.full((n,), float("nan"), dtype=dtype, device=flag_blas.device)
     y_zero = torch.zeros(n, dtype=dtype, device=flag_blas.device)
     ref_y_nan = spmv_reference(CUBLAS_FILL_MODE_LOWER, n, 1.0, AP, x, 1, 0.0, y_nan, 1)
-    flag_blas.ops.dspmv(CUBLAS_FILL_MODE_LOWER, n, 1.0, AP, x, 1, 0.0, y_nan, 1)
-    flag_blas.ops.dspmv(CUBLAS_FILL_MODE_LOWER, n, 1.0, AP, x, 1, 0.0, y_zero, 1)
+    flag_blas.dspmv(CUBLAS_FILL_MODE_LOWER, n, 1.0, AP, x, 1, 0.0, y_nan, 1)
+    flag_blas.dspmv(CUBLAS_FILL_MODE_LOWER, n, 1.0, AP, x, 1, 0.0, y_zero, 1)
     blas_assert_close(y_nan, ref_y_nan, dtype, reduce_dim=_spmv_reduce_dim(n))
     blas_assert_close(
         y_nan,
@@ -298,8 +353,8 @@ def test_dspmv_beta_zero():
 @pytest.mark.parametrize(
     "dtype, op, alpha, beta",
     [
-        (torch.float32, flag_blas.ops.sspmv, 1.5, 0.5),
-        (torch.float64, flag_blas.ops.dspmv, 1.5, 0.5),
+        (torch.float32, flag_blas.sspmv, 1.5, 0.5),
+        (torch.float64, flag_blas.dspmv, 1.5, 0.5),
     ],
 )
 def test_spmv_n_zero(dtype, op, alpha, beta):

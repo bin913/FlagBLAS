@@ -1,0 +1,119 @@
+from typing import Union
+
+import torch
+import triton
+import triton.language as tl
+
+from flag_blas import runtime
+from flag_blas.ops.level2.hpr2 import _check_hpr2_args, _complex_scalar
+from flag_blas.runtime import torch_device_fn
+from flag_blas.utils import libentry, libtuner
+
+from ._packed import triangular_grid, triangular_tile_ids
+
+ScalarType = Union[float, int, complex, torch.Tensor]
+
+
+@libentry()
+@libtuner(
+    configs=runtime.get_tuned_config("chpr2"),
+    key=["n", "INCX", "INCY", "UPLO"],
+    restore_value=["ap_ptr"],
+)
+@triton.jit
+def chpr2_kernel(
+    ap_ptr,
+    x_ptr,
+    y_ptr,
+    alpha_r: tl.float32,
+    alpha_i: tl.float32,
+    n,
+    INCX,
+    INCY,
+    UPLO: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    tile_id = tl.program_id(0)
+    tiles = tl.cdiv(n, BLOCK_SIZE)
+    tile_count = tiles * (tiles + 1) // 2
+    program_count = tl.num_programs(0)
+
+    while tile_id < tile_count:
+        pid_m, pid_n = triangular_tile_ids(tile_id, UPLO)
+        rows = pid_m * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        cols = pid_n * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        row_mask = rows < n
+        col_mask = cols < n
+        rows64 = rows.to(tl.int64)
+        cols64 = cols.to(tl.int64)
+        n64 = tl.full((), n, tl.int64)
+
+        if UPLO == 0:
+            tri_mask = rows[:, None] >= cols[None, :]
+            off = (
+                rows64[:, None] + cols64[None, :] * (2 * n64 - cols64[None, :] - 1) // 2
+            )
+        else:
+            tri_mask = rows[:, None] <= cols[None, :]
+            off = cols64[None, :] * (cols64[None, :] + 1) // 2 + rows64[:, None]
+
+        mask = row_mask[:, None] & col_mask[None, :] & tri_mask
+        safe_off = tl.where(mask, off, 0)
+
+        xrr = tl.load(x_ptr + rows * INCX * 2, mask=row_mask, other=0.0)
+        xri = tl.load(x_ptr + rows * INCX * 2 + 1, mask=row_mask, other=0.0)
+        yrr = tl.load(y_ptr + rows * INCY * 2, mask=row_mask, other=0.0)
+        yri = tl.load(y_ptr + rows * INCY * 2 + 1, mask=row_mask, other=0.0)
+        xcr = tl.load(x_ptr + cols * INCX * 2, mask=col_mask, other=0.0)
+        xci = tl.load(x_ptr + cols * INCX * 2 + 1, mask=col_mask, other=0.0)
+        ycr = tl.load(y_ptr + cols * INCY * 2, mask=col_mask, other=0.0)
+        yci = tl.load(y_ptr + cols * INCY * 2 + 1, mask=col_mask, other=0.0)
+
+        p1r = xrr[:, None] * ycr[None, :] + xri[:, None] * yci[None, :]
+        p1i = xri[:, None] * ycr[None, :] - xrr[:, None] * yci[None, :]
+        p2r = yrr[:, None] * xcr[None, :] + yri[:, None] * xci[None, :]
+        p2i = yri[:, None] * xcr[None, :] - yrr[:, None] * xci[None, :]
+        update_r = alpha_r * p1r - alpha_i * p1i + alpha_r * p2r + alpha_i * p2i
+        update_i = alpha_r * p1i + alpha_i * p1r + alpha_r * p2i - alpha_i * p2r
+
+        ap_off = safe_off * 2
+        ar = tl.load(ap_ptr + ap_off, mask=mask, other=0.0)
+        ai = tl.load(ap_ptr + ap_off + 1, mask=mask, other=0.0)
+        diag = rows[:, None] == cols[None, :]
+        out_i = tl.where(diag, 0.0, ai + update_i)
+        tl.store(ap_ptr + ap_off, ar + update_r, mask=mask)
+        tl.store(ap_ptr + ap_off + 1, out_i, mask=mask)
+        tile_id += program_count
+
+
+def chpr2(
+    uplo: int,
+    n: int,
+    alpha: ScalarType,
+    x: torch.Tensor,
+    incx: int,
+    y: torch.Tensor,
+    incy: int,
+    AP: torch.Tensor,
+) -> None:
+    _check_hpr2_args(torch.complex64, uplo, n, x, incx, y, incy, AP)
+    if n == 0:
+        return
+    ar, ai = _complex_scalar(alpha)
+    if ar == 0.0 and ai == 0.0:
+        return
+    with torch_device_fn.device(AP.device):
+        chpr2_kernel[triangular_grid(n)](
+            torch.view_as_real(AP),
+            torch.view_as_real(x),
+            torch.view_as_real(y),
+            ar,
+            ai,
+            n,
+            incx,
+            incy,
+            UPLO=uplo,
+        )
+
+
+__all__ = ["chpr2"]

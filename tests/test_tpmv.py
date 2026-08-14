@@ -14,14 +14,18 @@
 
 import ctypes
 import ctypes.util
-import math
 
-import cupy as cp
 import pytest
 import torch
 from scipy.linalg import blas as cpu_blas
 
 import flag_blas
+
+if flag_blas.vendor_name == "hygon":
+    from .hipblas_reference import check_hipblas_status, get_hipblas_context
+elif flag_blas.vendor_name != "ascend":
+    import cupy as cp
+
 from flag_blas.ops import (
     CUBLAS_DIAG_NON_UNIT,
     CUBLAS_DIAG_UNIT,
@@ -49,7 +53,54 @@ def load_cublas():
     raise RuntimeError("Unable to find libcublas.so on this system")
 
 
-_cublas = load_cublas()
+_cublas = None if flag_blas.vendor_name in {"ascend", "hygon"} else load_cublas()
+
+
+def hipblas_tpmv_reference(uplo, trans, diag, n, AP, x, incx):
+    if n == 0:
+        return x
+
+    if AP.dtype == torch.float32:
+        symbol = "hipblasStpmv"
+    elif AP.dtype == torch.float64:
+        symbol = "hipblasDtpmv"
+    elif AP.dtype == torch.complex64:
+        symbol = "hipblasCtpmv_v2"
+    elif AP.dtype == torch.complex128:
+        symbol = "hipblasZtpmv_v2"
+    else:
+        raise ValueError(f"Unsupported dtype for hipBLAS TPMV: {AP.dtype}")
+
+    hip_uplo = 121 if uplo == CUBLAS_FILL_MODE_UPPER else 122
+    hip_trans = 111 + trans
+    hip_diag = 131 + diag
+    library, handle = get_hipblas_context(AP)
+    function = getattr(library, symbol)
+    function.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_int,
+    ]
+    function.restype = ctypes.c_int
+    check_hipblas_status(
+        function(
+            handle,
+            hip_uplo,
+            hip_trans,
+            hip_diag,
+            n,
+            ctypes.c_void_p(AP.data_ptr()),
+            ctypes.c_void_p(x.data_ptr()),
+            incx,
+        ),
+        symbol,
+    )
+    return x
 
 
 def cublas_tpmv_reference(uplo, trans, diag, n, AP, x, incx):
@@ -107,7 +158,10 @@ def tpmv_reference(uplo, trans, diag, n, AP, x, incx):
         return cpu_tpmv_reference(uplo, trans, diag, n, AP, x, incx)
 
     ref_x = x.clone()
-    cublas_tpmv_reference(uplo, trans, diag, n, AP, ref_x, incx)
+    if flag_blas.vendor_name == "hygon":
+        hipblas_tpmv_reference(uplo, trans, diag, n, AP, ref_x, incx)
+    else:
+        cublas_tpmv_reference(uplo, trans, diag, n, AP, ref_x, incx)
     return ref_x
 
 
@@ -145,23 +199,26 @@ REAL_TRANS = [CUBLAS_OP_N, CUBLAS_OP_T]
 COMPLEX_TRANS = [CUBLAS_OP_N, CUBLAS_OP_T, CUBLAS_OP_C]
 
 
+def tpmv_randn(*shape, dtype, device):
+    if flag_blas.vendor_name == "ascend" and dtype == torch.complex64:
+        normalized = (
+            tuple(shape[0])
+            if len(shape) == 1 and isinstance(shape[0], (tuple, torch.Size))
+            else shape
+        )
+        values = torch.randn((*normalized, 2), dtype=torch.float32, device=device)
+        return torch.view_as_complex(values)
+    return torch.randn(*shape, dtype=dtype, device=device)
+
+
 def make_packed(n, uplo, dtype, device):
     size = n * (n + 1) // 2
-    return torch.randn(size, dtype=dtype, device=device).contiguous()
+    return tpmv_randn(size, dtype=dtype, device=device).contiguous()
 
 
 def check_fp64_support():
     if not getattr(flag_blas.runtime.device, "support_fp64", True):
         pytest.skip("No FP64 support on this device")
-
-
-def _tpmv_tol(dtype, n):
-    K = max(1, n)
-    if dtype in (torch.float32, torch.complex64):
-        return min(max(1e-4, 5e-6 * math.sqrt(K)), 5e-3)
-    if dtype in (torch.float64, torch.complex128):
-        return min(max(1e-12, 2e-14 * math.sqrt(K)), 1e-10)
-    raise ValueError(f"Unsupported dtype {dtype}")
 
 
 @pytest.mark.stpmv
@@ -172,11 +229,11 @@ def _tpmv_tol(dtype, n):
 def test_accuracy_stpmv(n, uplo, trans, diag):
     dtype = torch.float32
     AP = make_packed(n, uplo, dtype, flag_blas.device)
-    x = torch.randn(max(n, 1), dtype=dtype, device=flag_blas.device)
+    x = tpmv_randn(max(n, 1), dtype=dtype, device=flag_blas.device)
     ref_x = tpmv_reference(uplo, trans, diag, n, AP, x, 1)
-    flag_blas.ops.stpmv(uplo, trans, diag, n, AP, x, 1)
+    flag_blas.stpmv(uplo, trans, diag, n, AP, x, 1)
 
-    blas_assert_close(x, ref_x, dtype, reduce_dim=n, atol=_tpmv_tol(dtype, n))
+    blas_assert_close(x, ref_x, dtype, reduce_dim=n)
 
 
 @pytest.mark.stpmv
@@ -188,11 +245,11 @@ def test_accuracy_stpmv(n, uplo, trans, diag):
 def test_accuracy_stpmv_stride(n, uplo, trans, diag, incx):
     dtype = torch.float32
     AP = make_packed(n, uplo, dtype, flag_blas.device)
-    x = torch.randn(1 + (n - 1) * incx, dtype=dtype, device=flag_blas.device)
+    x = tpmv_randn(1 + (n - 1) * incx, dtype=dtype, device=flag_blas.device)
     ref_x = tpmv_reference(uplo, trans, diag, n, AP, x, incx)
-    flag_blas.ops.stpmv(uplo, trans, diag, n, AP, x, incx)
+    flag_blas.stpmv(uplo, trans, diag, n, AP, x, incx)
 
-    blas_assert_close(x, ref_x, dtype, reduce_dim=n, atol=_tpmv_tol(dtype, n))
+    blas_assert_close(x, ref_x, dtype, reduce_dim=n)
 
 
 @pytest.mark.dtpmv
@@ -204,11 +261,11 @@ def test_accuracy_dtpmv(n, uplo, trans, diag):
     check_fp64_support()
     dtype = torch.float64
     AP = make_packed(n, uplo, dtype, flag_blas.device)
-    x = torch.randn(max(n, 1), dtype=dtype, device=flag_blas.device)
+    x = tpmv_randn(max(n, 1), dtype=dtype, device=flag_blas.device)
     ref_x = tpmv_reference(uplo, trans, diag, n, AP, x, 1)
-    flag_blas.ops.dtpmv(uplo, trans, diag, n, AP, x, 1)
+    flag_blas.dtpmv(uplo, trans, diag, n, AP, x, 1)
 
-    blas_assert_close(x, ref_x, dtype, reduce_dim=n, atol=_tpmv_tol(dtype, n))
+    blas_assert_close(x, ref_x, dtype, reduce_dim=n)
 
 
 @pytest.mark.dtpmv
@@ -221,11 +278,11 @@ def test_accuracy_dtpmv_stride(n, uplo, trans, diag, incx):
     check_fp64_support()
     dtype = torch.float64
     AP = make_packed(n, uplo, dtype, flag_blas.device)
-    x = torch.randn(1 + (n - 1) * incx, dtype=dtype, device=flag_blas.device)
+    x = tpmv_randn(1 + (n - 1) * incx, dtype=dtype, device=flag_blas.device)
     ref_x = tpmv_reference(uplo, trans, diag, n, AP, x, incx)
-    flag_blas.ops.dtpmv(uplo, trans, diag, n, AP, x, incx)
+    flag_blas.dtpmv(uplo, trans, diag, n, AP, x, incx)
 
-    blas_assert_close(x, ref_x, dtype, reduce_dim=n, atol=_tpmv_tol(dtype, n))
+    blas_assert_close(x, ref_x, dtype, reduce_dim=n)
 
 
 @pytest.mark.ctpmv
@@ -236,11 +293,11 @@ def test_accuracy_dtpmv_stride(n, uplo, trans, diag, incx):
 def test_accuracy_ctpmv(n, uplo, trans, diag):
     dtype = torch.complex64
     AP = make_packed(n, uplo, dtype, flag_blas.device)
-    x = torch.randn(max(n, 1), dtype=dtype, device=flag_blas.device)
+    x = tpmv_randn(max(n, 1), dtype=dtype, device=flag_blas.device)
     ref_x = tpmv_reference(uplo, trans, diag, n, AP, x, 1)
-    flag_blas.ops.ctpmv(uplo, trans, diag, n, AP, x, 1)
+    flag_blas.ctpmv(uplo, trans, diag, n, AP, x, 1)
 
-    blas_assert_close(x, ref_x, dtype, reduce_dim=n, atol=_tpmv_tol(dtype, n))
+    blas_assert_close(x, ref_x, dtype, reduce_dim=n)
 
 
 @pytest.mark.ctpmv
@@ -252,11 +309,11 @@ def test_accuracy_ctpmv(n, uplo, trans, diag):
 def test_accuracy_ctpmv_stride(n, uplo, trans, diag, incx):
     dtype = torch.complex64
     AP = make_packed(n, uplo, dtype, flag_blas.device)
-    x = torch.randn(1 + (n - 1) * incx, dtype=dtype, device=flag_blas.device)
+    x = tpmv_randn(1 + (n - 1) * incx, dtype=dtype, device=flag_blas.device)
     ref_x = tpmv_reference(uplo, trans, diag, n, AP, x, incx)
-    flag_blas.ops.ctpmv(uplo, trans, diag, n, AP, x, incx)
+    flag_blas.ctpmv(uplo, trans, diag, n, AP, x, incx)
 
-    blas_assert_close(x, ref_x, dtype, reduce_dim=n, atol=_tpmv_tol(dtype, n))
+    blas_assert_close(x, ref_x, dtype, reduce_dim=n)
 
 
 @pytest.mark.ztpmv
@@ -268,11 +325,11 @@ def test_accuracy_ztpmv(n, uplo, trans, diag):
     check_fp64_support()
     dtype = torch.complex128
     AP = make_packed(n, uplo, dtype, flag_blas.device)
-    x = torch.randn(max(n, 1), dtype=dtype, device=flag_blas.device)
+    x = tpmv_randn(max(n, 1), dtype=dtype, device=flag_blas.device)
     ref_x = tpmv_reference(uplo, trans, diag, n, AP, x, 1)
-    flag_blas.ops.ztpmv(uplo, trans, diag, n, AP, x, 1)
+    flag_blas.ztpmv(uplo, trans, diag, n, AP, x, 1)
 
-    blas_assert_close(x, ref_x, dtype, reduce_dim=n, atol=_tpmv_tol(dtype, n))
+    blas_assert_close(x, ref_x, dtype, reduce_dim=n)
 
 
 @pytest.mark.ztpmv
@@ -285,8 +342,8 @@ def test_accuracy_ztpmv_stride(n, uplo, trans, diag, incx):
     check_fp64_support()
     dtype = torch.complex128
     AP = make_packed(n, uplo, dtype, flag_blas.device)
-    x = torch.randn(1 + (n - 1) * incx, dtype=dtype, device=flag_blas.device)
+    x = tpmv_randn(1 + (n - 1) * incx, dtype=dtype, device=flag_blas.device)
     ref_x = tpmv_reference(uplo, trans, diag, n, AP, x, incx)
-    flag_blas.ops.ztpmv(uplo, trans, diag, n, AP, x, incx)
+    flag_blas.ztpmv(uplo, trans, diag, n, AP, x, incx)
 
-    blas_assert_close(x, ref_x, dtype, reduce_dim=n, atol=_tpmv_tol(dtype, n))
+    blas_assert_close(x, ref_x, dtype, reduce_dim=n)
