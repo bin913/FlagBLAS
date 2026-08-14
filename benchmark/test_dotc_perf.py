@@ -85,7 +85,9 @@ class DotcBenchmark(Benchmark):
             tolerance_desc = "rtol=1e-12,atol=max(1e-12,sqrt(n)*1e-12)"
 
         try:
-            torch.testing.assert_close(blas_result, reference_result, rtol=rtol, atol=atol)
+            torch.testing.assert_close(
+                blas_result, reference_result, rtol=rtol, atol=atol
+            )
         except AssertionError as e:
             ref_cpu = reference_result.cpu()
             res_cpu = blas_result.cpu()
