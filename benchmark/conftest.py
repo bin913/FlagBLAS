@@ -44,7 +44,7 @@ recordLogger.propagate = False
 def emit_record_logger(message: str) -> None:
     if recordLogger.handlers:
         handler = recordLogger.handlers[0]
-        if getattr(handler, "stream", None) is None:
+        if isinstance(handler, logging.FileHandler) and handler.stream is None:
             handler.acquire()
             try:
                 if hasattr(handler, "_open"):
