@@ -515,6 +515,20 @@ GerBenchmark:
     - [4095, 1023]
   shape_desc: "M, N"
 
+# TRMM operations base shapes (M, N)
+# These shapes are used for strmm, dtrmm, ctrmm and ztrmm benchmarks
+TrmmBenchmark:
+  shapes:
+    - [64, 64]
+    - [256, 256]
+    - [512, 256]
+    - [1024, 1024]
+    - [2048, 1024]
+    - [4096, 2048]
+    - [127, 255]
+    - [1023, 4095]
+  shape_desc: "M, N"
+
 # BLAS Level 2 vector and rank-one operation core shapes
 level2_dense_shapes: &level2_dense_shapes
   shapes:
