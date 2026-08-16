@@ -118,6 +118,17 @@ RotBenchmark:
 ScalBenchmark:
   <<: *l1_vector_shapes
 
+AminBenchmark:
+  <<: *l1_vector_shapes
+DotBenchmark:
+  <<: *l1_vector_shapes
+DotcBenchmark:
+  <<: *l1_vector_shapes
+DotuBenchmark:
+  <<: *l1_vector_shapes
+SwapBenchmark:
+  <<: *l1_vector_shapes
+
 AmaxStrideBenchmark:
   <<: *l1_amax_stride_shapes
 AsumStrideBenchmark:
@@ -328,6 +339,39 @@ GemvBenchmark:
     - [65536, 64]
   shape_desc: "M, N"
 
+# FP8 GEMV operations base shapes (M, N)
+# These shapes are used for the fp8 gemv benchmark
+Fp8GemvBenchmark:
+  shapes:
+    - [64, 64]
+    - [128, 128]
+    - [256, 256]
+    - [512, 512]
+    - [1024, 1024]
+    - [3584, 3584]
+    - [4096, 4096]
+    - [7168, 7168]
+    - [8192, 8192]
+    - [16384, 16384]
+    - [18432, 18432]
+    - [1024, 4096]
+    - [3584, 18944]
+    - [4096, 14336]
+    - [6144, 16384]
+    - [7168, 18432]
+    - [8192, 28672]
+    - [16384, 53248]
+    - [4096, 1024]
+    - [18944, 3584]
+    - [14336, 4096]
+    - [16384, 6144]
+    - [18432, 7168]
+    - [28672, 8192]
+    - [53248, 16384]
+    - [64, 65536]
+    - [65536, 64]
+  shape_desc: "M, N"
+
 # GBMV operations base shapes (M, N)
 # These shapes are used for sgbmv, dgbmv, cgbmv and zgbmv benchmarks
 GbmvBenchmark:
@@ -389,6 +433,51 @@ HemvBenchmark:
     - [4096]
     - [4097]
     - [6144]
+    - [12288]
+    - [16384]
+  shape_desc: "N"
+
+# SPMV operations base shapes (N)
+# These shapes are used for sspmv and dspmv benchmarks
+SpmvBenchmark:
+  shapes:
+    - [256]
+    - [512]
+    - [1024]
+    - [2048]
+    - [4096]
+    - [6144]
+    - [8192]
+    - [12288]
+    - [16384]
+  shape_desc: "N"
+
+# SBMV operations base shapes (N)
+# These shapes are used for ssbmv and dsbmv benchmarks
+SbmvBenchmark:
+  shapes:
+    - [256]
+    - [512]
+    - [1024]
+    - [2048]
+    - [4096]
+    - [6144]
+    - [8192]
+    - [12288]
+    - [16384]
+  shape_desc: "N"
+
+# HBMV operations base shapes (N)
+# These shapes are used for chbmv and zhbmv benchmarks
+HbmvBenchmark:
+  shapes:
+    - [256]
+    - [512]
+    - [1024]
+    - [2048]
+    - [4096]
+    - [6144]
+    - [8192]
     - [12288]
     - [16384]
   shape_desc: "N"
