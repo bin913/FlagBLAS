@@ -1,17 +1,3 @@
-# Copyright 2026 FlagOS Contributors
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 import ctypes
 import ctypes.util
 from typing import Generator
@@ -20,32 +6,26 @@ import pytest
 import torch
 
 import flag_blas
+from benchmark.performance_utils import Benchmark, run_correctness_then_benchmark
+from flag_blas.ops import CUBLAS_FILL_MODE_LOWER, CUBLAS_FILL_MODE_UPPER
+from flag_blas.utils import shape_utils
 
-if flag_blas.vendor_name == "hygon":
+IS_HYGON = flag_blas.vendor_name == "hygon"
+
+if IS_HYGON:
     import atexit
 else:
     import cupy as cp
     from cupy_backends.cuda.libs import cublas
 
-from benchmark.performance_utils import Benchmark, run_correctness_then_benchmark
-from flag_blas.ops import CUBLAS_FILL_MODE_LOWER, CUBLAS_FILL_MODE_UPPER
-from flag_blas.utils import shape_utils
-
-HEMV_SIZES = [
-    128,
-    192,
+HPMV_SIZES = [
     256,
-    384,
     512,
-    768,
-    1023,
     1024,
-    1536,
     2048,
-    3072,
     4096,
-    4097,
     6144,
+    8192,
     12288,
     16384,
 ]
@@ -64,7 +44,7 @@ def load_cublas():
     raise RuntimeError("Unable to find libcublas.so on this system")
 
 
-_cublas = None if flag_blas.vendor_name == "hygon" else load_cublas()
+_cublas = None if IS_HYGON else load_cublas()
 
 
 class cuComplex(ctypes.Structure):
@@ -75,22 +55,22 @@ class cuDoubleComplex(ctypes.Structure):
     _fields_ = [("x", ctypes.c_double), ("y", ctypes.c_double)]
 
 
-_CUBLAS_HEMV_FUNCS = (
+_CUBLAS_HPMV_FUNCS = (
     {}
-    if flag_blas.vendor_name == "hygon"
+    if IS_HYGON
     else {
-        torch.complex64: (_cublas.cublasChemv_v2, cuComplex),
-        torch.complex128: (_cublas.cublasZhemv_v2, cuDoubleComplex),
+        torch.complex64: (_cublas.cublasChpmv_v2, cuComplex),
+        torch.complex128: (_cublas.cublasZhpmv_v2, cuDoubleComplex),
     }
 )
 
 
-if flag_blas.vendor_name == "hygon":
+if IS_HYGON:
     _HIPBLAS_LIBRARY = None
     _HIPBLAS_HANDLES = {}
-    _HIPBLAS_HEMV_FUNCS = {
-        torch.complex64: ("hipblasChemv_v2", cuComplex),
-        torch.complex128: ("hipblasZhemv_v2", cuDoubleComplex),
+    _HIPBLAS_HPMV_FUNCS = {
+        torch.complex64: ("hipblasChpmv_v2", cuComplex),
+        torch.complex128: ("hipblasZhpmv_v2", cuDoubleComplex),
     }
 
     def _check_hipblas_status(status, operation):
@@ -150,12 +130,12 @@ if flag_blas.vendor_name == "hygon":
                 pass
         _HIPBLAS_HANDLES.clear()
 
-    def _resolve_hipblas_hemv(library, dtype):
+    def _resolve_hipblas_hpmv(library, dtype):
         try:
-            symbol, scalar_type = _HIPBLAS_HEMV_FUNCS[dtype]
+            symbol, scalar_type = _HIPBLAS_HPMV_FUNCS[dtype]
         except KeyError as error:
             raise ValueError(
-                f"Unsupported Hygon HEMV benchmark dtype: {dtype}"
+                f"Unsupported Hygon HPMV benchmark dtype: {dtype}"
             ) from error
         function = getattr(library, symbol)
         function.argtypes = [
@@ -164,7 +144,6 @@ if flag_blas.vendor_name == "hygon":
             ctypes.c_int,
             ctypes.c_void_p,
             ctypes.c_void_p,
-            ctypes.c_int,
             ctypes.c_void_p,
             ctypes.c_int,
             ctypes.c_void_p,
@@ -181,84 +160,100 @@ def _make_scalar(ctor, value):
     return ctor(value.real, value.imag)
 
 
-def cublas_hemv_baseline(
-    A,
-    x,
-    y,
-    uplo,
-    n,
-    alpha,
-    lda,
-    incx,
-    beta,
-    incy,
-    handle,
-    c_func,
-    alpha_c,
-    beta_c,
-    hip_uplo=None,
-    **kwargs,
-):
-    if n == 0:
-        return y
+if IS_HYGON:
 
-    if flag_blas.vendor_name == "hygon":
+    def cublas_hpmv_baseline(
+        AP,
+        x,
+        y,
+        uplo,
+        n,
+        alpha,
+        incx,
+        beta,
+        incy,
+        handle,
+        c_func,
+        alpha_ptr,
+        beta_ptr,
+        AP_ptr,
+        x_ptr,
+        y_ptr,
+        hip_uplo_arg,
+        n_arg,
+        incx_arg,
+        incy_arg,
+        **kwargs,
+    ):
         status = c_func(
             handle,
-            hip_uplo,
-            n,
-            ctypes.byref(alpha_c),
-            ctypes.c_void_p(A.data_ptr()),
-            lda,
-            ctypes.c_void_p(x.data_ptr()),
-            incx,
-            ctypes.byref(beta_c),
-            ctypes.c_void_p(y.data_ptr()),
-            incy,
+            hip_uplo_arg,
+            n_arg,
+            alpha_ptr,
+            AP_ptr,
+            x_ptr,
+            incx_arg,
+            beta_ptr,
+            y_ptr,
+            incy_arg,
         )
-        _check_hipblas_status(status, "hipBLAS HEMV")
+        _check_hipblas_status(status, "hipBLAS HPMV")
         return y
 
-    status = c_func(
-        ctypes.c_void_p(handle),
-        ctypes.c_int(uplo),
-        ctypes.c_int(n),
-        ctypes.byref(alpha_c),
-        ctypes.c_void_p(A.data_ptr()),
-        ctypes.c_int(lda),
-        ctypes.c_void_p(x.data_ptr()),
-        ctypes.c_int(incx),
-        ctypes.byref(beta_c),
-        ctypes.c_void_p(y.data_ptr()),
-        ctypes.c_int(incy),
-    )
-    if status != 0:
-        raise RuntimeError(f"cublasXhemv_v2 execution failed with error code: {status}")
-    return y
+else:
+
+    def cublas_hpmv_baseline(
+        AP,
+        x,
+        y,
+        uplo,
+        n,
+        alpha,
+        incx,
+        beta,
+        incy,
+        handle,
+        c_func,
+        alpha_c,
+        beta_c,
+        **kwargs,
+    ):
+        if n == 0:
+            return y
+        status = c_func(
+            ctypes.c_void_p(handle),
+            ctypes.c_int(uplo),
+            ctypes.c_int(n),
+            ctypes.byref(alpha_c),
+            ctypes.c_void_p(AP.data_ptr()),
+            ctypes.c_void_p(x.data_ptr()),
+            ctypes.c_int(incx),
+            ctypes.byref(beta_c),
+            ctypes.c_void_p(y.data_ptr()),
+            ctypes.c_int(incy),
+        )
+        if status != 0:
+            raise RuntimeError(f"cublasXhpmv_v2 failed with status code: {status}")
+        return y
 
 
 def _gems_wrapper(op):
-    def _impl(A, x, y, uplo, n, alpha, lda, incx, beta, incy, handle, **kwargs):
-        op(uplo, n, alpha, A, lda, x, incx, beta, y, incy)
+    def _impl(AP, x, y, uplo, n, alpha, incx, beta, incy, handle, **kwargs):
+        op(uplo, n, alpha, AP, x, incx, beta, y, incy)
         return y
 
     return _impl
 
 
-gems_chemv_wrapper = _gems_wrapper(flag_blas.chemv)
-gems_zhemv_wrapper = _gems_wrapper(flag_blas.zhemv)
+gems_chpmv_wrapper = _gems_wrapper(flag_blas.chpmv)
+gems_zhpmv_wrapper = _gems_wrapper(flag_blas.zhpmv)
 
 
-def _generate_her_A(n, lda, dtype, device):
-    A = torch.zeros((n, lda), dtype=dtype, device=device)
-    data = torch.randn(n, n, dtype=dtype, device=device)
-    diag_real = data.diagonal().real.clone()
-    data.diagonal().copy_(diag_real.to(dtype))
-    A[:, :n] = data
-    return A.contiguous()
+def _generate_packed_her(n, dtype, device):
+    return torch.randn(n * (n + 1) // 2, dtype=dtype, device=device)
 
 
-class HemvBenchmark(Benchmark):
+class HpmvBenchmark(Benchmark):
     def __init__(
         self,
         *args,
@@ -271,86 +266,103 @@ class HemvBenchmark(Benchmark):
         self.uplo = uplo
         self.alpha = alpha
         self.beta = beta
-        self.correctness_reference = (
-            "hipBLAS" if flag_blas.vendor_name == "hygon" else "cuBLAS"
-        )
+        self.correctness_reference = "hipBLAS" if IS_HYGON else "cuBLAS"
 
     def set_more_metrics(self):
         return ["tflops", "gbps"]
 
     def set_more_shapes(self):
-        self.shapes = [(n,) for n in HEMV_SIZES]
+        self.shapes = [(n,) for n in HPMV_SIZES]
         return None
 
     def get_input_iter(self, cur_dtype) -> Generator:
-        if flag_blas.vendor_name == "hygon":
+        if IS_HYGON:
             library, handle = _prepare_hipblas(self.device)
-            c_func, ctor = _resolve_hipblas_hemv(library, cur_dtype)
-            alpha_c = _make_scalar(ctor, self.alpha)
-            beta_c = _make_scalar(ctor, self.beta)
-            hip_uplo = 121 if self.uplo == CUBLAS_FILL_MODE_UPPER else 122
+            c_func, ctor = _resolve_hipblas_hpmv(library, cur_dtype)
+            hip_uplo_arg = ctypes.c_int(
+                121 if self.uplo == CUBLAS_FILL_MODE_UPPER else 122
+            )
         else:
             handle = cp.cuda.device.get_cublas_handle()
             cublas.setPointerMode(handle, cublas.CUBLAS_POINTER_MODE_HOST)
-            if cur_dtype not in _CUBLAS_HEMV_FUNCS:
+            if cur_dtype not in _CUBLAS_HPMV_FUNCS:
                 raise ValueError(f"Unsupported dtype: {cur_dtype}")
-            c_func, ctor = _CUBLAS_HEMV_FUNCS[cur_dtype]
-            alpha_c = _make_scalar(ctor, self.alpha)
-            beta_c = _make_scalar(ctor, self.beta)
+            c_func, ctor = _CUBLAS_HPMV_FUNCS[cur_dtype]
+        alpha_c = _make_scalar(ctor, self.alpha)
+        beta_c = _make_scalar(ctor, self.beta)
+        alpha_ptr = ctypes.byref(alpha_c)
+        beta_ptr = ctypes.byref(beta_c)
 
         for shape in self.shapes:
             n = shape[0] if isinstance(shape, (tuple, list)) else shape
-            lda = n
-            A = _generate_her_A(n, lda, cur_dtype, self.device)
+            AP = _generate_packed_her(n, cur_dtype, self.device)
             x = torch.randn(n, dtype=cur_dtype, device=self.device)
             y = torch.randn(n, dtype=cur_dtype, device=self.device)
 
-            kwargs = {
+            call_kwargs = {
                 "uplo": self.uplo,
                 "n": n,
                 "alpha": self.alpha,
-                "lda": lda,
                 "incx": 1,
                 "beta": self.beta,
                 "incy": 1,
                 "handle": handle,
                 "c_func": c_func,
-                "alpha_c": alpha_c,
-                "beta_c": beta_c,
             }
-            if flag_blas.vendor_name == "hygon":
-                kwargs["hip_uplo"] = hip_uplo
-            yield A, x, y.clone(), kwargs
+            if IS_HYGON:
+                call_kwargs.update(
+                    AP_ptr=ctypes.c_void_p(AP.data_ptr()),
+                    x_ptr=ctypes.c_void_p(x.data_ptr()),
+                    y_ptr=ctypes.c_void_p(y.data_ptr()),
+                    alpha_ptr=alpha_ptr,
+                    beta_ptr=beta_ptr,
+                    hip_uplo_arg=hip_uplo_arg,
+                    n_arg=ctypes.c_int(n),
+                    incx_arg=ctypes.c_int(1),
+                    incy_arg=ctypes.c_int(1),
+                )
+            else:
+                call_kwargs.update(alpha_c=alpha_c, beta_c=beta_c)
+            yield AP, x, y, call_kwargs
 
     def get_tflops(self, op, *args, **kwargs):
         n = kwargs.get("n", 0)
         return 8 * n * n
 
     def get_gbps(self, args, latency):
-        A, x, y = args[0], args[1], args[2]
-        n = y.numel()
-        a_bytes = n * (n + 1) // 2 * A.element_size()
+        AP, x, y = args[0], args[1], args[2]
+        a_bytes = AP.numel() * AP.element_size()
         io_amount = (
             a_bytes + shape_utils.size_in_bytes(x) + 2 * shape_utils.size_in_bytes(y)
         )
         return io_amount * 1e-9 / (latency * 1e-3)
 
     def get_correctness_reduce_dim(self, args, kwargs):
-        return kwargs["n"]
+        return max(1, kwargs.get("n", 0))
 
     def clone_correctness_inputs(self, args, kwargs):
-        A, x, y = args
-        ref_args = (A, x, y.clone())
-        blas_args = (A, x, y.clone())
-        return ref_args, kwargs, blas_args, kwargs
+        AP, x, y = args
+        ref_y = y.clone()
+        ref_args = (AP, x, ref_y)
+        blas_args = (AP, x, y.clone())
+        if IS_HYGON:
+            ref_kwargs = kwargs.copy()
+            ref_kwargs.update(
+                AP_ptr=ctypes.c_void_p(AP.data_ptr()),
+                x_ptr=ctypes.c_void_p(x.data_ptr()),
+                y_ptr=ctypes.c_void_p(ref_y.data_ptr()),
+            )
+        else:
+            ref_kwargs = kwargs
+        return ref_args, ref_kwargs, blas_args, kwargs
 
 
-@pytest.mark.chemv
-def test_perf_chemv():
-    bench = HemvBenchmark(
-        op_name="chemv",
-        torch_op=cublas_hemv_baseline,
-        gems_op=gems_chemv_wrapper,
+@pytest.mark.chpmv
+def test_perf_chpmv():
+    bench = HpmvBenchmark(
+        op_name="chpmv",
+        torch_op=cublas_hpmv_baseline,
+        gems_op=gems_chpmv_wrapper,
         dtypes=[torch.complex64],
         uplo=CUBLAS_FILL_MODE_LOWER,
         alpha=1.5 + 0.5j,
@@ -359,12 +371,12 @@ def test_perf_chemv():
     run_correctness_then_benchmark(bench)
 
 
-@pytest.mark.chemv
-def test_perf_chemv_upper():
-    bench = HemvBenchmark(
-        op_name="chemv_upper",
-        torch_op=cublas_hemv_baseline,
-        gems_op=gems_chemv_wrapper,
+@pytest.mark.chpmv
+def test_perf_chpmv_upper():
+    bench = HpmvBenchmark(
+        op_name="chpmv_upper",
+        torch_op=cublas_hpmv_baseline,
+        gems_op=gems_chpmv_wrapper,
         dtypes=[torch.complex64],
         uplo=CUBLAS_FILL_MODE_UPPER,
         alpha=1.5 + 0.5j,
@@ -373,14 +385,14 @@ def test_perf_chemv_upper():
     run_correctness_then_benchmark(bench)
 
 
-@pytest.mark.zhemv
-def test_perf_zhemv():
+@pytest.mark.zhpmv
+def test_perf_zhpmv():
     if not flag_blas.runtime.device.support_fp64:
         pytest.skip("Device does not support float64")
-    bench = HemvBenchmark(
-        op_name="zhemv",
-        torch_op=cublas_hemv_baseline,
-        gems_op=gems_zhemv_wrapper,
+    bench = HpmvBenchmark(
+        op_name="zhpmv",
+        torch_op=cublas_hpmv_baseline,
+        gems_op=gems_zhpmv_wrapper,
         dtypes=[torch.complex128],
         uplo=CUBLAS_FILL_MODE_LOWER,
         alpha=1.5 + 0.5j,
@@ -389,14 +401,14 @@ def test_perf_zhemv():
     run_correctness_then_benchmark(bench)
 
 
-@pytest.mark.zhemv
-def test_perf_zhemv_upper():
+@pytest.mark.zhpmv
+def test_perf_zhpmv_upper():
     if not flag_blas.runtime.device.support_fp64:
         pytest.skip("Device does not support float64")
-    bench = HemvBenchmark(
-        op_name="zhemv_upper",
-        torch_op=cublas_hemv_baseline,
-        gems_op=gems_zhemv_wrapper,
+    bench = HpmvBenchmark(
+        op_name="zhpmv_upper",
+        torch_op=cublas_hpmv_baseline,
+        gems_op=gems_zhpmv_wrapper,
         dtypes=[torch.complex128],
         uplo=CUBLAS_FILL_MODE_UPPER,
         alpha=1.5 + 0.5j,
