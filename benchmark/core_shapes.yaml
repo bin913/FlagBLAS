@@ -516,6 +516,19 @@ StbsvBenchmark:
     - [16384]
   shape_desc: "N"
 
+# TRSV operations base shapes (N)
+# These shapes are used for strsv, dtrsv, ctrsv and ztrsv benchmarks
+TrsvBenchmark:
+  shapes:
+    - [64]
+    - [256]
+    - [512]
+    - [1024]
+    - [2048]
+    - [4096]
+    - [8192]
+  shape_desc: "N"
+
 # the default shapes info
 Benchmark:
   shapes:
