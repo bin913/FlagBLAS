@@ -104,48 +104,52 @@ jobs:
           set +e
           source .venv/bin/activate
           source tools/set-env.sh hygon
-          echo "=== hygon torch diagnose ==="
-          echo "DTK_ENV=${DTK_ENV:-<unset>}"
-          echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-<unset>}"
-          echo "--- hy-smi ---"
-          command -v hy-smi >/dev/null 2>&1 && hy-smi 2>&1 | head -25 || echo "hy-smi not found"
           python - <<'EOF'
-          import sys, os
+          import sys, os, io, subprocess
 
           def note(kind, title, text):
               text = text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
               print(f"::{kind} title={title}::{text}")
 
-          print("python:", sys.version)
+          buf = io.StringIO()
+          def log(*a):
+              line = " ".join(str(x) for x in a)
+              print(line)
+              buf.write(line + "\n")
+
+          log("=== hygon torch diagnose ===")
+          log("python:", sys.version.split()[0])
           try:
               import torch
-              print("torch:", torch.__version__)
-              print("hip:", getattr(torch.version, "hip", None))
-              print("cuda:", torch.version.cuda)
-              print("cuda available (before init):", torch.cuda.is_available())
+              log("torch:", torch.__version__)
+              log("hip:", getattr(torch.version, "hip", None))
+              log("cuda:", torch.version.cuda)
               try:
                   torch.cuda.init()
-                  print("cuda available (after init):", torch.cuda.is_available())
-                  print("device count:", torch.cuda.device_count())
-                  if torch.cuda.is_available():
-                      print("device name:", torch.cuda.get_device_name(0))
+                  log("cuda after init:", torch.cuda.is_available(),
+                      "count:", torch.cuda.device_count())
               except Exception:
                   import traceback
-                  tb = traceback.format_exc()
-                  print(tb)
-                  note("error", "torch.cuda.init failed", tb)
+                  log(traceback.format_exc())
           except Exception:
               import traceback
-              tb = traceback.format_exc()
-              print(tb)
-              note("error", "hygon torch import failed", tb)
+              log(traceback.format_exc())
 
-          print("--- driver / env ---")
-          print("/dev/kfd exists:", os.path.exists("/dev/kfd"))
-          print("dri:", os.listdir("/dev/dri") if os.path.isdir("/dev/dri") else "no /dev/dri")
-          for k in ("DTK_ENV", "HIP_PATH", "ROCM_PATH", "HIP_VISIBLE_DEVICES", "PYTORCH_HIP_ALLOC_CONF"):
-              print(f"{k}={os.environ.get(k)!r}")
-          print("LD_LIBRARY_PATH=" + os.environ.get("LD_LIBRARY_PATH", ""))
+          log("--- driver / env ---")
+          log("/dev/kfd exists:", os.path.exists("/dev/kfd"))
+          log("dri:", os.listdir("/dev/dri") if os.path.isdir("/dev/dri") else "no /dev/dri")
+          try:
+              out = subprocess.run(["hy-smi"], capture_output=True, text=True, timeout=30)
+              log("hy-smi rc:", out.returncode)
+              log((out.stdout or "")[:2000])
+              if out.stderr:
+                  log("hy-smi stderr:", out.stderr[:2000])
+          except Exception as e:
+              log("hy-smi error:", e)
+          for k in ("DTK_ENV", "HIP_PATH", "ROCM_PATH", "LD_LIBRARY_PATH"):
+              log(k, "=", os.environ.get(k, "<unset>"))
+
+          note("error", "hygon diagnose summary", buf.getvalue())
           EOF
           exit 0
 
