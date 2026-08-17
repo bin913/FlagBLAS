@@ -97,12 +97,19 @@ case $VENDOR in
     # Install FlagBLAS without touching the DTK-patched torch. pyproject.toml
     # declares `torch>=2.6.0`; without --no-deps the dependency resolver
     # replaces the DTK build with the newest CUDA torch from the extra index.
-    uv pip install -e . --no-deps --no-build-isolation --index-url ${UV_EXTRA_INDEX_URL}
+    if ! uv pip install -e . --no-deps --no-build-isolation \
+         --index-url ${UV_EXTRA_INDEX_URL} 2>&1 | tee /tmp/flagblas-install.log; then
+      echo "::error title=hygon flagblas install failed::$(tail -8 /tmp/flagblas-install.log | tr '\n' ' ' | head -c 1500)"
+      exit 1
+    fi
 
     # Test deps. `cupy-cuda12x` is excluded: it is NVIDIA-only and would pull
     # a CUDA runtime that conflicts with the DTK stack.
-    uv pip install pytest numpy scipy distro gitpython pyyaml coverage pytest-md-report \
-        --index-url ${UV_EXTRA_INDEX_URL}
+    if ! uv pip install pytest numpy scipy distro gitpython pyyaml coverage pytest-md-report \
+         --index-url ${UV_EXTRA_INDEX_URL} 2>&1 | tee /tmp/hygon-testdeps.log; then
+      echo "::error title=hygon test deps install failed::$(tail -8 /tmp/hygon-testdeps.log | tr '\n' ' ' | head -c 1500)"
+      exit 1
+    fi
 
     # Sanity check: make sure the DTK-patched torch survived the installs above.
     python - <<'PYEOF' || {
