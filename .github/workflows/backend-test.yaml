@@ -166,7 +166,17 @@ jobs:
           RC=${PIPESTATUS[0]}
           set -e
           if [ $RC -ne 0 ]; then
-            tail -60 /tmp/run_op.log > /tmp/run_op_tail.txt
+            tail -25 /tmp/run_op.log > /tmp/run_op_tail.txt
             python -c "t=open('/tmp/run_op_tail.txt').read().replace('%','%25').replace(chr(13),'%0D').replace(chr(10),'%0A'); print('::error title=run_op failed (tail)::'+t)"
+            python - <<'PYEOF'
+          import traceback, sys
+          try:
+              import flag_blas
+              print("flag_blas import OK")
+          except Exception:
+              tb = traceback.format_exc()
+              print("::error title=flag_blas import traceback::" + tb.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))
+              sys.exit(1)
+          PYEOF
             exit $RC
           fi
