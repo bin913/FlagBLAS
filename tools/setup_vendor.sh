@@ -116,14 +116,19 @@ case $VENDOR in
     echo "::warning title=hygon setup::testdeps installed"
 
     # Sanity check: make sure the DTK-patched torch survived the installs above.
+    # NOTE: torch.__version__ drops the +das.opt1.dtk2604 local tag (it reports
+    # "2.9.0"), so check the installed distribution version instead.
     set +e
     python - <<'PYEOF'
-import sys, traceback
+import sys, importlib.metadata, traceback
 try:
+    dist = importlib.metadata.version("torch")
+    print("hygon torch dist:", dist)
+    assert dist.startswith("2.9.0+das.opt1.dtk2604"), \
+        f"unexpected torch distribution: {dist}"
     import torch
-    print("hygon torch:", torch.__version__)
-    assert torch.__version__.startswith("2.9.0+das.opt1.dtk2604"), \
-        f"unexpected torch build: {torch.__version__}"
+    print("torch.__version__:", torch.__version__)
+    print("torch.version.hip:", getattr(torch.version, "hip", None))
 except Exception:
     tb = traceback.format_exc()
     print(tb)
