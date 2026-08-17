@@ -167,10 +167,6 @@ jobs:
           set -e
           if [ $RC -ne 0 ]; then
             tail -60 /tmp/run_op.log > /tmp/run_op_tail.txt
-            python -c "
-text = open('/tmp/run_op_tail.txt').read()
-text = text.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
-print('::error title=run_op failed (tail)::' + text)
-"
+            python -c "t=open('/tmp/run_op_tail.txt').read().replace('%','%25').replace(chr(13),'%0D').replace(chr(10),'%0A'); print('::error title=run_op failed (tail)::'+t)"
             exit $RC
           fi
