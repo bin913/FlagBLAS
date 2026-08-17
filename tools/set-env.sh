@@ -68,6 +68,21 @@ case $VENDOR in
     if [ -z "$DTK_ENV" ]; then
       echo "WARNING: no DTK env.sh found under /opt/dtk-26.04, /opt/dtk*, /usr/local/dtk*. torch will not see the DCUs."
     fi
+    # Explicitly ensure the DTK/hyhal library dirs are on LD_LIBRARY_PATH,
+    # in case env.sh does not cover them (torch._C._cuda_init needs them to
+    # find the DCU driver).
+    if [ -n "$DTK_ENV" ]; then
+      DTK_ROOT="${DTK_ENV%/env.sh}"
+      for d in "${DTK_ROOT}/lib" "${DTK_ROOT}/lib64" /opt/hyhal/lib /opt/hyhal/lib64; do
+        if [ -d "$d" ]; then
+          case ":$LD_LIBRARY_PATH:" in
+            *":$d:"*) ;;
+            *) export LD_LIBRARY_PATH="$d${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ;;
+          esac
+        fi
+      done
+    fi
+    echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}"
     ;;
 esac
 
