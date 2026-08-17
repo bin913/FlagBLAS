@@ -109,6 +109,13 @@ jobs:
           echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-<unset>}"
           python - <<'EOF'
           import sys
+
+          def note(kind, title, text):
+              # GitHub workflow command: escape % and newlines so the whole
+              # message lands in the publicly-readable check-run annotations.
+              text = text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+              print(f"::{kind} title={title}::{text}")
+
           print("python:", sys.version)
           try:
               import torch
@@ -117,9 +124,13 @@ jobs:
               print("device count:", torch.cuda.device_count())
               if torch.cuda.is_available():
                   print("device name:", torch.cuda.get_device_name(0))
+              else:
+                  note("error", "hygon torch sees no DCU", "torch.cuda.is_available() is False on the hygon runner")
           except Exception:
               import traceback
-              traceback.print_exc()
+              tb = traceback.format_exc()
+              print(tb)
+              note("error", "hygon torch import failed", tb)
           EOF
           exit 0
 
