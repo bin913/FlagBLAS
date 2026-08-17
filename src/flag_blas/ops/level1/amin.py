@@ -67,7 +67,7 @@ def amin_kernel1_real(
         idx = (block_start + tl.arange(0, BLOCK_SIZE)).to(tl.int32)
         mask = idx < n
 
-        x = tl.load(x_ptr + idx * INCX, mask=mask, other=float("inf"))
+        x = tl.load(x_ptr + idx.to(tl.int64) * INCX, mask=mask, other=float("inf"))
         abs_x = tl.abs(x)
         block_min, chunk_offset = tl.min(
             abs_x,
@@ -117,7 +117,7 @@ def amin_kernel1_complex(
         idx = (block_start + tl.arange(0, BLOCK_SIZE)).to(tl.int32)
         mask = idx < n
 
-        base = idx * INCX * 2
+        base = idx.to(tl.int64) * INCX * 2
         real = tl.load(x_ptr + base, mask=mask, other=0.0)
         imag = tl.load(x_ptr + base + 1, mask=mask, other=0.0)
         abs_x = tl.abs(real) + tl.abs(imag)
