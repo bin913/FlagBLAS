@@ -108,7 +108,11 @@ case $VENDOR in
 
     # Test deps. `cupy-cuda12x` is excluded: it is NVIDIA-only and would pull
     # a CUDA runtime that conflicts with the DTK stack.
+    # sqlalchemy/packaging/pybind11 are FlagBLAS runtime deps that were skipped
+    # by the --no-deps install above (sqlalchemy is imported at module load time
+    # via flag_blas.utils.models).
     if ! uv pip install pytest numpy scipy distro gitpython pyyaml coverage pytest-md-report \
+         sqlalchemy packaging pybind11 \
          --index-url ${UV_EXTRA_INDEX_URL} 2>&1 | tee /tmp/hygon-testdeps.log; then
       echo "::error title=hygon test deps install failed::$(tail -8 /tmp/hygon-testdeps.log | tr '\n' ' ' | head -c 1500)"
       exit 1
