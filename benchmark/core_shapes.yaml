@@ -361,6 +361,21 @@ GbmvBenchmark:
     - [10000, 10000]
   shape_desc: "M, N"
 
+# SBMV operations base shapes (N)
+# These shapes are used for ssbmv and dsbmv benchmarks
+SbmvBenchmark:
+  shapes:
+    - [256]
+    - [512]
+    - [1024]
+    - [2048]
+    - [4096]
+    - [6144]
+    - [8192]
+    - [12288]
+    - [16384]
+  shape_desc: "N"
+
 # SYMV operations base shapes (N)
 # These shapes are used for ssymv, dsymv, csymv and zsymv benchmarks
 SymvBenchmark:
