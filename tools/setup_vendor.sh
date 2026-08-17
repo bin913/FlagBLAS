@@ -83,9 +83,18 @@ case $VENDOR in
         --index-url ${UV_INDEX_URL} \
         --extra-index-url ${UV_EXTRA_INDEX_URL}
 
-    # Install FlagBLAS in editable mode
-    uv pip install -e .
-    uv pip install ".[test]"
+    # Install FlagBLAS without touching the DTK-patched torch. pyproject.toml
+    # declares `torch>=2.6.0`; without --no-deps the dependency resolver
+    # replaces the DTK build with the newest CUDA torch from the extra index.
+    uv pip install -e . --no-deps --no-build-isolation --index-url ${UV_EXTRA_INDEX_URL}
+
+    # Test deps. `cupy-cuda12x` is excluded: it is NVIDIA-only and would pull
+    # a CUDA runtime that conflicts with the DTK stack.
+    uv pip install pytest numpy scipy distro gitpython pyyaml coverage pytest-md-report \
+        --index-url ${UV_EXTRA_INDEX_URL}
+
+    # Sanity check: make sure the DTK-patched torch survived the installs above.
+    python -c "import torch; print('hygon torch:', torch.__version__)" || exit 1
 
     # Mirror FlagGems' env_source: bake the DTK environment into the venv so
     # that every `source .venv/bin/activate` also loads the DTK runtime.
