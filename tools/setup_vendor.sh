@@ -111,7 +111,9 @@ case $VENDOR in
     # sqlalchemy/packaging/pybind11 are FlagBLAS runtime deps that were skipped
     # by the --no-deps install above (sqlalchemy is imported at module load time
     # via flag_blas.utils.models).
-    if ! uv pip install pytest numpy scipy distro gitpython pyyaml coverage pytest-md-report \
+    # numpy must stay on 1.x: the DTK-patched torch 2.9.0 is built against the
+    # numpy 1.x C API ("_ARRAY_API not found" under numpy 2.x).
+    if ! uv pip install pytest numpy\<2 scipy distro gitpython pyyaml coverage pytest-md-report \
          sqlalchemy packaging pybind11 \
          --index-url ${UV_EXTRA_INDEX_URL} 2>&1 | tee /tmp/hygon-testdeps.log; then
       echo "::error title=hygon test deps install failed::$(tail -8 /tmp/hygon-testdeps.log | tr '\n' ' ' | head -c 1500)"
