@@ -116,10 +116,8 @@ case $VENDOR in
     echo "::warning title=hygon setup::testdeps installed"
 
     # Sanity check: make sure the DTK-patched torch survived the installs above.
-    python - <<'PYEOF' || {
-      echo "::error title=hygon torch sanity check failed::the DTK-patched torch is missing after setup"
-      exit 1
-    }
+    set +e
+    python - <<'PYEOF'
 import sys, traceback
 try:
     import torch
@@ -132,6 +130,12 @@ except Exception:
     print("::error title=hygon torch sanity check failed::" + tb.replace("%", "%25").replace("\n", "%0A"))
     sys.exit(1)
 PYEOF
+    SANITY_RC=$?
+    set -e
+    if [ $SANITY_RC -ne 0 ]; then
+      echo "::error title=hygon torch sanity check failed::sanity check failed with rc=${SANITY_RC}"
+      exit 1
+    fi
     echo "::warning title=hygon setup::sanity check passed"
 
     # Mirror FlagGems' env_source: bake the DTK environment into the venv so
