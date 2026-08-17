@@ -36,7 +36,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: cgemm
     description: |
       Single-precision complex GEMM, based on complex64 format.
@@ -48,7 +48,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: zgemm
     description: |
       Double-precision complex GEMM, based on complex128 format.
@@ -60,7 +60,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: hgemm
     description: |
       half-precision GEMM, based on FP16 format.
@@ -72,7 +72,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: bfgemm
     description: |
       Refers to GEMM with BF16 data type.
@@ -84,7 +84,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: group_bfgemm
     description: |
       Refers to GROUP_GEMM with BF16 data type.
@@ -96,7 +96,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: group_hgemm
     description: |
       Refers to GROUP_GEMM with FP16 data type.
@@ -108,7 +108,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: group_tf32gemm
     description: |
       Refers to GROUP_GEMM with TF32 data type.
@@ -120,7 +120,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: group_mm
     description: |
       Generic GROUP_GEMM operator.
@@ -132,7 +132,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: strmm
     description: |
       Single-precision BLAS Level 3 triangular matrix-matrix multiplication.
@@ -144,7 +144,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: dtrmm
     description: |
       Double-precision BLAS Level 3 triangular matrix-matrix multiplication.
@@ -156,7 +156,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: ctrmm
     description: |
       Single-precision complex BLAS Level 3 triangular matrix-matrix multiplication.
@@ -168,7 +168,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: ztrmm
     description: |
       Double-precision complex BLAS Level 3 triangular matrix-matrix multiplication.
@@ -180,7 +180,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: sabs
     description: |
       Single-precision BLAS Level 1 absolute-value operation.
@@ -880,7 +880,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: dger
     description: |
       Double-precision BLAS Level 2 general rank-1 update.
@@ -892,7 +892,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: cgeru
     description: |
       Single-precision complex BLAS Level 2 unconjugated general rank-1 update.
@@ -904,7 +904,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: cgerc
     description: |
       Single-precision complex BLAS Level 2 conjugated general rank-1 update.
@@ -916,7 +916,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: zgeru
     description: |
       Double-precision complex BLAS Level 2 unconjugated general rank-1 update.
@@ -928,7 +928,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: zgerc
     description: |
       Double-precision complex BLAS Level 2 conjugated general rank-1 update.
@@ -940,7 +940,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: dgemv
     description: |
       Double-precision BLAS Level 2 general matrix-vector multiplication.
@@ -1072,7 +1072,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: dsbmv
     description: |
       Double-precision BLAS Level 2 symmetric banded matrix-vector multiplication.
@@ -1084,7 +1084,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: chbmv
     description: |
       Single-precision complex BLAS Level 2 Hermitian banded matrix-vector multiplication.
@@ -1096,7 +1096,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: zhbmv
     description: |
       Double-precision complex BLAS Level 2 Hermitian banded matrix-vector multiplication.
@@ -1108,7 +1108,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: sspmv
     description: |
       Single-precision BLAS Level 2 symmetric packed matrix-vector multiplication.
@@ -1120,7 +1120,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: dspmv
     description: |
       Double-precision BLAS Level 2 symmetric packed matrix-vector multiplication.
@@ -1132,7 +1132,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: ssymv
     description: |
       Single-precision BLAS Level 2 symmetric matrix-vector multiplication.
@@ -1193,7 +1193,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: dspr
     description: |
       Double-precision BLAS Level 2 symmetric packed rank-1 update.
@@ -1206,7 +1206,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: sspr2
     description: |
       Single-precision BLAS Level 2 symmetric packed rank-2 update.
@@ -1219,7 +1219,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: dspr2
     description: |
       Double-precision BLAS Level 2 symmetric packed rank-2 update.
@@ -1232,7 +1232,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: ssyr2
     description: |
       Single-precision BLAS Level 2 symmetric rank-2 update.
@@ -1245,7 +1245,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: dsyr2
     description: |
       Double-precision BLAS Level 2 symmetric rank-2 update.
@@ -1258,7 +1258,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   # csyr2/zsyr2 are disabled in the strict workflow: SciPy/CPU BLAS does not
   # expose direct complex SYR2 references, so they cannot meet CPU correctness.
   # - id: csyr2
@@ -1299,7 +1299,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: zher2
     description: |
       Double-precision complex BLAS Level 2 Hermitian rank-2 update.
@@ -1312,7 +1312,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: chemv
     description: |
       Single-precision complex BLAS Level 2 Hermitian matrix-vector multiplication.
@@ -1504,7 +1504,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: zhpmv
     description: |
       Double-precision complex BLAS Level 2 Hermitian packed matrix-vector multiplication.
@@ -1516,7 +1516,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: chpr
     description: |
       Single-precision complex BLAS Level 2 Hermitian packed rank-1 update.
@@ -1529,7 +1529,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: zhpr
     description: |
       Double-precision complex BLAS Level 2 Hermitian packed rank-1 update.
@@ -1542,7 +1542,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: chpr2
     description: |
       Single-precision complex BLAS Level 2 Hermitian packed rank-2 update.
@@ -1555,7 +1555,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: zhpr2
     description: |
       Double-precision complex BLAS Level 2 Hermitian packed rank-2 update.
@@ -1568,7 +1568,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: strsv
     description: |
       Single-precision BLAS Level 2 triangular solve.
@@ -1580,7 +1580,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: dtrsv
     description: |
       Double-precision BLAS Level 2 triangular solve.
@@ -1592,7 +1592,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: ctrsv
     description: |
       Single-precision complex BLAS Level 2 triangular solve.
@@ -1604,7 +1604,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: ztrsv
     description: |
       Double-precision complex BLAS Level 2 triangular solve.
@@ -1616,7 +1616,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: stpsv
     description: |
       Single-precision BLAS Level 2 tpsv operator.
@@ -1628,7 +1628,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: dtpsv
     description: |
       Double-precision BLAS Level 2 tpsv operator.
@@ -1640,7 +1640,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: ctpsv
     description: |
       Single-precision complex BLAS Level 2 tpsv operator.
@@ -1652,7 +1652,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: ztpsv
     description: |
       Double-precision complex BLAS Level 2 tpsv operator.
@@ -1664,7 +1664,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: dtbsv
     description: |
       Double-precision BLAS Level 2 tbsv operator.
@@ -1676,7 +1676,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: ctbsv
     description: |
       Single-precision complex BLAS Level 2 tbsv operator.
@@ -1688,7 +1688,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: ztbsv
     description: |
       Double-precision complex BLAS Level 2 tbsv operator.
@@ -1700,7 +1700,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: ssyr
     description: |
       Single-precision BLAS Level 2 syr operator.
@@ -1712,7 +1712,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: dsyr
     description: |
       Double-precision BLAS Level 2 syr operator.
@@ -1724,7 +1724,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: csyr
     description: |
       Single-precision complex BLAS Level 2 syr operator.
@@ -1736,7 +1736,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: zsyr
     description: |
       Double-precision complex BLAS Level 2 syr operator.
@@ -1748,7 +1748,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: cher
     description: |
       Single-precision complex BLAS Level 2 her operator.
@@ -1760,7 +1760,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: zher
     description: |
       Double-precision complex BLAS Level 2 her operator.
@@ -1772,4 +1772,4 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
