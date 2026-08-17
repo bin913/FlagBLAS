@@ -175,31 +175,31 @@ def _run_ger_benchmark(op_name):
     run_correctness_then_benchmark(bench)
 
 
-@pytest.mark.ger
+@pytest.mark.sger
 def test_perf_sger():
     _run_ger_benchmark("sger")
 
 
-@pytest.mark.ger
+@pytest.mark.dger
 def test_perf_dger():
     _run_ger_benchmark("dger")
 
 
-@pytest.mark.ger
+@pytest.mark.cgeru
 def test_perf_cgeru():
     _run_ger_benchmark("cgeru")
 
 
-@pytest.mark.ger
+@pytest.mark.cgerc
 def test_perf_cgerc():
     _run_ger_benchmark("cgerc")
 
 
-@pytest.mark.ger
+@pytest.mark.zgeru
 def test_perf_zgeru():
     _run_ger_benchmark("zgeru")
 
 
-@pytest.mark.ger
+@pytest.mark.zgerc
 def test_perf_zgerc():
     _run_ger_benchmark("zgerc")

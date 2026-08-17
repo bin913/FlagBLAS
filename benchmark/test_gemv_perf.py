@@ -931,10 +931,10 @@ class Fp8GemvBenchmark(Benchmark):
         return ref_args, kwargs, blas_args, kwargs
 
 
-@pytest.mark.fp8gemv
+@pytest.mark.fp8_gemv
 def test_perf_fp8_gemv_e4m3_vs_sgemv_trans():
     bench = Fp8GemvBenchmark(
-        op_name="fp8_gemv_e4m3_vs_sgemv_trans",
+        op_name="fp8_gemv",
         torch_op=cublas_sgemv_fp8_baseline,
         gems_op=gems_fp8_gemv_wrapper,
         dtypes=[torch.float8_e4m3fn],
@@ -943,11 +943,10 @@ def test_perf_fp8_gemv_e4m3_vs_sgemv_trans():
     )
     run_correctness_then_benchmark(bench)
 
-
-@pytest.mark.fp8gemv
+@pytest.mark.fp8_gemv
 def test_perf_fp8_gemv_e5m2_vs_sgemv_trans():
     bench = Fp8GemvBenchmark(
-        op_name="fp8_gemv_e5m2_vs_sgemv_trans",
+        op_name="fp8_gemv",
         torch_op=cublas_sgemv_fp8_baseline,
         gems_op=gems_fp8_gemv_wrapper,
         dtypes=[torch.float8_e5m2],

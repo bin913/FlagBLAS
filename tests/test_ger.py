@@ -21,6 +21,10 @@ GER_OPS = {
     "zgerc": (torch.complex128, np.complex128, 1.5 - 0.5j),
 }
 
+# Parametrize cases carrying per-op precision markers (sger/dger/cgeru/...),
+# so `pytest -m "<op>"` (as used by tools/run_tests.py) selects the matching cases.
+GER_OPS_CASES = [pytest.param(op, marks=getattr(pytest.mark, op)) for op in GER_OPS]
+
 GER_PERF_SHAPES = [
     (64, 64),
     (256, 256),
@@ -138,7 +142,7 @@ def run_ger_case(op_name, m, n, alpha, incx=1, incy=1):
 
 
 @pytest.mark.ger
-@pytest.mark.parametrize("op_name", GER_OPS)
+@pytest.mark.parametrize("op_name", GER_OPS_CASES)
 def test_ger_exports(op_name):
     assert hasattr(flag_blas.ops, op_name)
     assert hasattr(flag_blas, op_name)
@@ -147,7 +151,7 @@ def test_ger_exports(op_name):
 
 
 @pytest.mark.ger
-@pytest.mark.parametrize("op_name", GER_OPS)
+@pytest.mark.parametrize("op_name", GER_OPS_CASES)
 @pytest.mark.parametrize("m,n", GER_SHAPES)
 def test_accuracy_ger(op_name, m, n):
     alpha = GER_OPS[op_name][2]
@@ -155,7 +159,7 @@ def test_accuracy_ger(op_name, m, n):
 
 
 @pytest.mark.ger
-@pytest.mark.parametrize("op_name", GER_OPS)
+@pytest.mark.parametrize("op_name", GER_OPS_CASES)
 @pytest.mark.parametrize("m,n", STRIDE_SHAPES)
 @pytest.mark.parametrize("incx,incy", STRIDES)
 def test_accuracy_ger_stride(op_name, m, n, incx, incy):
@@ -164,7 +168,7 @@ def test_accuracy_ger_stride(op_name, m, n, incx, incy):
 
 
 @pytest.mark.ger
-@pytest.mark.parametrize("op_name", GER_OPS)
+@pytest.mark.parametrize("op_name", GER_OPS_CASES)
 @pytest.mark.parametrize("m,n", [(64, 64), (127, 65), (1, 128), (128, 1)])
 def test_accuracy_ger_alpha_zero(op_name, m, n):
     run_ger_case(op_name, m, n, alpha=0.0)
@@ -174,8 +178,14 @@ def test_accuracy_ger_alpha_zero(op_name, m, n):
 @pytest.mark.parametrize(
     "op_u,op_c,dtype,alpha",
     [
-        ("cgeru", "cgerc", torch.complex64, 0.75 + 0.25j),
-        ("zgeru", "zgerc", torch.complex128, 0.75 + 0.25j),
+        pytest.param(
+            "cgeru", "cgerc", torch.complex64, 0.75 + 0.25j,
+            marks=(getattr(pytest.mark, "cgeru"), getattr(pytest.mark, "cgerc")),
+        ),
+        pytest.param(
+            "zgeru", "zgerc", torch.complex128, 0.75 + 0.25j,
+            marks=(getattr(pytest.mark, "zgeru"), getattr(pytest.mark, "zgerc")),
+        ),
     ],
 )
 def test_accuracy_ger_conjugate_difference(op_u, op_c, dtype, alpha):
