@@ -1221,7 +1221,7 @@ def test_perf_fp8_gemv_e4m3_vs_sgemv_trans():
     if IS_HYGON:
         pytest.skip("FP8 GEMV cuBLAS baseline is unavailable on Hygon")
     bench = Fp8GemvBenchmark(
-        op_name="fp8_gemv_e4m3_vs_sgemv_trans",
+        op_name="fp8_gemv",
         torch_op=cublas_sgemv_fp8_baseline,
         gems_op=gems_fp8_gemv_wrapper,
         dtypes=[torch.float8_e4m3fn],
@@ -1236,7 +1236,7 @@ def test_perf_fp8_gemv_e5m2_vs_sgemv_trans():
     if IS_HYGON:
         pytest.skip("FP8 GEMV cuBLAS baseline is unavailable on Hygon")
     bench = Fp8GemvBenchmark(
-        op_name="fp8_gemv_e5m2_vs_sgemv_trans",
+        op_name="fp8_gemv",
         torch_op=cublas_sgemv_fp8_baseline,
         gems_op=gems_fp8_gemv_wrapper,
         dtypes=[torch.float8_e5m2],

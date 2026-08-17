@@ -1278,6 +1278,7 @@ def test_accuracy_bfgemv_stride(m, n, trans, incx, incy):
 
 
 @pytest.mark.fp8gemv
+@pytest.mark.fp8_gemv
 @HYGON_FP8_UNSUPPORTED
 @ASCEND_FP8_E4M3_REQUIRED
 @pytest.mark.parametrize("m,n", FP8_GEMV_SHAPES)
@@ -1305,6 +1306,7 @@ def test_accuracy_fp8_gemv_e4m3(m, n, beta):
 
 
 @pytest.mark.fp8gemv
+@pytest.mark.fp8_gemv
 @HYGON_FP8_UNSUPPORTED
 @ASCEND_FP8_E4M3_REQUIRED
 @pytest.mark.parametrize("m,n", [(64, 128), (128, 64), (256, 256)])
@@ -1332,6 +1334,7 @@ def test_accuracy_fp8_gemv_e4m3_stride(m, n, incx, incy):
 
 
 @pytest.mark.fp8gemv
+@pytest.mark.fp8_gemv
 @HYGON_FP8_UNSUPPORTED
 @ASCEND_FP8_E5M2_REQUIRED
 @pytest.mark.parametrize("m,n", FP8_GEMV_SHAPES)
@@ -1359,6 +1362,7 @@ def test_accuracy_fp8_gemv_e5m2(m, n, beta):
 
 
 @pytest.mark.fp8gemv
+@pytest.mark.fp8_gemv
 @HYGON_FP8_UNSUPPORTED
 @ASCEND_FP8_E5M2_REQUIRED
 @pytest.mark.parametrize("m,n", [(64, 128), (128, 64), (256, 256)])
@@ -1386,6 +1390,7 @@ def test_accuracy_fp8_gemv_e5m2_stride(m, n, incx, incy):
 
 
 @pytest.mark.fp8gemv
+@pytest.mark.fp8_gemv
 @HYGON_FP8_UNSUPPORTED
 @ASCEND_FP8_E4M3_REQUIRED
 @pytest.mark.parametrize("m,n", [(256, 256), (1024, 1024), (4096, 4096)])
@@ -1413,6 +1418,7 @@ def test_accuracy_fp8_gemv_output_dtype(m, n, y_dtype):
 
 
 @pytest.mark.fp8gemv
+@pytest.mark.fp8_gemv
 @HYGON_FP8_UNSUPPORTED
 @ASCEND_FP8_E4M3_REQUIRED
 def test_fp8_gemv_alpha_zero():
@@ -1437,6 +1443,7 @@ def test_fp8_gemv_alpha_zero():
 
 
 @pytest.mark.fp8gemv
+@pytest.mark.fp8_gemv
 @HYGON_FP8_UNSUPPORTED
 @ASCEND_FP8_E4M3_REQUIRED
 def test_fp8_gemv_beta_zero():
@@ -1469,6 +1476,7 @@ def test_fp8_gemv_beta_zero():
 
 
 @pytest.mark.fp8gemv
+@pytest.mark.fp8_gemv
 @HYGON_FP8_UNSUPPORTED
 @ASCEND_FP8_E4M3_REQUIRED
 def test_fp8_gemv_empty():
@@ -1490,6 +1498,7 @@ def test_fp8_gemv_empty():
 
 
 @pytest.mark.fp8gemv
+@pytest.mark.fp8_gemv
 @HYGON_FP8_UNSUPPORTED
 @ASCEND_FP8_E4M3_REQUIRED
 @pytest.mark.parametrize("m,n", [(256, 256), (1024, 1024)])
