@@ -179,11 +179,17 @@ def test_accuracy_ger_alpha_zero(op_name, m, n):
     "op_u,op_c,dtype,alpha",
     [
         pytest.param(
-            "cgeru", "cgerc", torch.complex64, 0.75 + 0.25j,
+            "cgeru",
+            "cgerc",
+            torch.complex64,
+            0.75 + 0.25j,
             marks=(getattr(pytest.mark, "cgeru"), getattr(pytest.mark, "cgerc")),
         ),
         pytest.param(
-            "zgeru", "zgerc", torch.complex128, 0.75 + 0.25j,
+            "zgeru",
+            "zgerc",
+            torch.complex128,
+            0.75 + 0.25j,
             marks=(getattr(pytest.mark, "zgeru"), getattr(pytest.mark, "zgerc")),
         ),
     ],

@@ -943,6 +943,7 @@ def test_perf_fp8_gemv_e4m3_vs_sgemv_trans():
     )
     run_correctness_then_benchmark(bench)
 
+
 @pytest.mark.fp8_gemv
 def test_perf_fp8_gemv_e5m2_vs_sgemv_trans():
     bench = Fp8GemvBenchmark(
