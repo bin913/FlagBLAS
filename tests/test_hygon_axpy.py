@@ -56,6 +56,9 @@ def test_hygon_axpy_saxpy(shape, alpha):
 
     ref_y = _cpu_axpy_reference(n, alpha, x, incx, y, incy)
 
-    flag_blas.ops.saxpy(n, alpha, x, incx, y, incy)
+    # Use flag_blas.saxpy (vendor-patched by replace_customized_ops) instead of
+    # flag_blas.ops.saxpy: on the Hygon DCU the patched op dispatches to the
+    # vendor kernel (no triton.autotune), matching how test_gemv.py runs hygon ops.
+    flag_blas.saxpy(n, alpha, x, incx, y, incy)
 
     blas_assert_close(y, ref_y, torch.float32)
