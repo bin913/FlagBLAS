@@ -86,6 +86,15 @@ case $VENDOR in
     # Install FlagBLAS in editable mode
     uv pip install -e .
     uv pip install ".[test]"
+
+    # Mirror FlagGems' env_source: bake the DTK environment into the venv so
+    # that every `source .venv/bin/activate` also loads the DTK runtime.
+    # Otherwise torch.cuda init fails at import time ("Found no NVIDIA driver")
+    # because the DTK libs are missing from LD_LIBRARY_PATH.
+    if [ -n "$DTK_ENV" ]; then
+      printf '\n# Source Hygon DTK environment (required by DTK-patched PyTorch)\n[ -f "%s" ] && source "%s" || true\n' "$DTK_ENV" "$DTK_ENV" >> .venv/bin/activate
+      echo "Baked DTK environment into .venv/bin/activate: $DTK_ENV"
+    fi
     ;;
 esac
 

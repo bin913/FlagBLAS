@@ -53,8 +53,20 @@ case $VENDOR in
     export LD_LIBRARY_PATH="${COREX_ROOT}/lib:${LD_LIBRARY_PATH}"
     ;;
   hygon)
-    if [ -f /opt/dtk-26.04/env.sh ]; then
-      source /opt/dtk-26.04/env.sh || true
+    # Locate and source the Hygon DTK environment. The DTK-patched PyTorch
+    # needs the DTK runtime libs (LD_LIBRARY_PATH) to detect the DCUs at
+    # torch import time, so this must run before any python/torch invocation.
+    export DTK_ENV=""
+    for f in /opt/dtk-26.04/env.sh /opt/dtk/env.sh /usr/local/dtk/env.sh /opt/dtk-*/env.sh /usr/local/dtk-*/env.sh; do
+      if [ -f "$f" ]; then
+        export DTK_ENV="$f"
+        source "$f" || true
+        echo "Sourced Hygon DTK environment: $f"
+        break
+      fi
+    done
+    if [ -z "$DTK_ENV" ]; then
+      echo "WARNING: no DTK env.sh found under /opt/dtk-26.04, /opt/dtk*, /usr/local/dtk*. torch will not see the DCUs."
     fi
     ;;
 esac
