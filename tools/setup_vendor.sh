@@ -70,18 +70,29 @@ case $VENDOR in
     # Install PyTorch for Hygon DCU (ROCm/HIP).
     # The flagos-pypi-hygon index only hosts vendor wheels, so add a general
     # PyPI mirror (same one FlagGems uses) to resolve torch's transitive deps.
+    # --index-strategy unsafe-best-match is required: under uv's default
+    # first-index strategy, torch is found on the aliyun mirror and the DTK
+    # build from the flagos index is never considered.
     UV_INDEX_URL="https://resource.flagos.net/repository/flagos-pypi-hygon/simple"
     UV_EXTRA_INDEX_URL="https://mirrors.aliyun.com/pypi/simple"
 
     uv pip install torch==2.9.0+das.opt1.dtk2604 \
         --index-url ${UV_INDEX_URL} \
-        --extra-index-url ${UV_EXTRA_INDEX_URL}
+        --extra-index-url ${UV_EXTRA_INDEX_URL} \
+        --index-strategy unsafe-best-match || {
+          echo "::error title=hygon torch install failed::uv pip install torch==2.9.0+das.opt1.dtk2604 (indexes: ${UV_INDEX_URL}, ${UV_EXTRA_INDEX_URL})"
+          exit 1
+        }
 
     # Install FlagTree compiler for Hygon DCU
     uv pip uninstall triton || true
     uv pip install flagtree==0.5.1+hcu3.1 \
         --index-url ${UV_INDEX_URL} \
-        --extra-index-url ${UV_EXTRA_INDEX_URL}
+        --extra-index-url ${UV_EXTRA_INDEX_URL} \
+        --index-strategy unsafe-best-match || {
+          echo "::error title=hygon flagtree install failed::uv pip install flagtree==0.5.1+hcu3.1"
+          exit 1
+        }
 
     # Install FlagBLAS without touching the DTK-patched torch. pyproject.toml
     # declares `torch>=2.6.0`; without --no-deps the dependency resolver
@@ -94,7 +105,22 @@ case $VENDOR in
         --index-url ${UV_EXTRA_INDEX_URL}
 
     # Sanity check: make sure the DTK-patched torch survived the installs above.
-    python -c "import torch; print('hygon torch:', torch.__version__)" || exit 1
+    python - <<'PYEOF' || {
+      echo "::error title=hygon torch sanity check failed::the DTK-patched torch is missing after setup"
+      exit 1
+    }
+import sys, traceback
+try:
+    import torch
+    print("hygon torch:", torch.__version__)
+    assert torch.__version__.startswith("2.9.0+das.opt1.dtk2604"), \
+        f"unexpected torch build: {torch.__version__}"
+except Exception:
+    tb = traceback.format_exc()
+    print(tb)
+    print("::error title=hygon torch sanity check failed::" + tb.replace("%", "%25").replace("\n", "%0A"))
+    sys.exit(1)
+PYEOF
 
     # Mirror FlagGems' env_source: bake the DTK environment into the venv so
     # that every `source .venv/bin/activate` also loads the DTK runtime.
