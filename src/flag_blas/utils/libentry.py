@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import inspect
 import logging
@@ -439,11 +440,25 @@ class LibTuner(triton.runtime.Autotuner):
             all_args = {**self.nargs, **kwargs}
             _args = {k: v for k, v in all_args.items() if k in self.arg_names}
             key = self.get_key(_args)
-            if key not in self.cache:
+            config = self.cache.get(key)
+            if config is not None:
+                cached_kwargs = config.all_kwargs()
+                config = next(
+                    (
+                        original_config
+                        for original_config in self.configs
+                        if original_config.all_kwargs() == cached_kwargs
+                    ),
+                    None,
+                )
+            if config is None:
                 cache: BenchmarkCache = libcache[self.benchmark_table_name, key]
                 # prune configs
                 used_cached_result = False
-                pruned_configs = self.prune_configs(kwargs)
+                # Hygon AABS may adjust a config in place. Some Triton versions
+                # pass the original configs through early_config_prune, so make
+                # the final pruned list independent before benchmarking it.
+                pruned_configs = copy.deepcopy(self.prune_configs(kwargs))
                 bench_start = time.time()
 
                 def bench(config: triton.Config) -> List[float]:
@@ -462,21 +477,14 @@ class LibTuner(triton.runtime.Autotuner):
                 bench_end = time.time()
                 self.bench_time = bench_end - bench_start
                 self.cache[key] = best_config
+                config = best_config
                 full_nargs = {
                     **self.nargs,
                     **kwargs,
-                    **self.cache[key].all_kwargs(),
+                    **config.all_kwargs(),
                 }
                 self.pre_hook(full_nargs, reset_only=True)
                 self.configs_timings = timings
-            config = self.cache[key]
-            if config.pre_hook is None:
-                cached_kwargs = config.all_kwargs()
-                for original_config in self.configs:
-                    if original_config.all_kwargs() == cached_kwargs:
-                        # Use the original config which has the pre_hook
-                        config = original_config
-                        break
         else:
             config = self.configs[0]
         self.best_config = config

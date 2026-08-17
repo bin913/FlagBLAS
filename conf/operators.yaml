@@ -36,7 +36,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: cgemm
     description: |
       Single-precision complex GEMM, based on complex64 format.
@@ -48,7 +48,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: zgemm
     description: |
       Double-precision complex GEMM, based on complex128 format.
@@ -60,7 +60,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: hgemm
     description: |
       half-precision GEMM, based on FP16 format.
@@ -72,7 +72,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: bfgemm
     description: |
       Refers to GEMM with BF16 data type.
@@ -84,19 +84,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
-  - id: fp8gemm
-    description: |
-      8-bit floating point GEMM with E4M3/E5M2 common formats
-      This is a simple wrapper of the existing torch `abs` operator.
-    for:
-      - fp8gemm
-    labels:
-      - gemm
-    kind:
-      - BLAS
-    stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: group_bfgemm
     description: |
       Refers to GROUP_GEMM with BF16 data type.
@@ -108,7 +96,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: group_hgemm
     description: |
       Refers to GROUP_GEMM with FP16 data type.
@@ -120,7 +108,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: group_tf32gemm
     description: |
       Refers to GROUP_GEMM with TF32 data type.
@@ -132,7 +120,67 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
+  - id: group_mm
+    description: |
+      Generic GROUP_GEMM operator.
+      Dispatches a batch of GEMM problems with mixed shapes and dtypes.
+    for:
+      - group_mm
+    labels:
+      - gemm
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: strmm
+    description: |
+      Single-precision BLAS Level 3 triangular matrix-matrix multiplication.
+      Computes B = alpha * op(A) * B or B = alpha * B * op(A) for a float32 triangular matrix A.
+    for:
+      - strmm
+    labels:
+      - trmm
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: dtrmm
+    description: |
+      Double-precision BLAS Level 3 triangular matrix-matrix multiplication.
+      Computes B = alpha * op(A) * B or B = alpha * B * op(A) for a float64 triangular matrix A.
+    for:
+      - dtrmm
+    labels:
+      - trmm
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: ctrmm
+    description: |
+      Single-precision complex BLAS Level 3 triangular matrix-matrix multiplication.
+      Computes B = alpha * op(A) * B or B = alpha * B * op(A) for a complex64 triangular matrix A.
+    for:
+      - ctrmm
+    labels:
+      - trmm
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: ztrmm
+    description: |
+      Double-precision complex BLAS Level 3 triangular matrix-matrix multiplication.
+      Computes B = alpha * op(A) * B or B = alpha * B * op(A) for a complex128 triangular matrix A.
+    for:
+      - ztrmm
+    labels:
+      - trmm
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
   - id: sabs
     description: |
       Single-precision BLAS Level 1 absolute-value operation.
@@ -144,7 +192,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: dabs
     description: |
       Double-precision BLAS Level 1 absolute-value operation.
@@ -156,7 +204,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: cabs
     description: |
       Single-precision complex BLAS Level 1 absolute-value operation.
@@ -168,7 +216,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: zabs
     description: |
       Double-precision complex BLAS Level 1 absolute-value operation.
@@ -180,7 +228,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: samax
     description: |
       Single-precision BLAS Level 1 index-of-maximum-absolute-value reduction.
@@ -192,7 +240,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: damax
     description: |
       Double-precision BLAS Level 1 index-of-maximum-absolute-value reduction.
@@ -204,7 +252,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: camax
     description: |
       Single-precision complex BLAS Level 1 index-of-maximum-absolute-value reduction.
@@ -216,7 +264,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: zamax
     description: |
       Double-precision complex BLAS Level 1 index-of-maximum-absolute-value reduction.
@@ -228,7 +276,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: samin
     description: |
       Single-precision BLAS Level 1 index-of-minimum-absolute-value reduction.
@@ -237,10 +285,11 @@ ops:
       - samin
     labels:
       - amin
+      - NoCPU
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: damin
     description: |
       Double-precision BLAS Level 1 index-of-minimum-absolute-value reduction.
@@ -249,10 +298,11 @@ ops:
       - damin
     labels:
       - amin
+      - NoCPU
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: camin
     description: |
       Single-precision complex BLAS Level 1 index-of-minimum-absolute-value reduction.
@@ -261,10 +311,11 @@ ops:
       - camin
     labels:
       - amin
+      - NoCPU
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: zamin
     description: |
       Double-precision complex BLAS Level 1 index-of-minimum-absolute-value reduction.
@@ -273,10 +324,11 @@ ops:
       - zamin
     labels:
       - amin
+      - NoCPU
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: sasum
     description: |
       Single-precision BLAS Level 1 absolute-sum reduction.
@@ -288,7 +340,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: dasum
     description: |
       Double-precision BLAS Level 1 absolute-sum reduction.
@@ -300,7 +352,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: scasum
     description: |
       Single-precision complex BLAS Level 1 absolute-sum reduction.
@@ -312,7 +364,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: dzasum
     description: |
       Double-precision complex BLAS Level 1 absolute-sum reduction.
@@ -324,7 +376,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: saxpy
     description: |
       Single-precision BLAS Level 1 scaled vector addition.
@@ -336,7 +388,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: daxpy
     description: |
       Double-precision BLAS Level 1 scaled vector addition.
@@ -348,7 +400,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: caxpy
     description: |
       Single-precision complex BLAS Level 1 scaled vector addition.
@@ -360,7 +412,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: zaxpy
     description: |
       Double-precision complex BLAS Level 1 scaled vector addition.
@@ -372,7 +424,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: scopy
     description: |
       Single-precision BLAS Level 1 vector copy.
@@ -384,7 +436,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: dcopy
     description: |
       Double-precision BLAS Level 1 vector copy.
@@ -396,7 +448,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: ccopy
     description: |
       Single-precision complex BLAS Level 1 vector copy.
@@ -408,7 +460,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: zcopy
     description: |
       Double-precision complex BLAS Level 1 vector copy.
@@ -420,7 +472,127 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
+  - id: sdot
+    description: |
+      Single-precision BLAS Level 1 dot-product reduction.
+      Computes the dot product of strided float32 vectors x and y into a scalar result.
+    for:
+      - sdot
+    labels:
+      - dot
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: ddot
+    description: |
+      Double-precision BLAS Level 1 dot-product reduction.
+      Computes the dot product of strided float64 vectors x and y into a scalar result.
+    for:
+      - ddot
+    labels:
+      - dot
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: cdotu
+    description: |
+      Single-precision complex BLAS Level 1 unconjugated dot-product reduction.
+      Computes the unconjugated dot product of strided complex64 vectors x and y.
+    for:
+      - cdotu
+    labels:
+      - dotu
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: zdotu
+    description: |
+      Double-precision complex BLAS Level 1 unconjugated dot-product reduction.
+      Computes the unconjugated dot product of strided complex128 vectors x and y.
+    for:
+      - zdotu
+    labels:
+      - dotu
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: cdotc
+    description: |
+      Single-precision complex BLAS Level 1 conjugated dot-product reduction.
+      Computes the conjugated dot product of strided complex64 vectors x and y.
+    for:
+      - cdotc
+    labels:
+      - dotc
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: zdotc
+    description: |
+      Double-precision complex BLAS Level 1 conjugated dot-product reduction.
+      Computes the conjugated dot product of strided complex128 vectors x and y.
+    for:
+      - zdotc
+    labels:
+      - dotc
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: sswap
+    description: |
+      Single-precision BLAS Level 1 vector swap.
+      Swaps elements between strided float32 vectors x and y in place.
+    for:
+      - sswap
+    labels:
+      - swap
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: dswap
+    description: |
+      Double-precision BLAS Level 1 vector swap.
+      Swaps elements between strided float64 vectors x and y in place.
+    for:
+      - dswap
+    labels:
+      - swap
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: cswap
+    description: |
+      Single-precision complex BLAS Level 1 vector swap.
+      Swaps elements between strided complex64 vectors x and y in place.
+    for:
+      - cswap
+    labels:
+      - swap
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: zswap
+    description: |
+      Double-precision complex BLAS Level 1 vector swap.
+      Swaps elements between strided complex128 vectors x and y in place.
+    for:
+      - zswap
+    labels:
+      - swap
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
   - id: snrm2
     description: |
       Single-precision BLAS Level 1 Euclidean norm reduction.
@@ -432,7 +604,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: dnrm2
     description: |
       Double-precision BLAS Level 1 Euclidean norm reduction.
@@ -444,7 +616,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: scnrm2
     description: |
       Single-precision complex BLAS Level 1 Euclidean norm reduction.
@@ -456,7 +628,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: dznrm2
     description: |
       Double-precision complex BLAS Level 1 Euclidean norm reduction.
@@ -468,7 +640,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: srot
     description: |
       Single-precision BLAS Level 1 plane rotation.
@@ -480,7 +652,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: drot
     description: |
       Double-precision BLAS Level 1 plane rotation.
@@ -492,7 +664,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: crot
     description: |
       Single-precision complex BLAS Level 1 plane rotation.
@@ -504,7 +676,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: zrot
     description: |
       Double-precision complex BLAS Level 1 plane rotation.
@@ -516,7 +688,103 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
+  - id: srotg
+    description: |
+      Single-precision BLAS Level 1 Givens rotation parameter generation.
+      Updates scalar float32 inputs a and b and writes float32 c and s.
+    for:
+      - srotg
+    labels:
+      - rotg
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: drotg
+    description: |
+      Double-precision BLAS Level 1 Givens rotation parameter generation.
+      Updates scalar float64 inputs a and b and writes float64 c and s.
+    for:
+      - drotg
+    labels:
+      - rotg
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: crotg
+    description: |
+      Single-precision complex BLAS Level 1 Givens rotation parameter generation.
+      Updates scalar complex64 input a and writes real float32 c plus complex64 s.
+    for:
+      - crotg
+    labels:
+      - rotg
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: zrotg
+    description: |
+      Double-precision complex BLAS Level 1 Givens rotation parameter generation.
+      Updates scalar complex128 input a and writes real float64 c plus complex128 s.
+    for:
+      - zrotg
+    labels:
+      - rotg
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: srotm
+    description: |
+      Single-precision BLAS Level 1 modified Givens rotation.
+      Applies param-controlled modified rotation to strided float32 vectors x and y.
+    for:
+      - srotm
+    labels:
+      - rotm
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: drotm
+    description: |
+      Double-precision BLAS Level 1 modified Givens rotation.
+      Applies param-controlled modified rotation to strided float64 vectors x and y.
+    for:
+      - drotm
+    labels:
+      - rotm
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: srotmg
+    description: |
+      Single-precision BLAS Level 1 modified Givens rotation parameter generation.
+      Updates scalar float32 d1, d2, x1 and writes the length-5 float32 param vector.
+    for:
+      - srotmg
+    labels:
+      - rotmg
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: drotmg
+    description: |
+      Double-precision BLAS Level 1 modified Givens rotation parameter generation.
+      Updates scalar float64 d1, d2, x1 and writes the length-5 float64 param vector.
+    for:
+      - drotmg
+    labels:
+      - rotmg
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
   - id: sscal
     description: |
       Single-precision BLAS Level 1 vector scaling.
@@ -528,7 +796,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: dscal
     description: |
       Double-precision BLAS Level 1 vector scaling.
@@ -540,7 +808,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: cscal
     description: |
       Single-precision complex BLAS Level 1 vector scaling.
@@ -552,7 +820,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: zscal
     description: |
       Double-precision complex BLAS Level 1 vector scaling.
@@ -564,7 +832,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: csscal
     description: |
       Single-precision complex BLAS Level 1 vector scaling by a real scalar.
@@ -576,7 +844,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: zdscal
     description: |
       Double-precision complex BLAS Level 1 vector scaling by a real scalar.
@@ -588,7 +856,7 @@ ops:
     kind:
       - BLAS
     stages:
-      - beta: '0.1'
+      - stable: '0.1'
   - id: sgemv
     description: |
       Single-precision BLAS Level 2 general matrix-vector multiplication.
@@ -597,6 +865,78 @@ ops:
       - sgemv
     labels:
       - gemv
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: sger
+    description: |
+      Single-precision BLAS Level 2 general rank-1 update.
+      Updates A in place with A = alpha * x * y^T + A for a float32 dense matrix A.
+    for:
+      - sger
+    labels:
+      - ger
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: dger
+    description: |
+      Double-precision BLAS Level 2 general rank-1 update.
+      Updates A in place with A = alpha * x * y^T + A for a float64 dense matrix A.
+    for:
+      - dger
+    labels:
+      - ger
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: cgeru
+    description: |
+      Single-precision complex BLAS Level 2 unconjugated general rank-1 update.
+      Updates A in place with A = alpha * x * y^T + A for a complex64 dense matrix A.
+    for:
+      - cgeru
+    labels:
+      - ger
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: cgerc
+    description: |
+      Single-precision complex BLAS Level 2 conjugated general rank-1 update.
+      Updates A in place with A = alpha * x * conj(y)^T + A for a complex64 dense matrix A.
+    for:
+      - cgerc
+    labels:
+      - ger
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: zgeru
+    description: |
+      Double-precision complex BLAS Level 2 unconjugated general rank-1 update.
+      Updates A in place with A = alpha * x * y^T + A for a complex128 dense matrix A.
+    for:
+      - zgeru
+    labels:
+      - ger
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: zgerc
+    description: |
+      Double-precision complex BLAS Level 2 conjugated general rank-1 update.
+      Updates A in place with A = alpha * x * conj(y)^T + A for a complex128 dense matrix A.
+    for:
+      - zgerc
+    labels:
+      - ger
     kind:
       - BLAS
     stages:
@@ -721,6 +1061,78 @@ ops:
       - BLAS
     stages:
       - stable: '0.1'
+  - id: ssbmv
+    description: |
+      Single-precision BLAS Level 2 symmetric banded matrix-vector multiplication.
+      Computes y = alpha * A * x + beta * y for a float32 symmetric banded matrix A in BLAS banded storage.
+    for:
+      - ssbmv
+    labels:
+      - sbmv
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: dsbmv
+    description: |
+      Double-precision BLAS Level 2 symmetric banded matrix-vector multiplication.
+      Computes y = alpha * A * x + beta * y for a float64 symmetric banded matrix A in BLAS banded storage.
+    for:
+      - dsbmv
+    labels:
+      - sbmv
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: chbmv
+    description: |
+      Single-precision complex BLAS Level 2 Hermitian banded matrix-vector multiplication.
+      Computes y = alpha * A * x + beta * y for a complex64 Hermitian banded matrix A in BLAS banded storage.
+    for:
+      - chbmv
+    labels:
+      - hbmv
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: zhbmv
+    description: |
+      Double-precision complex BLAS Level 2 Hermitian banded matrix-vector multiplication.
+      Computes y = alpha * A * x + beta * y for a complex128 Hermitian banded matrix A in BLAS banded storage.
+    for:
+      - zhbmv
+    labels:
+      - hbmv
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: sspmv
+    description: |
+      Single-precision BLAS Level 2 symmetric packed matrix-vector multiplication.
+      Computes y = alpha * A * x + beta * y for a float32 symmetric matrix A in BLAS packed storage.
+    for:
+      - sspmv
+    labels:
+      - spmv
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: dspmv
+    description: |
+      Double-precision BLAS Level 2 symmetric packed matrix-vector multiplication.
+      Computes y = alpha * A * x + beta * y for a float64 symmetric matrix A in BLAS packed storage.
+    for:
+      - dspmv
+    labels:
+      - spmv
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
   - id: ssymv
     description: |
       Single-precision BLAS Level 2 symmetric matrix-vector multiplication.
@@ -765,6 +1177,138 @@ ops:
       - zsymv
     labels:
       - symv
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: sspr
+    description: |
+      Single-precision BLAS Level 2 symmetric packed rank-1 update.
+      Updates a float32 symmetric matrix in BLAS packed storage with
+      AP = alpha * x * x^T + AP.
+    for:
+      - sspr
+    labels:
+      - spr
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: dspr
+    description: |
+      Double-precision BLAS Level 2 symmetric packed rank-1 update.
+      Updates a float64 symmetric matrix in BLAS packed storage with
+      AP = alpha * x * x^T + AP.
+    for:
+      - dspr
+    labels:
+      - spr
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: sspr2
+    description: |
+      Single-precision BLAS Level 2 symmetric packed rank-2 update.
+      Updates a float32 symmetric matrix in BLAS packed storage with
+      AP = alpha * x * y^T + alpha * y * x^T + AP.
+    for:
+      - sspr2
+    labels:
+      - spr2
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: dspr2
+    description: |
+      Double-precision BLAS Level 2 symmetric packed rank-2 update.
+      Updates a float64 symmetric matrix in BLAS packed storage with
+      AP = alpha * x * y^T + alpha * y * x^T + AP.
+    for:
+      - dspr2
+    labels:
+      - spr2
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: ssyr2
+    description: |
+      Single-precision BLAS Level 2 symmetric rank-2 update.
+      Updates the referenced triangle of a float32 symmetric matrix with
+      A = alpha * x * y^T + alpha * y * x^T + A.
+    for:
+      - ssyr2
+    labels:
+      - syr2
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: dsyr2
+    description: |
+      Double-precision BLAS Level 2 symmetric rank-2 update.
+      Updates the referenced triangle of a float64 symmetric matrix with
+      A = alpha * x * y^T + alpha * y * x^T + A.
+    for:
+      - dsyr2
+    labels:
+      - syr2
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  # csyr2/zsyr2 are disabled in the strict workflow: SciPy/CPU BLAS does not
+  # expose direct complex SYR2 references, so they cannot meet CPU correctness.
+  # - id: csyr2
+  #   description: |
+  #     Single-precision complex BLAS Level 2 symmetric rank-2 update.
+  #     Updates the referenced triangle of a complex64 symmetric matrix with
+  #     A = alpha * x * y^T + alpha * y * x^T + A.
+  #   for:
+  #     - csyr2
+  #   labels:
+  #     - syr2
+  #   kind:
+  #     - BLAS
+  #   stages:
+  #     - beta: '0.1'
+  # - id: zsyr2
+  #   description: |
+  #     Double-precision complex BLAS Level 2 symmetric rank-2 update.
+  #     Updates the referenced triangle of a complex128 symmetric matrix with
+  #     A = alpha * x * y^T + alpha * y * x^T + A.
+  #   for:
+  #     - zsyr2
+  #   labels:
+  #     - syr2
+  #   kind:
+  #     - BLAS
+  #   stages:
+  #     - beta: '0.1'
+  - id: cher2
+    description: |
+      Single-precision complex BLAS Level 2 Hermitian rank-2 update.
+      Updates the referenced triangle of a complex64 Hermitian matrix with
+      A = alpha * x * y^H + conj(alpha) * y * x^H + A.
+    for:
+      - cher2
+    labels:
+      - her2
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: zher2
+    description: |
+      Double-precision complex BLAS Level 2 Hermitian rank-2 update.
+      Updates the referenced triangle of a complex128 Hermitian matrix with
+      A = alpha * x * y^H + conj(alpha) * y * x^H + A.
+    for:
+      - zher2
+    labels:
+      - her2
     kind:
       - BLAS
     stages:
@@ -945,6 +1489,286 @@ ops:
       - stbsv
     labels:
       - tbsv
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: chpmv
+    description: |
+      Single-precision complex BLAS Level 2 Hermitian packed matrix-vector multiplication.
+      Computes y = alpha * A * x + beta * y for a complex64 Hermitian matrix A in BLAS packed storage.
+    for:
+      - chpmv
+    labels:
+      - hpmv
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: zhpmv
+    description: |
+      Double-precision complex BLAS Level 2 Hermitian packed matrix-vector multiplication.
+      Computes y = alpha * A * x + beta * y for a complex128 Hermitian matrix A in BLAS packed storage.
+    for:
+      - zhpmv
+    labels:
+      - hpmv
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: chpr
+    description: |
+      Single-precision complex BLAS Level 2 Hermitian packed rank-1 update.
+      Updates a complex64 Hermitian matrix in packed storage with
+      AP = alpha * x * x^H + AP, where alpha is real.
+    for:
+      - chpr
+    labels:
+      - hpr
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: zhpr
+    description: |
+      Double-precision complex BLAS Level 2 Hermitian packed rank-1 update.
+      Updates a complex128 Hermitian matrix in packed storage with
+      AP = alpha * x * x^H + AP, where alpha is real.
+    for:
+      - zhpr
+    labels:
+      - hpr
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: chpr2
+    description: |
+      Single-precision complex BLAS Level 2 Hermitian packed rank-2 update.
+      Updates a complex64 Hermitian matrix in packed storage with
+      AP = alpha * x * y^H + conj(alpha) * y * x^H + AP.
+    for:
+      - chpr2
+    labels:
+      - hpr2
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: zhpr2
+    description: |
+      Double-precision complex BLAS Level 2 Hermitian packed rank-2 update.
+      Updates a complex128 Hermitian matrix in packed storage with
+      AP = alpha * x * y^H + conj(alpha) * y * x^H + AP.
+    for:
+      - zhpr2
+    labels:
+      - hpr2
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: strsv
+    description: |
+      Single-precision BLAS Level 2 triangular solve.
+      Solves op(A) * x = b in place for a float32 triangular matrix A.
+    for:
+      - strsv
+    labels:
+      - trsv
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: dtrsv
+    description: |
+      Double-precision BLAS Level 2 triangular solve.
+      Solves op(A) * x = b in place for a float64 triangular matrix A.
+    for:
+      - dtrsv
+    labels:
+      - trsv
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: ctrsv
+    description: |
+      Single-precision complex BLAS Level 2 triangular solve.
+      Solves op(A) * x = b in place for a complex64 triangular matrix A.
+    for:
+      - ctrsv
+    labels:
+      - trsv
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: ztrsv
+    description: |
+      Double-precision complex BLAS Level 2 triangular solve.
+      Solves op(A) * x = b in place for a complex128 triangular matrix A.
+    for:
+      - ztrsv
+    labels:
+      - trsv
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: stpsv
+    description: |
+      Single-precision BLAS Level 2 tpsv operator.
+      Generated FlagBLAS wrapper for the tpsv family.
+    for:
+      - stpsv
+    labels:
+      - tpsv
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: dtpsv
+    description: |
+      Double-precision BLAS Level 2 tpsv operator.
+      Generated FlagBLAS wrapper for the tpsv family.
+    for:
+      - dtpsv
+    labels:
+      - tpsv
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: ctpsv
+    description: |
+      Single-precision complex BLAS Level 2 tpsv operator.
+      Generated FlagBLAS wrapper for the tpsv family.
+    for:
+      - ctpsv
+    labels:
+      - tpsv
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: ztpsv
+    description: |
+      Double-precision complex BLAS Level 2 tpsv operator.
+      Generated FlagBLAS wrapper for the tpsv family.
+    for:
+      - ztpsv
+    labels:
+      - tpsv
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: dtbsv
+    description: |
+      Double-precision BLAS Level 2 tbsv operator.
+      Generated FlagBLAS wrapper for the tbsv family.
+    for:
+      - dtbsv
+    labels:
+      - tbsv
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: ctbsv
+    description: |
+      Single-precision complex BLAS Level 2 tbsv operator.
+      Generated FlagBLAS wrapper for the tbsv family.
+    for:
+      - ctbsv
+    labels:
+      - tbsv
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: ztbsv
+    description: |
+      Double-precision complex BLAS Level 2 tbsv operator.
+      Generated FlagBLAS wrapper for the tbsv family.
+    for:
+      - ztbsv
+    labels:
+      - tbsv
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: ssyr
+    description: |
+      Single-precision BLAS Level 2 syr operator.
+      Generated FlagBLAS wrapper for the syr family.
+    for:
+      - ssyr
+    labels:
+      - syr
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: dsyr
+    description: |
+      Double-precision BLAS Level 2 syr operator.
+      Generated FlagBLAS wrapper for the syr family.
+    for:
+      - dsyr
+    labels:
+      - syr
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: csyr
+    description: |
+      Single-precision complex BLAS Level 2 syr operator.
+      Generated FlagBLAS wrapper for the syr family.
+    for:
+      - csyr
+    labels:
+      - syr
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: zsyr
+    description: |
+      Double-precision complex BLAS Level 2 syr operator.
+      Generated FlagBLAS wrapper for the syr family.
+    for:
+      - zsyr
+    labels:
+      - syr
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: cher
+    description: |
+      Single-precision complex BLAS Level 2 her operator.
+      Generated FlagBLAS wrapper for the her family.
+    for:
+      - cher
+    labels:
+      - her
+    kind:
+      - BLAS
+    stages:
+      - stable: '0.1'
+  - id: zher
+    description: |
+      Double-precision complex BLAS Level 2 her operator.
+      Generated FlagBLAS wrapper for the her family.
+    for:
+      - zher
+    labels:
+      - her
     kind:
       - BLAS
     stages:

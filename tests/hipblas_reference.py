@@ -1,0 +1,101 @@
+import atexit
+import ctypes
+import ctypes.util
+from threading import RLock
+
+import torch
+
+HIPBLAS_POINTER_MODE_HOST = 0
+
+
+class HipComplex(ctypes.Structure):
+    _fields_ = [("real", ctypes.c_float), ("imag", ctypes.c_float)]
+
+
+class HipDoubleComplex(ctypes.Structure):
+    _fields_ = [("real", ctypes.c_double), ("imag", ctypes.c_double)]
+
+
+_LIBRARY = None
+_HANDLES = {}
+_LOCK = RLock()
+
+
+def check_hipblas_status(status, operation):
+    if status != 0:
+        raise RuntimeError(f"{operation} failed with hipBLAS status {status}")
+
+
+def _configure_library(library):
+    library.hipblasCreate.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
+    library.hipblasCreate.restype = ctypes.c_int
+    library.hipblasDestroy.argtypes = [ctypes.c_void_p]
+    library.hipblasDestroy.restype = ctypes.c_int
+    library.hipblasSetStream.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    library.hipblasSetStream.restype = ctypes.c_int
+    library.hipblasSetPointerMode.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    library.hipblasSetPointerMode.restype = ctypes.c_int
+
+
+def get_hipblas_library():
+    global _LIBRARY
+    if _LIBRARY is None:
+        with _LOCK:
+            if _LIBRARY is None:
+                library_name = ctypes.util.find_library("hipblas")
+                if library_name is None:
+                    raise RuntimeError("Unable to find the hipBLAS shared library")
+                library = ctypes.CDLL(library_name)
+                _configure_library(library)
+                _LIBRARY = library
+    return _LIBRARY
+
+
+def get_hipblas_handle(device_index):
+    handle = _HANDLES.get(device_index)
+    if handle is not None:
+        return handle
+
+    with _LOCK:
+        handle = _HANDLES.get(device_index)
+        if handle is None:
+            library = get_hipblas_library()
+            with torch.cuda.device(device_index):
+                handle = ctypes.c_void_p()
+                check_hipblas_status(
+                    library.hipblasCreate(ctypes.byref(handle)), "hipblasCreate"
+                )
+                check_hipblas_status(
+                    library.hipblasSetPointerMode(handle, HIPBLAS_POINTER_MODE_HOST),
+                    "hipblasSetPointerMode",
+                )
+            _HANDLES[device_index] = handle
+    return handle
+
+
+def _destroy_handles():
+    if _LIBRARY is None:
+        return
+    for handle in tuple(_HANDLES.values()):
+        try:
+            _LIBRARY.hipblasDestroy(handle)
+        except Exception:
+            pass
+    _HANDLES.clear()
+
+
+atexit.register(_destroy_handles)
+
+
+def get_hipblas_context(tensor):
+    device_index = tensor.device.index
+    if device_index is None:
+        device_index = torch.cuda.current_device()
+    library = get_hipblas_library()
+    handle = get_hipblas_handle(device_index)
+    stream = torch.cuda.current_stream(tensor.device).cuda_stream
+    check_hipblas_status(
+        library.hipblasSetStream(handle, ctypes.c_void_p(stream)),
+        "hipblasSetStream",
+    )
+    return library, handle

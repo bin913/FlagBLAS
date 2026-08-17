@@ -15,13 +15,22 @@
 import ctypes
 import ctypes.util
 
-import cupy as cp
 import pytest
 import torch
-from cupy_backends.cuda.libs import cublas
 from scipy.linalg import blas as cpu_blas
 
 import flag_blas
+
+if flag_blas.vendor_name == "hygon":
+    from .hipblas_reference import (
+        HipComplex,
+        HipDoubleComplex,
+        check_hipblas_status,
+        get_hipblas_context,
+    )
+elif flag_blas.vendor_name != "ascend":
+    import cupy as cp
+    from cupy_backends.cuda.libs import cublas
 from flag_blas.ops import CUBLAS_FILL_MODE_LOWER, CUBLAS_FILL_MODE_UPPER
 
 from .accuracy_utils import blas_assert_close, to_cpu_blas_tensor, to_reference
@@ -42,7 +51,7 @@ def load_cublas():
     raise RuntimeError("Unable to find libcublas.so on this system")
 
 
-_cublas = load_cublas()
+_cublas = None if flag_blas.vendor_name in {"ascend", "hygon"} else load_cublas()
 
 
 class cuComplex(ctypes.Structure):
@@ -51,6 +60,62 @@ class cuComplex(ctypes.Structure):
 
 class cuDoubleComplex(ctypes.Structure):
     _fields_ = [("x", ctypes.c_double), ("y", ctypes.c_double)]
+
+
+def hipblas_hbmv_reference(uplo, n, k, alpha, A, lda, x, incx, beta, y, incy):
+    if n == 0:
+        return y
+
+    alpha = alpha.item() if isinstance(alpha, torch.Tensor) else complex(alpha)
+    beta = beta.item() if isinstance(beta, torch.Tensor) else complex(beta)
+
+    if A.dtype == torch.complex64:
+        symbol = "hipblasChbmv_v2"
+        alpha_value = HipComplex(alpha.real, alpha.imag)
+        beta_value = HipComplex(beta.real, beta.imag)
+    elif A.dtype == torch.complex128:
+        symbol = "hipblasZhbmv_v2"
+        alpha_value = HipDoubleComplex(alpha.real, alpha.imag)
+        beta_value = HipDoubleComplex(beta.real, beta.imag)
+    else:
+        raise ValueError(f"Unsupported dtype for hipBLAS HBMV: {A.dtype}")
+
+    hip_uplo = 121 if uplo == CUBLAS_FILL_MODE_UPPER else 122
+    library, handle = get_hipblas_context(A)
+    function = getattr(library, symbol)
+    function.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_int,
+    ]
+    function.restype = ctypes.c_int
+    check_hipblas_status(
+        function(
+            handle,
+            hip_uplo,
+            n,
+            k,
+            ctypes.byref(alpha_value),
+            ctypes.c_void_p(A.data_ptr()),
+            lda,
+            ctypes.c_void_p(x.data_ptr()),
+            incx,
+            ctypes.byref(beta_value),
+            ctypes.c_void_p(y.data_ptr()),
+            incy,
+        ),
+        symbol,
+    )
+    return y
 
 
 def cublas_hbmv_reference(uplo, n, k, alpha, A, lda, x, incx, beta, y, incy):
@@ -121,7 +186,10 @@ def hbmv_reference(uplo, n, k, alpha, A, lda, x, incx, beta, y, incy):
         return cpu_hbmv_reference(uplo, n, k, alpha, A, lda, x, incx, beta, y, incy)
 
     ref_y = y.clone()
-    cublas_hbmv_reference(uplo, n, k, alpha, A, lda, x, incx, beta, ref_y, incy)
+    if flag_blas.vendor_name == "hygon":
+        hipblas_hbmv_reference(uplo, n, k, alpha, A, lda, x, incx, beta, ref_y, incy)
+    else:
+        cublas_hbmv_reference(uplo, n, k, alpha, A, lda, x, incx, beta, ref_y, incy)
     return ref_y
 
 
@@ -153,8 +221,20 @@ FILL_MODES = [CUBLAS_FILL_MODE_UPPER, CUBLAS_FILL_MODE_LOWER]
 STRIDES = [(1, 1), (2, 1), (1, 2), (2, 2)]
 
 
+def hbmv_randn(*shape, dtype, device):
+    if flag_blas.vendor_name == "ascend" and dtype == torch.complex64:
+        normalized = (
+            tuple(shape[0])
+            if len(shape) == 1 and isinstance(shape[0], (tuple, torch.Size))
+            else shape
+        )
+        values = torch.randn((*normalized, 2), dtype=torch.float32, device=device)
+        return torch.view_as_complex(values)
+    return torch.randn(*shape, dtype=dtype, device=device)
+
+
 def make_hermitian_banded(n, k, lda, uplo, dtype, device):
-    A = torch.randn((n, lda), dtype=dtype, device=device)
+    A = hbmv_randn((n, lda), dtype=dtype, device=device)
     diag_col = k if uplo == CUBLAS_FILL_MODE_UPPER else 0
     torch.view_as_real(A)[:, diag_col, 1].zero_()
     return A
@@ -184,10 +264,10 @@ def test_accuracy_chbmv(n, k, uplo, beta):
     lda = k + 1 + 2
 
     A = make_hermitian_banded(n, k, lda, uplo, dtype, flag_blas.device)
-    x = torch.randn(n, dtype=dtype, device=flag_blas.device)
-    y = torch.randn(n, dtype=dtype, device=flag_blas.device)
+    x = hbmv_randn(n, dtype=dtype, device=flag_blas.device)
+    y = hbmv_randn(n, dtype=dtype, device=flag_blas.device)
     ref_y = hbmv_reference(uplo, n, k, alpha, A, lda, x, 1, beta, y, 1)
-    flag_blas.ops.chbmv(uplo, n, k, alpha, A, lda, x, 1, beta, y, 1)
+    flag_blas.chbmv(uplo, n, k, alpha, A, lda, x, 1, beta, y, 1)
 
     blas_assert_close(y, ref_y, dtype, reduce_dim=_band_reduce_dim(n, k))
 
@@ -203,10 +283,10 @@ def test_accuracy_chbmv_stride(n, k, uplo, incx, incy):
     lda = k + 1
 
     A = make_hermitian_banded(n, k, lda, uplo, dtype, flag_blas.device)
-    x = torch.randn(1 + (n - 1) * incx, dtype=dtype, device=flag_blas.device)
-    y = torch.randn(1 + (n - 1) * incy, dtype=dtype, device=flag_blas.device)
+    x = hbmv_randn(1 + (n - 1) * incx, dtype=dtype, device=flag_blas.device)
+    y = hbmv_randn(1 + (n - 1) * incy, dtype=dtype, device=flag_blas.device)
     ref_y = hbmv_reference(uplo, n, k, alpha, A, lda, x, incx, beta, y, incy)
-    flag_blas.ops.chbmv(uplo, n, k, alpha, A, lda, x, incx, beta, y, incy)
+    flag_blas.chbmv(uplo, n, k, alpha, A, lda, x, incx, beta, y, incy)
 
     blas_assert_close(y, ref_y, dtype, reduce_dim=_band_reduce_dim(n, k))
 
@@ -219,16 +299,14 @@ def test_chbmv_alpha_zero():
     A = make_hermitian_banded(
         n, k, lda, CUBLAS_FILL_MODE_UPPER, dtype, flag_blas.device
     )
-    x = torch.randn(n, dtype=dtype, device=flag_blas.device)
-    y = torch.randn(n, dtype=dtype, device=flag_blas.device)
+    x = hbmv_randn(n, dtype=dtype, device=flag_blas.device)
+    y = hbmv_randn(n, dtype=dtype, device=flag_blas.device)
     y_orig, y_ref = y.clone(), y.clone()
 
     y_ref = hbmv_reference(
         CUBLAS_FILL_MODE_UPPER, n, k, 0.0j, A, lda, x, 1, 2.0 + 1.0j, y_ref, 1
     )
-    flag_blas.ops.chbmv(
-        CUBLAS_FILL_MODE_UPPER, n, k, 0.0j, A, lda, x, 1, 2.0 + 1.0j, y, 1
-    )
+    flag_blas.chbmv(CUBLAS_FILL_MODE_UPPER, n, k, 0.0j, A, lda, x, 1, 2.0 + 1.0j, y, 1)
     blas_assert_close(y, y_ref, dtype)
     blas_assert_close(y, to_reference(y_orig * (2.0 + 1.0j)), dtype)
 
@@ -241,7 +319,7 @@ def test_chbmv_beta_zero():
     A = make_hermitian_banded(
         n, k, lda, CUBLAS_FILL_MODE_LOWER, dtype, flag_blas.device
     )
-    x = torch.randn(n, dtype=dtype, device=flag_blas.device)
+    x = hbmv_randn(n, dtype=dtype, device=flag_blas.device)
 
     y_nan = torch.full(
         (n,), complex(float("nan"), float("nan")), dtype=dtype, device=flag_blas.device
@@ -250,10 +328,10 @@ def test_chbmv_beta_zero():
     ref_y_nan = hbmv_reference(
         CUBLAS_FILL_MODE_LOWER, n, k, 1.0 + 0.5j, A, lda, x, 1, 0.0j, y_nan, 1
     )
-    flag_blas.ops.chbmv(
+    flag_blas.chbmv(
         CUBLAS_FILL_MODE_LOWER, n, k, 1.0 + 0.5j, A, lda, x, 1, 0.0j, y_nan, 1
     )
-    flag_blas.ops.chbmv(
+    flag_blas.chbmv(
         CUBLAS_FILL_MODE_LOWER, n, k, 1.0 + 0.5j, A, lda, x, 1, 0.0j, y_zero, 1
     )
     blas_assert_close(y_nan, ref_y_nan, dtype, reduce_dim=_band_reduce_dim(n, k))
@@ -274,10 +352,10 @@ def test_accuracy_zhbmv(n, k, uplo, beta):
     lda = k + 1 + 2
 
     A = make_hermitian_banded(n, k, lda, uplo, dtype, flag_blas.device)
-    x = torch.randn(n, dtype=dtype, device=flag_blas.device)
-    y = torch.randn(n, dtype=dtype, device=flag_blas.device)
+    x = hbmv_randn(n, dtype=dtype, device=flag_blas.device)
+    y = hbmv_randn(n, dtype=dtype, device=flag_blas.device)
     ref_y = hbmv_reference(uplo, n, k, alpha, A, lda, x, 1, beta, y, 1)
-    flag_blas.ops.zhbmv(uplo, n, k, alpha, A, lda, x, 1, beta, y, 1)
+    flag_blas.zhbmv(uplo, n, k, alpha, A, lda, x, 1, beta, y, 1)
 
     blas_assert_close(y, ref_y, dtype, reduce_dim=_band_reduce_dim(n, k))
 
@@ -294,10 +372,10 @@ def test_accuracy_zhbmv_stride(n, k, uplo, incx, incy):
     lda = k + 1
 
     A = make_hermitian_banded(n, k, lda, uplo, dtype, flag_blas.device)
-    x = torch.randn(1 + (n - 1) * incx, dtype=dtype, device=flag_blas.device)
-    y = torch.randn(1 + (n - 1) * incy, dtype=dtype, device=flag_blas.device)
+    x = hbmv_randn(1 + (n - 1) * incx, dtype=dtype, device=flag_blas.device)
+    y = hbmv_randn(1 + (n - 1) * incy, dtype=dtype, device=flag_blas.device)
     ref_y = hbmv_reference(uplo, n, k, alpha, A, lda, x, incx, beta, y, incy)
-    flag_blas.ops.zhbmv(uplo, n, k, alpha, A, lda, x, incx, beta, y, incy)
+    flag_blas.zhbmv(uplo, n, k, alpha, A, lda, x, incx, beta, y, incy)
 
     blas_assert_close(y, ref_y, dtype, reduce_dim=_band_reduce_dim(n, k))
 
@@ -311,16 +389,14 @@ def test_zhbmv_alpha_zero():
     A = make_hermitian_banded(
         n, k, lda, CUBLAS_FILL_MODE_UPPER, dtype, flag_blas.device
     )
-    x = torch.randn(n, dtype=dtype, device=flag_blas.device)
-    y = torch.randn(n, dtype=dtype, device=flag_blas.device)
+    x = hbmv_randn(n, dtype=dtype, device=flag_blas.device)
+    y = hbmv_randn(n, dtype=dtype, device=flag_blas.device)
     y_orig, y_ref = y.clone(), y.clone()
 
     y_ref = hbmv_reference(
         CUBLAS_FILL_MODE_UPPER, n, k, 0.0j, A, lda, x, 1, 2.0 + 1.0j, y_ref, 1
     )
-    flag_blas.ops.zhbmv(
-        CUBLAS_FILL_MODE_UPPER, n, k, 0.0j, A, lda, x, 1, 2.0 + 1.0j, y, 1
-    )
+    flag_blas.zhbmv(CUBLAS_FILL_MODE_UPPER, n, k, 0.0j, A, lda, x, 1, 2.0 + 1.0j, y, 1)
     blas_assert_close(y, y_ref, dtype)
     blas_assert_close(y, to_reference(y_orig * (2.0 + 1.0j)), dtype)
 
@@ -334,7 +410,7 @@ def test_zhbmv_beta_zero():
     A = make_hermitian_banded(
         n, k, lda, CUBLAS_FILL_MODE_LOWER, dtype, flag_blas.device
     )
-    x = torch.randn(n, dtype=dtype, device=flag_blas.device)
+    x = hbmv_randn(n, dtype=dtype, device=flag_blas.device)
 
     y_nan = torch.full(
         (n,), complex(float("nan"), float("nan")), dtype=dtype, device=flag_blas.device
@@ -343,10 +419,10 @@ def test_zhbmv_beta_zero():
     ref_y_nan = hbmv_reference(
         CUBLAS_FILL_MODE_LOWER, n, k, 1.0 + 0.5j, A, lda, x, 1, 0.0j, y_nan, 1
     )
-    flag_blas.ops.zhbmv(
+    flag_blas.zhbmv(
         CUBLAS_FILL_MODE_LOWER, n, k, 1.0 + 0.5j, A, lda, x, 1, 0.0j, y_nan, 1
     )
-    flag_blas.ops.zhbmv(
+    flag_blas.zhbmv(
         CUBLAS_FILL_MODE_LOWER, n, k, 1.0 + 0.5j, A, lda, x, 1, 0.0j, y_zero, 1
     )
     blas_assert_close(y_nan, ref_y_nan, dtype, reduce_dim=_band_reduce_dim(n, k))
@@ -358,8 +434,8 @@ def test_zhbmv_beta_zero():
 @pytest.mark.parametrize(
     "dtype, op, alpha, beta",
     [
-        (torch.complex64, flag_blas.ops.chbmv, 1.5 + 0.5j, 0.5 + 0.25j),
-        (torch.complex128, flag_blas.ops.zhbmv, 1.5 + 0.5j, 0.5 + 0.25j),
+        (torch.complex64, flag_blas.chbmv, 1.5 + 0.5j, 0.5 + 0.25j),
+        (torch.complex128, flag_blas.zhbmv, 1.5 + 0.5j, 0.5 + 0.25j),
     ],
 )
 def test_hbmv_n_zero(dtype, op, alpha, beta):

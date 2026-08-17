@@ -12,16 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import ctypes
-import ctypes.util
-
-import cupy as cp
 import pytest
 import torch
-from cupy_backends.cuda.libs import cublas
 from scipy.linalg import blas as cpu_blas
 
 import flag_blas
+
+if flag_blas.vendor_name != "ascend":
+    import ctypes
+    import ctypes.util
+
+    import cupy as cp
+    from cupy_backends.cuda.libs import cublas
 from flag_blas.ops import CUBLAS_FILL_MODE_LOWER, CUBLAS_FILL_MODE_UPPER
 
 from .accuracy_utils import blas_assert_close, to_cpu_blas_tensor, to_reference
@@ -42,7 +44,7 @@ def load_cublas():
     raise RuntimeError("Unable to find libcublas.so on this system")
 
 
-_cublas = load_cublas()
+_cublas = None if flag_blas.vendor_name == "ascend" else load_cublas()
 
 
 def cublas_sbmv_reference(uplo, n, k, alpha, A, lda, x, incx, beta, y, incy):
@@ -176,7 +178,7 @@ def test_accuracy_ssbmv(n, k, uplo, beta):
     x = torch.randn(n, dtype=dtype, device=flag_blas.device)
     y = torch.randn(n, dtype=dtype, device=flag_blas.device)
     ref_y = sbmv_reference(uplo, n, k, alpha, A, lda, x, 1, beta, y, 1)
-    flag_blas.ops.ssbmv(uplo, n, k, alpha, A, lda, x, 1, beta, y, 1)
+    flag_blas.ssbmv(uplo, n, k, alpha, A, lda, x, 1, beta, y, 1)
 
     blas_assert_close(y, ref_y, dtype, reduce_dim=_band_reduce_dim(n, k))
 
@@ -195,7 +197,7 @@ def test_accuracy_ssbmv_stride(n, k, uplo, incx, incy):
     x = torch.randn(1 + (n - 1) * incx, dtype=dtype, device=flag_blas.device)
     y = torch.randn(1 + (n - 1) * incy, dtype=dtype, device=flag_blas.device)
     ref_y = sbmv_reference(uplo, n, k, alpha, A, lda, x, incx, beta, y, incy)
-    flag_blas.ops.ssbmv(uplo, n, k, alpha, A, lda, x, incx, beta, y, incy)
+    flag_blas.ssbmv(uplo, n, k, alpha, A, lda, x, incx, beta, y, incy)
 
     blas_assert_close(y, ref_y, dtype, reduce_dim=_band_reduce_dim(n, k))
 
@@ -215,7 +217,7 @@ def test_ssbmv_alpha_zero():
     y_ref = sbmv_reference(
         CUBLAS_FILL_MODE_UPPER, n, k, 0.0, A, lda, x, 1, 2.0, y_ref, 1
     )
-    flag_blas.ops.ssbmv(CUBLAS_FILL_MODE_UPPER, n, k, 0.0, A, lda, x, 1, 2.0, y, 1)
+    flag_blas.ssbmv(CUBLAS_FILL_MODE_UPPER, n, k, 0.0, A, lda, x, 1, 2.0, y, 1)
     blas_assert_close(y, y_ref, dtype)
     blas_assert_close(y, to_reference(y_orig * 2.0), dtype)
 
@@ -235,8 +237,8 @@ def test_ssbmv_beta_zero():
     ref_y_nan = sbmv_reference(
         CUBLAS_FILL_MODE_LOWER, n, k, 1.0, A, lda, x, 1, 0.0, y_nan, 1
     )
-    flag_blas.ops.ssbmv(CUBLAS_FILL_MODE_LOWER, n, k, 1.0, A, lda, x, 1, 0.0, y_nan, 1)
-    flag_blas.ops.ssbmv(CUBLAS_FILL_MODE_LOWER, n, k, 1.0, A, lda, x, 1, 0.0, y_zero, 1)
+    flag_blas.ssbmv(CUBLAS_FILL_MODE_LOWER, n, k, 1.0, A, lda, x, 1, 0.0, y_nan, 1)
+    flag_blas.ssbmv(CUBLAS_FILL_MODE_LOWER, n, k, 1.0, A, lda, x, 1, 0.0, y_zero, 1)
     blas_assert_close(y_nan, ref_y_nan, dtype, reduce_dim=_band_reduce_dim(n, k))
     blas_assert_close(
         y_nan, to_reference(y_zero), dtype, reduce_dim=_band_reduce_dim(n, k)
@@ -258,7 +260,7 @@ def test_accuracy_dsbmv(n, k, uplo, beta):
     x = torch.randn(n, dtype=dtype, device=flag_blas.device)
     y = torch.randn(n, dtype=dtype, device=flag_blas.device)
     ref_y = sbmv_reference(uplo, n, k, alpha, A, lda, x, 1, beta, y, 1)
-    flag_blas.ops.dsbmv(uplo, n, k, alpha, A, lda, x, 1, beta, y, 1)
+    flag_blas.dsbmv(uplo, n, k, alpha, A, lda, x, 1, beta, y, 1)
 
     blas_assert_close(y, ref_y, dtype, reduce_dim=_band_reduce_dim(n, k))
 
@@ -278,7 +280,7 @@ def test_accuracy_dsbmv_stride(n, k, uplo, incx, incy):
     x = torch.randn(1 + (n - 1) * incx, dtype=dtype, device=flag_blas.device)
     y = torch.randn(1 + (n - 1) * incy, dtype=dtype, device=flag_blas.device)
     ref_y = sbmv_reference(uplo, n, k, alpha, A, lda, x, incx, beta, y, incy)
-    flag_blas.ops.dsbmv(uplo, n, k, alpha, A, lda, x, incx, beta, y, incy)
+    flag_blas.dsbmv(uplo, n, k, alpha, A, lda, x, incx, beta, y, incy)
 
     blas_assert_close(y, ref_y, dtype, reduce_dim=_band_reduce_dim(n, k))
 
@@ -299,7 +301,7 @@ def test_dsbmv_alpha_zero():
     y_ref = sbmv_reference(
         CUBLAS_FILL_MODE_UPPER, n, k, 0.0, A, lda, x, 1, 2.0, y_ref, 1
     )
-    flag_blas.ops.dsbmv(CUBLAS_FILL_MODE_UPPER, n, k, 0.0, A, lda, x, 1, 2.0, y, 1)
+    flag_blas.dsbmv(CUBLAS_FILL_MODE_UPPER, n, k, 0.0, A, lda, x, 1, 2.0, y, 1)
     blas_assert_close(y, y_ref, dtype)
     blas_assert_close(y, to_reference(y_orig * 2.0), dtype)
 
@@ -320,8 +322,8 @@ def test_dsbmv_beta_zero():
     ref_y_nan = sbmv_reference(
         CUBLAS_FILL_MODE_LOWER, n, k, 1.0, A, lda, x, 1, 0.0, y_nan, 1
     )
-    flag_blas.ops.dsbmv(CUBLAS_FILL_MODE_LOWER, n, k, 1.0, A, lda, x, 1, 0.0, y_nan, 1)
-    flag_blas.ops.dsbmv(CUBLAS_FILL_MODE_LOWER, n, k, 1.0, A, lda, x, 1, 0.0, y_zero, 1)
+    flag_blas.dsbmv(CUBLAS_FILL_MODE_LOWER, n, k, 1.0, A, lda, x, 1, 0.0, y_nan, 1)
+    flag_blas.dsbmv(CUBLAS_FILL_MODE_LOWER, n, k, 1.0, A, lda, x, 1, 0.0, y_zero, 1)
     blas_assert_close(y_nan, ref_y_nan, dtype, reduce_dim=_band_reduce_dim(n, k))
     blas_assert_close(
         y_nan, to_reference(y_zero), dtype, reduce_dim=_band_reduce_dim(n, k)
@@ -331,8 +333,8 @@ def test_dsbmv_beta_zero():
 @pytest.mark.parametrize(
     "dtype, op, alpha, beta",
     [
-        (torch.float32, flag_blas.ops.ssbmv, 1.5, 0.5),
-        (torch.float64, flag_blas.ops.dsbmv, 1.5, 0.5),
+        (torch.float32, flag_blas.ssbmv, 1.5, 0.5),
+        (torch.float64, flag_blas.dsbmv, 1.5, 0.5),
     ],
 )
 def test_sbmv_n_zero(dtype, op, alpha, beta):

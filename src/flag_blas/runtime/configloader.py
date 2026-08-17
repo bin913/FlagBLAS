@@ -13,12 +13,22 @@
 # limitations under the License.
 
 import copy
+import inspect
 import warnings
 
 import triton
 
 from . import backend
 from .backend.device import DeviceDetector
+
+_TRITON_CONFIG_PARAMETERS = inspect.signature(triton.Config).parameters
+_TRITON_CONFIG_SUPPORTS_NUM_LDMATRIXES = (
+    "num_ldmatrixes" in _TRITON_CONFIG_PARAMETERS
+    or any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in _TRITON_CONFIG_PARAMETERS.values()
+    )
+)
 
 
 class ConfigLoader(object):
@@ -214,7 +224,10 @@ class ConfigLoader(object):
                 if default_param in single_config:
                     current_config[default_param] = single_config[default_param]
 
-            if self.device.vendor_name in ["hygon"]:
+            if (
+                self.device.vendor_name in ["hygon"]
+                and _TRITON_CONFIG_SUPPORTS_NUM_LDMATRIXES
+            ):
                 configs.append(
                     triton.Config(
                         single_config["META"],
