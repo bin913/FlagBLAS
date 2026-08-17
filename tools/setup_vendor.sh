@@ -67,14 +67,21 @@ case $VENDOR in
     ;;
 
   hygon)
-    # Install PyTorch for Hygon DCU (ROCm/HIP)
+    # Install PyTorch for Hygon DCU (ROCm/HIP).
+    # The flagos-pypi-hygon index only hosts vendor wheels, so add a general
+    # PyPI mirror (same one FlagGems uses) to resolve torch's transitive deps.
+    UV_INDEX_URL="https://resource.flagos.net/repository/flagos-pypi-hygon/simple"
+    UV_EXTRA_INDEX_URL="https://mirrors.aliyun.com/pypi/simple"
+
     uv pip install torch==2.9.0+das.opt1.dtk2604 \
-        --index-url https://resource.flagos.net/repository/flagos-pypi-hygon/simple
+        --index-url ${UV_INDEX_URL} \
+        --extra-index-url ${UV_EXTRA_INDEX_URL}
 
     # Install FlagTree compiler for Hygon DCU
     uv pip uninstall triton || true
     uv pip install flagtree==0.5.1+hcu3.1 \
-        --index-url https://resource.flagos.net/repository/flagos-pypi-hygon/simple
+        --index-url ${UV_INDEX_URL} \
+        --extra-index-url ${UV_EXTRA_INDEX_URL}
 
     # Install FlagBLAS in editable mode
     uv pip install -e .

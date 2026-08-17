@@ -55,47 +55,43 @@ printf "Checking vendor ... ${VENDOR} $GREEN[OK]$NC\n"
 # Source environment setup
 source tools/set-env.sh "$VENDOR"
 
-printf "Detecting pyenv ... "
-pyenv_version=$(pyenv --version 2>/dev/null | awk '{print $NF}')
-if [ "$?" != 0 ]; then
-  printf "NOT FOUND $GREEN[OK]$NC\n"
-else
-  printf "${pyenv_version} $GREEN[OK]$NC\n"
+# Detect or install uv (FlagGems-style: standalone binary, no pip required)
+UV_VERSION="0.11.22"
+UV_MIRROR="https://resource.flagos.net/repository/flagos-filestore/utils"
 
-  if [ x"$PYENV_ROOT" == x ]; then
-    export PYENV_ROOT="$HOME/.pyenv"
-    export PATH="$PYENV_ROOT/bin:$PATH"
-    eval "$(pyenv init - bash)"
-  fi
+printf "Checking uv ... "
+export PATH="${HOME}/.local/bin:${PATH}"
+if command -v uv &>/dev/null; then
+  printf "uv $(uv --version | cut -d ' ' -f 2) $GREEN[OK]$NC\n"
+else
+  printf "${RED}NOT FOUND${NC}, installing ... "
+  ARCH=$(uname -m)
+  mkdir -p "$HOME/.local/bin"
+  curl -sSf "${UV_MIRROR}/uv-${ARCH}-${UV_VERSION}-linux-gnu.tar.gz" \
+    | tar xz -C "$HOME/.local/bin" 2>/dev/null \
+    || curl -LsSf https://astral.sh/uv/install.sh | sh
+  command -v uv &>/dev/null || { printf "$RED[FAILED]$NC\n"; exit 1; }
+  printf "$GREEN[OK]$NC\n"
 fi
+# Persist PATH for subsequent GitHub Actions steps
+[ -n "${GITHUB_PATH:-}" ] && echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-# Validate Python version
-printf "Checking Python version ... "
-python_version=$(python --version 2>/dev/null | awk '{print $NF}')
+# Provision the exact Python version via uv managed builds (FlagGems-style),
+# so setup does not depend on any preinstalled system Python / pyenv.
 expected_version=${PYTHON_SUPPORTED[$VENDOR]}
-if [[ "$python_version" == *"$expected_version"* ]]; then
-  printf "${python_version} $GREEN[OK]$NC\n"
-else
-  printf "${python_version}, expecting '${expected_version}.*' $RED[FAILED]$NC\n"
+printf "Installing Python ${expected_version} ... "
+uv python install "${expected_version}" --python-preference only-managed -q
+if [ "$?" != 0 ]; then
+  printf "$RED[FAILED]$NC\n"
   exit 1
 fi
-
-# Validate uv install
-printf "Checking uv ... "
-uv_version=$(uv --version 2>/dev/null | cut -d ' ' -f 2)
-if [ -n "$uv_version" ];  then
-  printf "uv ${uv_version} ${GREEN}[OK]${NC}\n"
-else
-  printf "${RED}NOT FOUND${NC}\n"
-  printf "Installing/upgrading pip and uv ... "
-  pip install uv || exit 1
-fi
+printf "$GREEN[OK]$NC\n"
 
 # Start installation
 printf "Installing FlagBLAS for ${VENDOR}\n"
 
 printf "Creating virtual environment ... "
-uv venv -q -c
+uv venv .venv --python "${expected_version}" --python-preference only-managed -q -c
 if [ "$?" != 0 ]; then
   printf "$RED[FAILED]$NC\n"
   exit 1
@@ -103,6 +99,8 @@ else
   printf "$GREEN[OK]$NC\n"
   source .venv/bin/activate
 fi
+
+printf "Python: $(python --version) $GREEN[OK]$NC\n"
 
 # Install build tools
 printf "Installing build tools ... "
