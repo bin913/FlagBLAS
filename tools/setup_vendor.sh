@@ -83,6 +83,7 @@ case $VENDOR in
           echo "::error title=hygon torch install failed::uv pip install torch==2.9.0+das.opt1.dtk2604 (indexes: ${UV_INDEX_URL}, ${UV_EXTRA_INDEX_URL})"
           exit 1
         }
+    echo "::warning title=hygon setup::torch installed"
 
     # Install FlagTree compiler for Hygon DCU
     uv pip uninstall triton || true
@@ -93,6 +94,7 @@ case $VENDOR in
           echo "::error title=hygon flagtree install failed::uv pip install flagtree==0.5.1+hcu3.1"
           exit 1
         }
+    echo "::warning title=hygon setup::flagtree installed"
 
     # Install FlagBLAS without touching the DTK-patched torch. pyproject.toml
     # declares `torch>=2.6.0`; without --no-deps the dependency resolver
@@ -102,6 +104,7 @@ case $VENDOR in
       echo "::error title=hygon flagblas install failed::$(tail -8 /tmp/flagblas-install.log | tr '\n' ' ' | head -c 1500)"
       exit 1
     fi
+    echo "::warning title=hygon setup::flagblas installed"
 
     # Test deps. `cupy-cuda12x` is excluded: it is NVIDIA-only and would pull
     # a CUDA runtime that conflicts with the DTK stack.
@@ -110,6 +113,7 @@ case $VENDOR in
       echo "::error title=hygon test deps install failed::$(tail -8 /tmp/hygon-testdeps.log | tr '\n' ' ' | head -c 1500)"
       exit 1
     fi
+    echo "::warning title=hygon setup::testdeps installed"
 
     # Sanity check: make sure the DTK-patched torch survived the installs above.
     python - <<'PYEOF' || {
@@ -128,6 +132,7 @@ except Exception:
     print("::error title=hygon torch sanity check failed::" + tb.replace("%", "%25").replace("\n", "%0A"))
     sys.exit(1)
 PYEOF
+    echo "::warning title=hygon setup::sanity check passed"
 
     # Mirror FlagGems' env_source: bake the DTK environment into the venv so
     # that every `source .venv/bin/activate` also loads the DTK runtime.
