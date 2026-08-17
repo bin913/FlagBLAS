@@ -85,18 +85,6 @@ ops:
       - BLAS
     stages:
       - beta: '0.1'
-  - id: fp8gemm
-    description: |
-      8-bit floating point GEMM with E4M3/E5M2 common formats
-      This is a simple wrapper of the existing torch `abs` operator.
-    for:
-      - fp8gemm
-    labels:
-      - gemm
-    kind:
-      - BLAS
-    stages:
-      - beta: '0.1'
   - id: group_bfgemm
     description: |
       Refers to GROUP_GEMM with BF16 data type.
@@ -129,6 +117,66 @@ ops:
       - group_tf32gemm
     labels:
       - gemm
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: group_mm
+    description: |
+      Generic GROUP_GEMM operator.
+      Dispatches a batch of GEMM problems with mixed shapes and dtypes.
+    for:
+      - group_mm
+    labels:
+      - gemm
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: strmm
+    description: |
+      Single-precision BLAS Level 3 triangular matrix-matrix multiplication.
+      Computes B = alpha * op(A) * B or B = alpha * B * op(A) for a float32 triangular matrix A.
+    for:
+      - strmm
+    labels:
+      - trmm
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: dtrmm
+    description: |
+      Double-precision BLAS Level 3 triangular matrix-matrix multiplication.
+      Computes B = alpha * op(A) * B or B = alpha * B * op(A) for a float64 triangular matrix A.
+    for:
+      - dtrmm
+    labels:
+      - trmm
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: ctrmm
+    description: |
+      Single-precision complex BLAS Level 3 triangular matrix-matrix multiplication.
+      Computes B = alpha * op(A) * B or B = alpha * B * op(A) for a complex64 triangular matrix A.
+    for:
+      - ctrmm
+    labels:
+      - trmm
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: ztrmm
+    description: |
+      Double-precision complex BLAS Level 3 triangular matrix-matrix multiplication.
+      Computes B = alpha * op(A) * B or B = alpha * B * op(A) for a complex128 triangular matrix A.
+    for:
+      - ztrmm
+    labels:
+      - trmm
     kind:
       - BLAS
     stages:
@@ -1013,6 +1061,78 @@ ops:
       - BLAS
     stages:
       - stable: '0.1'
+  - id: ssbmv
+    description: |
+      Single-precision BLAS Level 2 symmetric banded matrix-vector multiplication.
+      Computes y = alpha * A * x + beta * y for a float32 symmetric banded matrix A in BLAS banded storage.
+    for:
+      - ssbmv
+    labels:
+      - sbmv
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: dsbmv
+    description: |
+      Double-precision BLAS Level 2 symmetric banded matrix-vector multiplication.
+      Computes y = alpha * A * x + beta * y for a float64 symmetric banded matrix A in BLAS banded storage.
+    for:
+      - dsbmv
+    labels:
+      - sbmv
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: chbmv
+    description: |
+      Single-precision complex BLAS Level 2 Hermitian banded matrix-vector multiplication.
+      Computes y = alpha * A * x + beta * y for a complex64 Hermitian banded matrix A in BLAS banded storage.
+    for:
+      - chbmv
+    labels:
+      - hbmv
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: zhbmv
+    description: |
+      Double-precision complex BLAS Level 2 Hermitian banded matrix-vector multiplication.
+      Computes y = alpha * A * x + beta * y for a complex128 Hermitian banded matrix A in BLAS banded storage.
+    for:
+      - zhbmv
+    labels:
+      - hbmv
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: sspmv
+    description: |
+      Single-precision BLAS Level 2 symmetric packed matrix-vector multiplication.
+      Computes y = alpha * A * x + beta * y for a float32 symmetric matrix A in BLAS packed storage.
+    for:
+      - sspmv
+    labels:
+      - spmv
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
+  - id: dspmv
+    description: |
+      Double-precision BLAS Level 2 symmetric packed matrix-vector multiplication.
+      Computes y = alpha * A * x + beta * y for a float64 symmetric matrix A in BLAS packed storage.
+    for:
+      - dspmv
+    labels:
+      - spmv
+    kind:
+      - BLAS
+    stages:
+      - beta: '0.1'
   - id: ssymv
     description: |
       Single-precision BLAS Level 2 symmetric matrix-vector multiplication.
