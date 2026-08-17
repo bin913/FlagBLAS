@@ -92,6 +92,14 @@ class DotcBenchmark(Benchmark):
     def get_correctness_reduce_dim(self, args, kwargs):
         return kwargs["n"]
 
+    def clone_correctness_inputs(self, args, kwargs):
+        # dotc is a read-only reduction: neither cuBLAS nor FlagBLAS mutates
+        # x/y, and the reference op runs before the FlagBLAS op, so the input
+        # tensors can be shared instead of cloned. Cloning the huge
+        # DEFAULT_SHAPES tensors (up to 2^30 elements per operand) would need
+        # ~3x the memory and OOM the correctness pre-check.
+        return args, kwargs, args, kwargs
+
 
 @pytest.mark.dotc
 def test_perf_cdotc():
