@@ -18,6 +18,7 @@
 SUPPORTED_VENDORS=(
   "nvidia"
   "iluvatar"
+  "hygon"
 )
 
 valid_vendor() {
@@ -50,6 +51,38 @@ case $VENDOR in
     export COREX_ROOT=${COREX_ROOT:-/usr/local/corex}
     export PATH="${COREX_ROOT}/bin:${PATH}"
     export LD_LIBRARY_PATH="${COREX_ROOT}/lib:${LD_LIBRARY_PATH}"
+    ;;
+  hygon)
+    # Locate and source the Hygon DTK environment. The DTK-patched PyTorch
+    # needs the DTK runtime libs (LD_LIBRARY_PATH) to detect the DCUs at
+    # torch import time, so this must run before any python/torch invocation.
+    export DTK_ENV=""
+    for f in /opt/dtk-26.04/env.sh /opt/dtk/env.sh /usr/local/dtk/env.sh /opt/dtk-*/env.sh /usr/local/dtk-*/env.sh; do
+      if [ -f "$f" ]; then
+        export DTK_ENV="$f"
+        source "$f" || true
+        echo "Sourced Hygon DTK environment: $f"
+        break
+      fi
+    done
+    if [ -z "$DTK_ENV" ]; then
+      echo "WARNING: no DTK env.sh found under /opt/dtk-26.04, /opt/dtk*, /usr/local/dtk*. torch will not see the DCUs."
+    fi
+    # Explicitly ensure the DTK/hyhal library dirs are on LD_LIBRARY_PATH,
+    # in case env.sh does not cover them (torch._C._cuda_init needs them to
+    # find the DCU driver).
+    if [ -n "$DTK_ENV" ]; then
+      DTK_ROOT="${DTK_ENV%/env.sh}"
+      for d in "${DTK_ROOT}/lib" "${DTK_ROOT}/lib64" /opt/hyhal/lib /opt/hyhal/lib64; do
+        if [ -d "$d" ]; then
+          case ":$LD_LIBRARY_PATH:" in
+            *":$d:"*) ;;
+            *) export LD_LIBRARY_PATH="$d${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ;;
+          esac
+        fi
+      done
+    fi
+    echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}"
     ;;
 esac
 
