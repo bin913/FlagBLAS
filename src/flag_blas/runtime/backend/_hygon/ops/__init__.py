@@ -3,6 +3,7 @@ from .gemv import cgemv, zgemv
 from .hbmv import chbmv, zhbmv
 from .hemv import chemv, zhemv
 from .hpmv import chpmv, zhpmv
+from .hpr2 import zhpr2
 from .spmv import dspmv, sspmv
 from .symv import csymv, zsymv
 from .trmv import ctrmv, dtrmv, strmv, ztrmv
@@ -25,6 +26,7 @@ __all__ = [
     "zgbmv",
     "zhbmv",
     "zhpmv",
+    "zhpr2",
     "zsymv",
     "ztrmv",
 ]

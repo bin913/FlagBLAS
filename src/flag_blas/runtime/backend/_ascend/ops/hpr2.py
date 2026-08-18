@@ -1,3 +1,17 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from typing import Union
 
 import torch
@@ -50,12 +64,14 @@ def chpr2_kernel(
 
         if UPLO == 0:
             tri_mask = rows[:, None] >= cols[None, :]
-            off = (
-                rows64[:, None] + cols64[None, :] * (2 * n64 - cols64[None, :] - 1) // 2
-            )
+            off = rows64[:, None] * (rows64[:, None] + 1) // 2 + cols64[None, :]
         else:
             tri_mask = rows[:, None] <= cols[None, :]
-            off = cols64[None, :] * (cols64[None, :] + 1) // 2 + rows64[:, None]
+            off = (
+                rows64[:, None] * n64
+                - rows64[:, None] * (rows64[:, None] + 1) // 2
+                + cols64[None, :]
+            )
 
         mask = row_mask[:, None] & col_mask[None, :] & tri_mask
         safe_off = tl.where(mask, off, 0)
