@@ -351,7 +351,7 @@ def test_perf_sspmv():
 @pytest.mark.sspmv
 def test_perf_sspmv_upper():
     bench = SpmvBenchmark(
-        op_name="sspmv_upper",
+        op_name="sspmv",
         torch_op=cublas_spmv_baseline,
         gems_op=gems_sspmv_wrapper,
         dtypes=[torch.float32],
@@ -379,7 +379,7 @@ def test_perf_dspmv_upper():
     if not flag_blas.runtime.device.support_fp64:
         pytest.skip("Device does not support float64")
     bench = SpmvBenchmark(
-        op_name="dspmv_upper",
+        op_name="dspmv",
         torch_op=cublas_spmv_baseline,
         gems_op=gems_dspmv_wrapper,
         dtypes=[torch.float64],

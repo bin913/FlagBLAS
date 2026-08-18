@@ -24,6 +24,7 @@ from benchmark.performance_utils import Benchmark, run_correctness_then_benchmar
 from flag_blas.ops import CUBLAS_FILL_MODE_LOWER, CUBLAS_FILL_MODE_UPPER
 from flag_blas.utils import shape_utils
 
+# multibackend support
 IS_HYGON = flag_blas.vendor_name == "hygon"
 
 if IS_HYGON:
@@ -413,7 +414,7 @@ def test_perf_chbmv():
 @pytest.mark.chbmv
 def test_perf_chbmv_upper():
     bench = HbmvBenchmark(
-        op_name="chbmv_upper",
+        op_name="chbmv",
         torch_op=cublas_hbmv_baseline,
         gems_op=gems_chbmv_wrapper,
         dtypes=[torch.complex64],
@@ -441,7 +442,7 @@ def test_perf_zhbmv_upper():
     if not flag_blas.runtime.device.support_fp64:
         pytest.skip("Device does not support float64")
     bench = HbmvBenchmark(
-        op_name="zhbmv_upper",
+        op_name="zhbmv",
         torch_op=cublas_hbmv_baseline,
         gems_op=gems_zhbmv_wrapper,
         dtypes=[torch.complex128],

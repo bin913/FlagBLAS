@@ -214,7 +214,7 @@ def test_perf_strsv():
 @pytest.mark.strsv
 def test_perf_strsv_upper():
     _run_trsv_benchmark(
-        op_name="strsv_upper",
+        op_name="strsv",
         wrapper=gems_strsv_wrapper,
         dtype=torch.float32,
         uplo=CUBLAS_FILL_MODE_UPPER,
@@ -226,7 +226,7 @@ def test_perf_strsv_upper():
 @pytest.mark.strsv
 def test_perf_strsv_trans():
     _run_trsv_benchmark(
-        op_name="strsv_trans",
+        op_name="strsv",
         wrapper=gems_strsv_wrapper,
         dtype=torch.float32,
         uplo=CUBLAS_FILL_MODE_LOWER,
@@ -238,7 +238,7 @@ def test_perf_strsv_trans():
 @pytest.mark.strsv
 def test_perf_strsv_unit():
     _run_trsv_benchmark(
-        op_name="strsv_unit",
+        op_name="strsv",
         wrapper=gems_strsv_wrapper,
         dtype=torch.float32,
         uplo=CUBLAS_FILL_MODE_LOWER,
@@ -263,7 +263,7 @@ def test_perf_dtrsv():
 @pytest.mark.dtrsv
 def test_perf_dtrsv_upper():
     _run_trsv_benchmark(
-        op_name="dtrsv_upper",
+        op_name="dtrsv",
         wrapper=gems_dtrsv_wrapper,
         dtype=torch.float64,
         uplo=CUBLAS_FILL_MODE_UPPER,
@@ -276,7 +276,7 @@ def test_perf_dtrsv_upper():
 @pytest.mark.dtrsv
 def test_perf_dtrsv_trans():
     _run_trsv_benchmark(
-        op_name="dtrsv_trans",
+        op_name="dtrsv",
         wrapper=gems_dtrsv_wrapper,
         dtype=torch.float64,
         uplo=CUBLAS_FILL_MODE_LOWER,
@@ -289,7 +289,7 @@ def test_perf_dtrsv_trans():
 @pytest.mark.dtrsv
 def test_perf_dtrsv_unit():
     _run_trsv_benchmark(
-        op_name="dtrsv_unit",
+        op_name="dtrsv",
         wrapper=gems_dtrsv_wrapper,
         dtype=torch.float64,
         uplo=CUBLAS_FILL_MODE_LOWER,
@@ -314,7 +314,7 @@ def test_perf_ctrsv():
 @pytest.mark.ctrsv
 def test_perf_ctrsv_upper():
     _run_trsv_benchmark(
-        op_name="ctrsv_upper",
+        op_name="ctrsv",
         wrapper=gems_ctrsv_wrapper,
         dtype=torch.complex64,
         uplo=CUBLAS_FILL_MODE_UPPER,
@@ -326,7 +326,7 @@ def test_perf_ctrsv_upper():
 @pytest.mark.ctrsv
 def test_perf_ctrsv_trans():
     _run_trsv_benchmark(
-        op_name="ctrsv_trans",
+        op_name="ctrsv",
         wrapper=gems_ctrsv_wrapper,
         dtype=torch.complex64,
         uplo=CUBLAS_FILL_MODE_LOWER,
@@ -338,7 +338,7 @@ def test_perf_ctrsv_trans():
 @pytest.mark.ctrsv
 def test_perf_ctrsv_conj():
     _run_trsv_benchmark(
-        op_name="ctrsv_conj",
+        op_name="ctrsv",
         wrapper=gems_ctrsv_wrapper,
         dtype=torch.complex64,
         uplo=CUBLAS_FILL_MODE_LOWER,
@@ -350,7 +350,7 @@ def test_perf_ctrsv_conj():
 @pytest.mark.ctrsv
 def test_perf_ctrsv_unit():
     _run_trsv_benchmark(
-        op_name="ctrsv_unit",
+        op_name="ctrsv",
         wrapper=gems_ctrsv_wrapper,
         dtype=torch.complex64,
         uplo=CUBLAS_FILL_MODE_LOWER,
@@ -375,7 +375,7 @@ def test_perf_ztrsv():
 @pytest.mark.ztrsv
 def test_perf_ztrsv_upper():
     _run_trsv_benchmark(
-        op_name="ztrsv_upper",
+        op_name="ztrsv",
         wrapper=gems_ztrsv_wrapper,
         dtype=torch.complex128,
         uplo=CUBLAS_FILL_MODE_UPPER,
@@ -388,7 +388,7 @@ def test_perf_ztrsv_upper():
 @pytest.mark.ztrsv
 def test_perf_ztrsv_trans():
     _run_trsv_benchmark(
-        op_name="ztrsv_trans",
+        op_name="ztrsv",
         wrapper=gems_ztrsv_wrapper,
         dtype=torch.complex128,
         uplo=CUBLAS_FILL_MODE_LOWER,
@@ -401,7 +401,7 @@ def test_perf_ztrsv_trans():
 @pytest.mark.ztrsv
 def test_perf_ztrsv_conj():
     _run_trsv_benchmark(
-        op_name="ztrsv_conj",
+        op_name="ztrsv",
         wrapper=gems_ztrsv_wrapper,
         dtype=torch.complex128,
         uplo=CUBLAS_FILL_MODE_LOWER,
@@ -414,7 +414,7 @@ def test_perf_ztrsv_conj():
 @pytest.mark.ztrsv
 def test_perf_ztrsv_unit():
     _run_trsv_benchmark(
-        op_name="ztrsv_unit",
+        op_name="ztrsv",
         wrapper=gems_ztrsv_wrapper,
         dtype=torch.complex128,
         uplo=CUBLAS_FILL_MODE_LOWER,

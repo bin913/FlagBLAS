@@ -362,7 +362,7 @@ def test_perf_chemv():
 @pytest.mark.chemv
 def test_perf_chemv_upper():
     bench = HemvBenchmark(
-        op_name="chemv_upper",
+        op_name="chemv",
         torch_op=cublas_hemv_baseline,
         gems_op=gems_chemv_wrapper,
         dtypes=[torch.complex64],
@@ -394,7 +394,7 @@ def test_perf_zhemv_upper():
     if not flag_blas.runtime.device.support_fp64:
         pytest.skip("Device does not support float64")
     bench = HemvBenchmark(
-        op_name="zhemv_upper",
+        op_name="zhemv",
         torch_op=cublas_hemv_baseline,
         gems_op=gems_zhemv_wrapper,
         dtypes=[torch.complex128],

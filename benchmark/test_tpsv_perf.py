@@ -196,7 +196,7 @@ def _run_tpsv(op_name, dtype, uplo, trans, diag=CUBLAS_DIAG_NON_UNIT):
     ):
         pytest.skip("fp64 is not supported on this device")
     bench = TpsvBenchmark(
-        op_name=f"{op_name}_{uplo}_{trans}_{diag}",
+        op_name=op_name,
         torch_op=cublas_tpsv_baseline,
         gems_op=GEMS_TPSV_WRAPPERS[op_name],
         dtypes=[dtype],

@@ -405,7 +405,7 @@ def test_perf_stbmv():
 @pytest.mark.stbmv
 def test_perf_stbmv_upper():
     bench = TbmvBenchmark(
-        op_name="stbmv_upper",
+        op_name="stbmv",
         torch_op=cublas_tbmv_baseline,
         gems_op=gems_stbmv_wrapper,
         dtypes=[torch.float32],
@@ -419,7 +419,7 @@ def test_perf_stbmv_upper():
 @pytest.mark.stbmv
 def test_perf_stbmv_trans():
     bench = TbmvBenchmark(
-        op_name="stbmv_trans",
+        op_name="stbmv",
         torch_op=cublas_tbmv_baseline,
         gems_op=gems_stbmv_wrapper,
         dtypes=[torch.float32],
@@ -433,7 +433,7 @@ def test_perf_stbmv_trans():
 @pytest.mark.dtbmv
 def test_perf_stbmv_upper_trans():
     bench = TbmvBenchmark(
-        op_name="stbmv_upper_trans",
+        op_name="stbmv",
         torch_op=cublas_tbmv_baseline,
         gems_op=gems_stbmv_wrapper,
         dtypes=[torch.float32],
@@ -447,7 +447,7 @@ def test_perf_stbmv_upper_trans():
 @pytest.mark.stbmv
 def test_perf_stbmv_unit():
     bench = TbmvBenchmark(
-        op_name="stbmv_unit",
+        op_name="stbmv",
         torch_op=cublas_tbmv_baseline,
         gems_op=gems_stbmv_wrapper,
         dtypes=[torch.float32],
@@ -479,7 +479,7 @@ def test_perf_dtbmv_upper():
     if not flag_blas.runtime.device.support_fp64:
         pytest.skip("Device does not support float64")
     bench = TbmvBenchmark(
-        op_name="dtbmv_upper",
+        op_name="dtbmv",
         torch_op=cublas_tbmv_baseline,
         gems_op=gems_dtbmv_wrapper,
         dtypes=[torch.float64],
@@ -495,7 +495,7 @@ def test_perf_dtbmv_trans():
     if not flag_blas.runtime.device.support_fp64:
         pytest.skip("Device does not support float64")
     bench = TbmvBenchmark(
-        op_name="dtbmv_trans",
+        op_name="dtbmv",
         torch_op=cublas_tbmv_baseline,
         gems_op=gems_dtbmv_wrapper,
         dtypes=[torch.float64],
@@ -511,7 +511,7 @@ def test_perf_dtbmv_upper_trans():
     if not flag_blas.runtime.device.support_fp64:
         pytest.skip("Device does not support float64")
     bench = TbmvBenchmark(
-        op_name="dtbmv_upper_trans",
+        op_name="dtbmv",
         torch_op=cublas_tbmv_baseline,
         gems_op=gems_dtbmv_wrapper,
         dtypes=[torch.float64],
@@ -527,7 +527,7 @@ def test_perf_dtbmv_unit():
     if not flag_blas.runtime.device.support_fp64:
         pytest.skip("Device does not support float64")
     bench = TbmvBenchmark(
-        op_name="dtbmv_unit",
+        op_name="dtbmv",
         torch_op=cublas_tbmv_baseline,
         gems_op=gems_dtbmv_wrapper,
         dtypes=[torch.float64],
@@ -555,7 +555,7 @@ def test_perf_ctbmv():
 @pytest.mark.ctbmv
 def test_perf_ctbmv_upper():
     bench = TbmvBenchmark(
-        op_name="ctbmv_upper",
+        op_name="ctbmv",
         torch_op=cublas_tbmv_baseline,
         gems_op=gems_ctbmv_wrapper,
         dtypes=[torch.complex64],
@@ -569,7 +569,7 @@ def test_perf_ctbmv_upper():
 @pytest.mark.ctbmv
 def test_perf_ctbmv_trans():
     bench = TbmvBenchmark(
-        op_name="ctbmv_trans",
+        op_name="ctbmv",
         torch_op=cublas_tbmv_baseline,
         gems_op=gems_ctbmv_wrapper,
         dtypes=[torch.complex64],
@@ -583,7 +583,7 @@ def test_perf_ctbmv_trans():
 @pytest.mark.ctbmv
 def test_perf_ctbmv_conj():
     bench = TbmvBenchmark(
-        op_name="ctbmv_conj",
+        op_name="ctbmv",
         torch_op=cublas_tbmv_baseline,
         gems_op=gems_ctbmv_wrapper,
         dtypes=[torch.complex64],
@@ -597,7 +597,7 @@ def test_perf_ctbmv_conj():
 @pytest.mark.ztbmv
 def test_perf_ctbmv_upper_trans():
     bench = TbmvBenchmark(
-        op_name="ctbmv_upper_trans",
+        op_name="ctbmv",
         torch_op=cublas_tbmv_baseline,
         gems_op=gems_ctbmv_wrapper,
         dtypes=[torch.complex64],
@@ -611,7 +611,7 @@ def test_perf_ctbmv_upper_trans():
 @pytest.mark.ctbmv
 def test_perf_ctbmv_upper_conj():
     bench = TbmvBenchmark(
-        op_name="ctbmv_upper_conj",
+        op_name="ctbmv",
         torch_op=cublas_tbmv_baseline,
         gems_op=gems_ctbmv_wrapper,
         dtypes=[torch.complex64],
@@ -625,7 +625,7 @@ def test_perf_ctbmv_upper_conj():
 @pytest.mark.ctbmv
 def test_perf_ctbmv_unit():
     bench = TbmvBenchmark(
-        op_name="ctbmv_unit",
+        op_name="ctbmv",
         torch_op=cublas_tbmv_baseline,
         gems_op=gems_ctbmv_wrapper,
         dtypes=[torch.complex64],
@@ -657,7 +657,7 @@ def test_perf_ztbmv_upper():
     if not flag_blas.runtime.device.support_fp64:
         pytest.skip("Device does not support float64")
     bench = TbmvBenchmark(
-        op_name="ztbmv_upper",
+        op_name="ztbmv",
         torch_op=cublas_tbmv_baseline,
         gems_op=gems_ztbmv_wrapper,
         dtypes=[torch.complex128],
@@ -673,7 +673,7 @@ def test_perf_ztbmv_trans():
     if not flag_blas.runtime.device.support_fp64:
         pytest.skip("Device does not support float64")
     bench = TbmvBenchmark(
-        op_name="ztbmv_trans",
+        op_name="ztbmv",
         torch_op=cublas_tbmv_baseline,
         gems_op=gems_ztbmv_wrapper,
         dtypes=[torch.complex128],
@@ -689,7 +689,7 @@ def test_perf_ztbmv_conj():
     if not flag_blas.runtime.device.support_fp64:
         pytest.skip("Device does not support float64")
     bench = TbmvBenchmark(
-        op_name="ztbmv_conj",
+        op_name="ztbmv",
         torch_op=cublas_tbmv_baseline,
         gems_op=gems_ztbmv_wrapper,
         dtypes=[torch.complex128],
@@ -705,7 +705,7 @@ def test_perf_ztbmv_upper_trans():
     if not flag_blas.runtime.device.support_fp64:
         pytest.skip("Device does not support float64")
     bench = TbmvBenchmark(
-        op_name="ztbmv_upper_trans",
+        op_name="ztbmv",
         torch_op=cublas_tbmv_baseline,
         gems_op=gems_ztbmv_wrapper,
         dtypes=[torch.complex128],
@@ -721,7 +721,7 @@ def test_perf_ztbmv_upper_conj():
     if not flag_blas.runtime.device.support_fp64:
         pytest.skip("Device does not support float64")
     bench = TbmvBenchmark(
-        op_name="ztbmv_upper_conj",
+        op_name="ztbmv",
         torch_op=cublas_tbmv_baseline,
         gems_op=gems_ztbmv_wrapper,
         dtypes=[torch.complex128],
@@ -737,7 +737,7 @@ def test_perf_ztbmv_unit():
     if not flag_blas.runtime.device.support_fp64:
         pytest.skip("Device does not support float64")
     bench = TbmvBenchmark(
-        op_name="ztbmv_unit",
+        op_name="ztbmv",
         torch_op=cublas_tbmv_baseline,
         gems_op=gems_ztbmv_wrapper,
         dtypes=[torch.complex128],

@@ -255,7 +255,7 @@ def _run_tbsv_variant(op_name, dtype, uplo, trans):
     ):
         pytest.skip("fp64 is not supported on this device")
     bench = StbsvBenchmark(
-        op_name=f"{op_name}_{uplo}_{trans}",
+        op_name=op_name,
         torch_op=cublas_stbsv_baseline,
         gems_op=GEMS_TBSV_WRAPPERS[op_name],
         dtypes=[dtype],

@@ -375,7 +375,7 @@ def test_perf_ssymv():
 @pytest.mark.ssymv
 def test_perf_ssymv_upper():
     bench = SymvBenchmark(
-        op_name="ssymv_upper",
+        op_name="ssymv",
         torch_op=cublas_symv_baseline,
         gems_op=gems_ssymv_wrapper,
         dtypes=[torch.float32],
@@ -403,7 +403,7 @@ def test_perf_dsymv_upper():
     if not flag_blas.runtime.device.support_fp64:
         pytest.skip("Device does not support float64")
     bench = SymvBenchmark(
-        op_name="dsymv_upper",
+        op_name="dsymv",
         torch_op=cublas_symv_baseline,
         gems_op=gems_dsymv_wrapper,
         dtypes=[torch.float64],
@@ -429,7 +429,7 @@ def test_perf_csymv():
 @pytest.mark.csymv
 def test_perf_csymv_upper():
     bench = SymvBenchmark(
-        op_name="csymv_upper",
+        op_name="csymv",
         torch_op=cublas_symv_baseline,
         gems_op=gems_csymv_wrapper,
         dtypes=[torch.complex64],
@@ -461,7 +461,7 @@ def test_perf_zsymv_upper():
     if not flag_blas.runtime.device.support_fp64:
         pytest.skip("Device does not support float64")
     bench = SymvBenchmark(
-        op_name="zsymv_upper",
+        op_name="zsymv",
         torch_op=cublas_symv_baseline,
         gems_op=gems_zsymv_wrapper,
         dtypes=[torch.complex128],
