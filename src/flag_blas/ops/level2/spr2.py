@@ -1,3 +1,17 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import logging
 import struct
 from typing import Union
@@ -22,6 +36,10 @@ _SPR2_CONFIGS = [
     triton.Config({"BLOCK_SIZE": 16}, num_warps=1, num_stages=2),
     triton.Config({"BLOCK_SIZE": 16}, num_warps=2, num_stages=2),
     triton.Config({"BLOCK_SIZE": 32}, num_warps=4, num_stages=2),
+]
+_DSPR2_CONFIGS = [
+    triton.Config({"BLOCK_SIZE": 16}, num_warps=4, num_stages=2),
+    triton.Config({"BLOCK_SIZE": 64}, num_warps=4, num_stages=1),
 ]
 _SPR2_KEY = ["n", "INCX", "INCY", "UPLO"]
 _SPR2_RESTORE = ["ap_ptr"]
@@ -62,10 +80,14 @@ def sspr2_kernel(
     cols64 = cols.to(tl.int64)
     if UPLO == 0:
         tri_mask = rows[:, None] >= cols[None, :]
-        off = rows64[:, None] + cols64[None, :] * (2 * n64 - cols64[None, :] - 1) // 2
+        off = rows64[:, None] * (rows64[:, None] + 1) // 2 + cols64[None, :]
     else:
         tri_mask = rows[:, None] <= cols[None, :]
-        off = cols64[None, :] * (cols64[None, :] + 1) // 2 + rows64[:, None]
+        off = (
+            rows64[:, None] * n64
+            - rows64[:, None] * (rows64[:, None] + 1) // 2
+            + cols64[None, :]
+        )
     mask = row_mask[:, None] & col_mask[None, :] & tri_mask
     xr = tl.load(x_ptr + rows * INCX, mask=row_mask, other=0.0)
     yr = tl.load(y_ptr + rows * INCY, mask=row_mask, other=0.0)
@@ -77,7 +99,7 @@ def sspr2_kernel(
 
 
 @libentry()
-@triton.autotune(configs=_SPR2_CONFIGS, key=_SPR2_KEY, restore_value=_SPR2_RESTORE)
+@triton.autotune(configs=_DSPR2_CONFIGS, key=_SPR2_KEY, restore_value=_SPR2_RESTORE)
 @triton.jit
 def dspr2_kernel(
     ap_ptr,
@@ -108,10 +130,14 @@ def dspr2_kernel(
     cols64 = cols.to(tl.int64)
     if UPLO == 0:
         tri_mask = rows[:, None] >= cols[None, :]
-        off = rows64[:, None] + cols64[None, :] * (2 * n64 - cols64[None, :] - 1) // 2
+        off = rows64[:, None] * (rows64[:, None] + 1) // 2 + cols64[None, :]
     else:
         tri_mask = rows[:, None] <= cols[None, :]
-        off = cols64[None, :] * (cols64[None, :] + 1) // 2 + rows64[:, None]
+        off = (
+            rows64[:, None] * n64
+            - rows64[:, None] * (rows64[:, None] + 1) // 2
+            + cols64[None, :]
+        )
     mask = row_mask[:, None] & col_mask[None, :] & tri_mask
     xr = tl.load(x_ptr + rows * INCX, mask=row_mask, other=0.0)
     yr = tl.load(y_ptr + rows * INCY, mask=row_mask, other=0.0)

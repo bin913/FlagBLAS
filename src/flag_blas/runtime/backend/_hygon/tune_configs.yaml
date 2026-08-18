@@ -1646,3 +1646,8 @@ zhpmv_hygon:
   - META: {BLOCK_SIZE_M: 64, BLOCK_K: 32}
     num_warps: 8
     num_stages: 2
+
+zhpr2_hygon:
+  - META: {BLOCK_SIZE: 128}
+    num_warps: 2
+    num_stages: 2

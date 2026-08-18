@@ -1,3 +1,17 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import ctypes
 import ctypes.util
 
@@ -8,8 +22,11 @@ from scipy.linalg import blas as cpu_blas
 import flag_blas
 from flag_blas.ops import CUBLAS_FILL_MODE_LOWER, CUBLAS_FILL_MODE_UPPER
 
-from .accuracy_utils import blas_assert_close, to_cpu_blas_tensor
+from .accuracy_utils import blas_assert_close, to_cpu_blas_tensor, to_reference
 from .conftest import TO_CPU
+
+if flag_blas.vendor_name == "hygon":
+    from .hipblas_reference import check_hipblas_status, get_hipblas_context
 
 
 def load_cublas():
@@ -105,7 +122,49 @@ def cublas_spr2_reference(uplo, n, alpha, x, incx, y, incy, AP):
     )
     if status != 0:
         raise RuntimeError(f"cublasXspr2_v2 execution failed with error code: {status}")
-    torch.cuda.synchronize(AP.device)
+
+
+def hipblas_spr2_reference(uplo, n, alpha, x, incx, y, incy, AP):
+    if n == 0:
+        return
+    if AP.dtype == torch.float32:
+        symbol = "hipblasSspr2"
+        scalar_type = ctypes.c_float
+    elif AP.dtype == torch.float64:
+        symbol = "hipblasDspr2"
+        scalar_type = ctypes.c_double
+    else:
+        raise ValueError(f"Unsupported dtype for hipBLAS SPR2: {AP.dtype}")
+    library, handle = get_hipblas_context(AP)
+    function = getattr(library, symbol)
+    function.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.POINTER(scalar_type),
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+    ]
+    function.restype = ctypes.c_int
+    alpha_c = scalar_type(alpha.item() if isinstance(alpha, torch.Tensor) else alpha)
+    hip_uplo = 121 if uplo == CUBLAS_FILL_MODE_UPPER else 122
+    check_hipblas_status(
+        function(
+            handle,
+            hip_uplo,
+            n,
+            ctypes.byref(alpha_c),
+            ctypes.c_void_p(x.data_ptr()),
+            incx,
+            ctypes.c_void_p(y.data_ptr()),
+            incy,
+            ctypes.c_void_p(AP.data_ptr()),
+        ),
+        symbol,
+    )
 
 
 def cpu_spr2_reference(uplo, n, alpha, x, incx, y, incy, AP):
@@ -131,9 +190,22 @@ def cpu_spr2_reference(uplo, n, alpha, x, incx, y, incy, AP):
 
 def spr2_reference(uplo, n, alpha, x, incx, y, incy, AP):
     if TO_CPU:
-        return cpu_spr2_reference(uplo, n, alpha, x, incx, y, incy, AP)
+        reference_uplo = (
+            CUBLAS_FILL_MODE_LOWER
+            if uplo == CUBLAS_FILL_MODE_UPPER
+            else CUBLAS_FILL_MODE_UPPER
+        )
+        return cpu_spr2_reference(reference_uplo, n, alpha, x, incx, y, incy, AP)
     ref_AP = AP.clone()
-    cublas_spr2_reference(uplo, n, alpha, x, incx, y, incy, ref_AP)
+    reference_uplo = (
+        CUBLAS_FILL_MODE_LOWER
+        if uplo == CUBLAS_FILL_MODE_UPPER
+        else CUBLAS_FILL_MODE_UPPER
+    )
+    if flag_blas.vendor_name == "hygon":
+        hipblas_spr2_reference(reference_uplo, n, alpha, x, incx, y, incy, ref_AP)
+    else:
+        cublas_spr2_reference(reference_uplo, n, alpha, x, incx, y, incy, ref_AP)
     return ref_AP
 
 
@@ -242,6 +314,41 @@ def _run_spr2_case(op, dtype, alpha, uplo, n, incx=1, incy=1):
     ref_AP = spr2_reference(uplo, n, alpha, x, incx, y, incy, AP)
     op(uplo, n, alpha, x, incx, y, incy, AP)
     blas_assert_close(AP, ref_AP, dtype, reduce_dim=2)
+
+
+def _run_spr2_row_packed_case(op, dtype, uplo):
+    if dtype is torch.float64:
+        check_fp64_support()
+    n = 3
+    alpha = 0.75
+    AP = torch.tensor(
+        [1.0, 2.0, -1.0, 3.0, 0.5, -2.0],
+        dtype=dtype,
+        device=flag_blas.device,
+    )
+    x = torch.tensor([1.0, -2.0, 0.25], dtype=dtype, device=flag_blas.device)
+    y = torch.tensor([-0.5, 1.5, 2.0], dtype=dtype, device=flag_blas.device)
+    expected = AP.clone()
+    update = alpha * (x[:, None] * y[None, :] + y[:, None] * x[None, :])
+    if uplo == CUBLAS_FILL_MODE_UPPER:
+        rows, cols = torch.triu_indices(n, n, device=flag_blas.device)
+    else:
+        rows, cols = torch.tril_indices(n, n, device=flag_blas.device)
+    expected += update[rows, cols]
+    op(uplo, n, alpha, x, 1, y, 1, AP)
+    blas_assert_close(AP, to_reference(expected), dtype, reduce_dim=2)
+
+
+@pytest.mark.sspr2
+@pytest.mark.parametrize("uplo", FILL_MODES)
+def test_sspr2_uses_row_packed_storage(uplo):
+    _run_spr2_row_packed_case(flag_blas.sspr2, torch.float32, uplo)
+
+
+@pytest.mark.dspr2
+@pytest.mark.parametrize("uplo", FILL_MODES)
+def test_dspr2_uses_row_packed_storage(uplo):
+    _run_spr2_row_packed_case(flag_blas.dspr2, torch.float64, uplo)
 
 
 @pytest.mark.sspr2

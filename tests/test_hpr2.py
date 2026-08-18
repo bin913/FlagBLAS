@@ -1,3 +1,17 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import ctypes
 import ctypes.util
 
@@ -8,7 +22,15 @@ from scipy.linalg import blas as cpu_blas
 import flag_blas
 from flag_blas.ops import CUBLAS_FILL_MODE_LOWER, CUBLAS_FILL_MODE_UPPER
 
-from .accuracy_utils import blas_assert_close, to_cpu_blas_tensor
+if flag_blas.vendor_name == "hygon":
+    from .hipblas_reference import (
+        HipComplex,
+        HipDoubleComplex,
+        check_hipblas_status,
+        get_hipblas_context,
+    )
+
+from .accuracy_utils import blas_assert_close, to_cpu_blas_tensor, to_reference
 from .conftest import TO_CPU
 
 
@@ -118,7 +140,49 @@ def cublas_hpr2_reference(uplo, n, alpha, x, incx, y, incy, AP):
     )
     if status != 0:
         raise RuntimeError(f"cublasXhpr2_v2 execution failed with error code: {status}")
-    torch.cuda.synchronize(AP.device)
+
+
+def hipblas_hpr2_reference(uplo, n, alpha, x, incx, y, incy, AP):
+    if n == 0:
+        return
+    alpha = alpha.item() if isinstance(alpha, torch.Tensor) else complex(alpha)
+    if AP.dtype == torch.complex64:
+        symbol = "hipblasChpr2_v2"
+        alpha_value = HipComplex(alpha.real, alpha.imag)
+    elif AP.dtype == torch.complex128:
+        symbol = "hipblasZhpr2_v2"
+        alpha_value = HipDoubleComplex(alpha.real, alpha.imag)
+    else:
+        raise ValueError(f"Unsupported dtype for hipBLAS HPR2: {AP.dtype}")
+    library, handle = get_hipblas_context(AP)
+    function = getattr(library, symbol)
+    function.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+    ]
+    function.restype = ctypes.c_int
+    hip_uplo = 121 if uplo == CUBLAS_FILL_MODE_UPPER else 122
+    check_hipblas_status(
+        function(
+            handle,
+            hip_uplo,
+            n,
+            ctypes.byref(alpha_value),
+            ctypes.c_void_p(x.data_ptr()),
+            incx,
+            ctypes.c_void_p(y.data_ptr()),
+            incy,
+            ctypes.c_void_p(AP.data_ptr()),
+        ),
+        symbol,
+    )
 
 
 def cpu_hpr2_reference(uplo, n, alpha, x, incx, y, incy, AP):
@@ -142,11 +206,28 @@ def cpu_hpr2_reference(uplo, n, alpha, x, incx, y, incy, AP):
     return torch.from_numpy(updated)
 
 
+def _column_major_transpose_args(uplo, alpha, x, y):
+    physical_uplo = (
+        CUBLAS_FILL_MODE_LOWER
+        if uplo == CUBLAS_FILL_MODE_UPPER
+        else CUBLAS_FILL_MODE_UPPER
+    )
+    alpha = alpha.item() if isinstance(alpha, torch.Tensor) else alpha
+    physical_alpha = complex(alpha).conjugate()
+    physical_x = torch.resolve_conj(x.conj()).contiguous()
+    physical_y = torch.resolve_conj(y.conj()).contiguous()
+    return physical_uplo, physical_alpha, physical_x, physical_y
+
+
 def hpr2_reference(uplo, n, alpha, x, incx, y, incy, AP):
+    uplo, alpha, x, y = _column_major_transpose_args(uplo, alpha, x, y)
     if TO_CPU:
         return cpu_hpr2_reference(uplo, n, alpha, x, incx, y, incy, AP)
     ref_AP = AP.clone()
-    cublas_hpr2_reference(uplo, n, alpha, x, incx, y, incy, ref_AP)
+    if flag_blas.vendor_name == "hygon":
+        hipblas_hpr2_reference(uplo, n, alpha, x, incx, y, incy, ref_AP)
+    else:
+        cublas_hpr2_reference(uplo, n, alpha, x, incx, y, incy, ref_AP)
     return ref_AP
 
 
@@ -254,9 +335,9 @@ def make_hermitian_packed(n, dtype, device, uplo):
     if n > 0:
         idx = torch.arange(n, dtype=torch.long, device=device)
         if uplo == CUBLAS_FILL_MODE_UPPER:
-            diag = idx * (idx + 3) // 2
+            diag = idx * n - idx * (idx - 1) // 2
         else:
-            diag = idx * (2 * n - idx + 1) // 2
+            diag = idx * (idx + 3) // 2
         torch.view_as_real(AP)[diag, 1] = 0.0
     return AP
 
@@ -270,6 +351,58 @@ def _run_hpr2_case(op, dtype, alpha, uplo, n, incx=1, incy=1):
     ref_AP = hpr2_reference(uplo, n, alpha, x, incx, y, incy, AP)
     op(uplo, n, alpha, x, incx, y, incy, AP)
     blas_assert_close(AP, ref_AP, dtype, reduce_dim=2)
+
+
+def _run_hpr2_row_packed_case(op, dtype, uplo):
+    if dtype == torch.complex128:
+        check_fp64_support()
+    n = 3
+    alpha = 0.75 - 0.5j
+    AP = torch.tensor(
+        [
+            1.0 + 0.0j,
+            2.0 - 0.5j,
+            -1.0 + 0.25j,
+            3.0 + 0.0j,
+            0.5 + 1.5j,
+            -2.0 + 0.0j,
+        ],
+        dtype=dtype,
+        device=flag_blas.device,
+    )
+    x = torch.tensor(
+        [1.0 + 0.5j, -2.0 + 1.0j, 0.25 - 0.75j],
+        dtype=dtype,
+        device=flag_blas.device,
+    )
+    y = torch.tensor(
+        [-0.5 + 1.0j, 1.5 - 0.25j, 2.0 + 0.5j],
+        dtype=dtype,
+        device=flag_blas.device,
+    )
+    expected = AP.clone()
+    update = alpha * x[:, None] * y.conj()[None, :]
+    update += alpha.conjugate() * y[:, None] * x.conj()[None, :]
+    if uplo == CUBLAS_FILL_MODE_UPPER:
+        rows, cols = torch.triu_indices(n, n, device=flag_blas.device)
+    else:
+        rows, cols = torch.tril_indices(n, n, device=flag_blas.device)
+    expected += update[rows, cols]
+    torch.view_as_real(expected)[rows == cols, 1] = 0.0
+    op(uplo, n, alpha, x, 1, y, 1, AP)
+    blas_assert_close(AP, to_reference(expected), dtype, reduce_dim=2)
+
+
+@pytest.mark.zhpr2
+@pytest.mark.parametrize("uplo", FILL_MODES)
+def test_zhpr2_uses_row_packed_storage(uplo):
+    _run_hpr2_row_packed_case(flag_blas.zhpr2, torch.complex128, uplo)
+
+
+@pytest.mark.chpr2
+@pytest.mark.parametrize("uplo", FILL_MODES)
+def test_chpr2_uses_row_packed_storage(uplo):
+    _run_hpr2_row_packed_case(flag_blas.chpr2, torch.complex64, uplo)
 
 
 @pytest.mark.chpr2
