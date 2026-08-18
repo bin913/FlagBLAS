@@ -76,22 +76,22 @@ case $VENDOR in
     UV_INDEX_URL="https://resource.flagos.net/repository/flagos-pypi-hygon/simple"
     UV_EXTRA_INDEX_URL="https://mirrors.aliyun.com/pypi/simple"
 
-    uv pip install torch==2.4.1+das.opt1.dtk2504 \
+    uv pip install torch==2.9.0+das.opt1.dtk2604 \
         --index-url ${UV_INDEX_URL} \
         --extra-index-url ${UV_EXTRA_INDEX_URL} \
         --index-strategy unsafe-best-match || {
-          echo "::error title=hygon torch install failed::uv pip install torch==2.4.1+das.opt1.dtk2504 (indexes: ${UV_INDEX_URL}, ${UV_EXTRA_INDEX_URL})"
+          echo "::error title=hygon torch install failed::uv pip install torch==2.9.0+das.opt1.dtk2604 (indexes: ${UV_INDEX_URL}, ${UV_EXTRA_INDEX_URL})"
           exit 1
         }
     echo "::warning title=hygon setup::torch installed"
 
     # Install FlagTree compiler for Hygon DCU
     uv pip uninstall triton || true
-    uv pip install flagtree==0.6.0+hcu3.6 \
+    uv pip install flagtree==0.5.1+hcu3.1 \
         --index-url ${UV_INDEX_URL} \
         --extra-index-url ${UV_EXTRA_INDEX_URL} \
         --index-strategy unsafe-best-match || {
-          echo "::error title=hygon flagtree install failed::uv pip install flagtree==0.6.0+hcu3.6"
+          echo "::error title=hygon flagtree install failed::uv pip install flagtree==0.5.1+hcu3.1"
           exit 1
         }
     echo "::warning title=hygon setup::flagtree installed"
@@ -111,7 +111,7 @@ case $VENDOR in
     # sqlalchemy/packaging/pybind11 are FlagBLAS runtime deps that were skipped
     # by the --no-deps install above (sqlalchemy is imported at module load time
     # via flag_blas.utils.models).
-    # numpy must stay on 1.x: the DTK-patched torch 2.4.1 is built against the
+    # numpy must stay on 1.x: the DTK-patched torch 2.9.0 is built against the
     # numpy 1.x C API ("_ARRAY_API not found" under numpy 2.x).
     if ! uv pip install pytest numpy\<2 scipy distro gitpython pyyaml coverage pytest-md-report \
          sqlalchemy packaging pybind11 \
@@ -122,15 +122,15 @@ case $VENDOR in
     echo "::warning title=hygon setup::testdeps installed"
 
     # Sanity check: make sure the DTK-patched torch survived the installs above.
-    # NOTE: torch.__version__ drops the +das.opt1.dtk2504 local tag (it reports
-    # "2.4.1"), so check the installed distribution version instead.
+    # NOTE: torch.__version__ drops the +das.opt1.dtk2604 local tag (it reports
+    # "2.9.0"), so check the installed distribution version instead.
     set +e
     python - <<'PYEOF'
 import sys, importlib.metadata, traceback
 try:
     dist = importlib.metadata.version("torch")
     print("hygon torch dist:", dist)
-    assert dist.startswith("2.4.1+das.opt1.dtk2504"), \
+    assert dist.startswith("2.9.0+das.opt1.dtk2604"), \
         f"unexpected torch distribution: {dist}"
     import torch
     print("torch.__version__:", torch.__version__)
