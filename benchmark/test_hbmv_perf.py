@@ -24,7 +24,7 @@ from benchmark.performance_utils import Benchmark, run_correctness_then_benchmar
 from flag_blas.ops import CUBLAS_FILL_MODE_LOWER, CUBLAS_FILL_MODE_UPPER
 from flag_blas.utils import shape_utils
 
-### multibackend support
+# multibackend support
 IS_HYGON = flag_blas.vendor_name == "hygon"
 
 if IS_HYGON:

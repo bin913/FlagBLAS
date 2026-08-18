@@ -51,7 +51,7 @@ def load_cublas():
     raise RuntimeError("Unable to find libcublas.so on this system")
 
 
-### multibackend support
+# multibackend support
 _cublas = None if flag_blas.vendor_name in {"ascend", "hygon"} else load_cublas()
 
 
