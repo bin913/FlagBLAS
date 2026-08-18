@@ -16,10 +16,8 @@ import ctypes
 import ctypes.util
 from typing import Generator
 
-import cupy as cp
 import pytest
 import torch
-from cupy_backends.cuda.libs import cublas
 
 import flag_blas
 from benchmark.performance_utils import Benchmark, run_correctness_then_benchmark
@@ -33,6 +31,14 @@ from flag_blas.ops import (
     CUBLAS_OP_T,
 )
 from flag_blas.utils import shape_utils
+
+IS_HYGON = flag_blas.vendor_name == "hygon"
+
+if IS_HYGON:
+    import atexit
+else:
+    import cupy as cp
+    from cupy_backends.cuda.libs import cublas
 
 TPMV_SIZES = [
     31,
@@ -70,43 +76,168 @@ def load_cublas():
     raise RuntimeError("Unable to find libcublas.so on this system")
 
 
-_cublas = load_cublas()
+if IS_HYGON:
+    _HIPBLAS_LIBRARY = None
+    _HIPBLAS_HANDLES = {}
+    _HIPBLAS_TPMV_FUNCS = {
+        torch.float32: "hipblasStpmv",
+        torch.float64: "hipblasDtpmv",
+        torch.complex64: "hipblasCtpmv_v2",
+        torch.complex128: "hipblasZtpmv_v2",
+    }
 
-_CUBLAS_TPMV_FUNCS = {
-    torch.float32: _cublas.cublasStpmv_v2,
-    torch.float64: _cublas.cublasDtpmv_v2,
-    torch.complex64: _cublas.cublasCtpmv_v2,
-    torch.complex128: _cublas.cublasZtpmv_v2,
-}
+    def _check_hipblas_status(status, operation):
+        if status != 0:
+            raise RuntimeError(f"{operation} failed with hipBLAS status {status}")
+
+    def _load_hipblas():
+        global _HIPBLAS_LIBRARY
+        if _HIPBLAS_LIBRARY is None:
+            library_name = ctypes.util.find_library("hipblas")
+            if library_name is None:
+                raise RuntimeError("Unable to find the hipBLAS shared library")
+            library = ctypes.CDLL(library_name)
+            library.hipblasCreate.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
+            library.hipblasCreate.restype = ctypes.c_int
+            library.hipblasDestroy.argtypes = [ctypes.c_void_p]
+            library.hipblasDestroy.restype = ctypes.c_int
+            library.hipblasSetStream.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+            library.hipblasSetStream.restype = ctypes.c_int
+            library.hipblasSetPointerMode.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            library.hipblasSetPointerMode.restype = ctypes.c_int
+            _HIPBLAS_LIBRARY = library
+        return _HIPBLAS_LIBRARY
+
+    def _prepare_hipblas(device):
+        library = _load_hipblas()
+        torch_device = torch.device(device)
+        device_index = torch_device.index
+        if device_index is None:
+            device_index = torch.cuda.current_device()
+        handle = _HIPBLAS_HANDLES.get(device_index)
+        if handle is None:
+            with torch.cuda.device(device_index):
+                handle = ctypes.c_void_p()
+                _check_hipblas_status(
+                    library.hipblasCreate(ctypes.byref(handle)), "hipblasCreate"
+                )
+                _check_hipblas_status(
+                    library.hipblasSetPointerMode(handle, 0),
+                    "hipblasSetPointerMode",
+                )
+            _HIPBLAS_HANDLES[device_index] = handle
+        stream = torch.cuda.current_stream(device).cuda_stream
+        _check_hipblas_status(
+            library.hipblasSetStream(handle, ctypes.c_void_p(stream)),
+            "hipblasSetStream",
+        )
+        return library, handle
+
+    def _destroy_hipblas_handles():
+        if _HIPBLAS_LIBRARY is None:
+            return
+        for handle in tuple(_HIPBLAS_HANDLES.values()):
+            try:
+                _HIPBLAS_LIBRARY.hipblasDestroy(handle)
+            except Exception:
+                pass
+        _HIPBLAS_HANDLES.clear()
+
+    def _resolve_hipblas_tpmv(library, dtype):
+        try:
+            symbol = _HIPBLAS_TPMV_FUNCS[dtype]
+        except KeyError as error:
+            raise ValueError(
+                f"Unsupported Hygon TPMV benchmark dtype: {dtype}"
+            ) from error
+        function = getattr(library, symbol)
+        function.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_int,
+        ]
+        function.restype = ctypes.c_int
+        return function
+
+    atexit.register(_destroy_hipblas_handles)
 
 
-def cublas_tpmv_baseline(
-    AP,
-    x,
-    uplo,
-    trans,
-    diag,
-    n,
-    incx,
-    handle,
-    c_func,
-    **kwargs,
-):
-    if n == 0:
+_cublas = None if IS_HYGON else load_cublas()
+
+_CUBLAS_TPMV_FUNCS = (
+    {}
+    if IS_HYGON
+    else {
+        torch.float32: _cublas.cublasStpmv_v2,
+        torch.float64: _cublas.cublasDtpmv_v2,
+        torch.complex64: _cublas.cublasCtpmv_v2,
+        torch.complex128: _cublas.cublasZtpmv_v2,
+    }
+)
+
+
+if IS_HYGON:
+
+    def cublas_tpmv_baseline(
+        AP,
+        x,
+        uplo,
+        trans,
+        diag,
+        n,
+        incx,
+        handle,
+        c_func,
+        hip_uplo,
+        hip_trans,
+        hip_diag,
+        **kwargs,
+    ):
+        status = c_func(
+            handle,
+            hip_uplo,
+            hip_trans,
+            hip_diag,
+            n,
+            ctypes.c_void_p(AP.data_ptr()),
+            ctypes.c_void_p(x.data_ptr()),
+            incx,
+        )
+        _check_hipblas_status(status, "hipBLAS TPMV")
         return x
-    status = c_func(
-        ctypes.c_void_p(handle),
-        ctypes.c_int(uplo),
-        ctypes.c_int(trans),
-        ctypes.c_int(diag),
-        ctypes.c_int(n),
-        ctypes.c_void_p(AP.data_ptr()),
-        ctypes.c_void_p(x.data_ptr()),
-        ctypes.c_int(incx),
-    )
-    if status != 0:
-        raise RuntimeError(f"cublasXtpmv_v2 failed with status code: {status}")
-    return x
+
+else:
+
+    def cublas_tpmv_baseline(
+        AP,
+        x,
+        uplo,
+        trans,
+        diag,
+        n,
+        incx,
+        handle,
+        c_func,
+        **kwargs,
+    ):
+        status = c_func(
+            ctypes.c_void_p(handle),
+            ctypes.c_int(uplo),
+            ctypes.c_int(trans),
+            ctypes.c_int(diag),
+            ctypes.c_int(n),
+            ctypes.c_void_p(AP.data_ptr()),
+            ctypes.c_void_p(x.data_ptr()),
+            ctypes.c_int(incx),
+        )
+        if status != 0:
+            raise RuntimeError(f"cublasXtpmv_v2 failed with status code: {status}")
+        return x
 
 
 def _gems_wrapper(op):
@@ -142,6 +273,7 @@ class TpmvBenchmark(Benchmark):
         self.uplo = uplo
         self.trans = trans
         self.diag = diag
+        self.correctness_reference = "hipBLAS" if IS_HYGON else "cuBLAS"
 
     def set_more_metrics(self):
         return ["tflops", "gbps"]
@@ -151,19 +283,28 @@ class TpmvBenchmark(Benchmark):
         return None
 
     def get_input_iter(self, cur_dtype) -> Generator:
-        handle = cp.cuda.device.get_cublas_handle()
-        cublas.setPointerMode(handle, cublas.CUBLAS_POINTER_MODE_HOST)
-
-        if cur_dtype not in _CUBLAS_TPMV_FUNCS:
-            raise ValueError(f"Unsupported dtype: {cur_dtype}")
-        c_func = _CUBLAS_TPMV_FUNCS[cur_dtype]
+        if IS_HYGON:
+            library, handle = _prepare_hipblas(self.device)
+            c_func = _resolve_hipblas_tpmv(library, cur_dtype)
+            hip_uplo = 121 if self.uplo == CUBLAS_FILL_MODE_UPPER else 122
+            hip_trans = {
+                CUBLAS_OP_N: 111,
+                CUBLAS_OP_T: 112,
+                CUBLAS_OP_C: 113,
+            }[self.trans]
+            hip_diag = 132 if self.diag == CUBLAS_DIAG_UNIT else 131
+        else:
+            handle = cp.cuda.device.get_cublas_handle()
+            cublas.setPointerMode(handle, cublas.CUBLAS_POINTER_MODE_HOST)
+            if cur_dtype not in _CUBLAS_TPMV_FUNCS:
+                raise ValueError(f"Unsupported dtype: {cur_dtype}")
+            c_func = _CUBLAS_TPMV_FUNCS[cur_dtype]
 
         for shape in self.shapes:
             n = shape[0] if isinstance(shape, (tuple, list)) else shape
             AP = _generate_packed_triangular(n, cur_dtype, self.device)
             x = torch.randn(n, dtype=cur_dtype, device=self.device)
-
-            yield AP, x.clone(), {
+            kwargs = {
                 "uplo": self.uplo,
                 "trans": self.trans,
                 "diag": self.diag,
@@ -172,6 +313,13 @@ class TpmvBenchmark(Benchmark):
                 "handle": handle,
                 "c_func": c_func,
             }
+            if IS_HYGON:
+                kwargs.update(
+                    hip_uplo=hip_uplo,
+                    hip_trans=hip_trans,
+                    hip_diag=hip_diag,
+                )
+            yield AP, x.clone(), kwargs
 
     def get_tflops(self, op, *args, **kwargs):
         n = kwargs.get("n", 0)
@@ -213,7 +361,7 @@ def test_perf_stpmv():
 @pytest.mark.stpmv
 def test_perf_stpmv_upper():
     bench = TpmvBenchmark(
-        op_name="stpmv_upper",
+        op_name="stpmv",
         torch_op=cublas_tpmv_baseline,
         gems_op=gems_stpmv_wrapper,
         dtypes=[torch.float32],
@@ -227,7 +375,7 @@ def test_perf_stpmv_upper():
 @pytest.mark.stpmv
 def test_perf_stpmv_trans():
     bench = TpmvBenchmark(
-        op_name="stpmv_trans",
+        op_name="stpmv",
         torch_op=cublas_tpmv_baseline,
         gems_op=gems_stpmv_wrapper,
         dtypes=[torch.float32],
@@ -241,7 +389,7 @@ def test_perf_stpmv_trans():
 @pytest.mark.stpmv
 def test_perf_stpmv_upper_trans():
     bench = TpmvBenchmark(
-        op_name="stpmv_upper_trans",
+        op_name="stpmv",
         torch_op=cublas_tpmv_baseline,
         gems_op=gems_stpmv_wrapper,
         dtypes=[torch.float32],
@@ -255,7 +403,7 @@ def test_perf_stpmv_upper_trans():
 @pytest.mark.stpmv
 def test_perf_stpmv_unit():
     bench = TpmvBenchmark(
-        op_name="stpmv_unit",
+        op_name="stpmv",
         torch_op=cublas_tpmv_baseline,
         gems_op=gems_stpmv_wrapper,
         dtypes=[torch.float32],
@@ -287,7 +435,7 @@ def test_perf_dtpmv_upper():
     if not flag_blas.runtime.device.support_fp64:
         pytest.skip("Device does not support float64")
     bench = TpmvBenchmark(
-        op_name="dtpmv_upper",
+        op_name="dtpmv",
         torch_op=cublas_tpmv_baseline,
         gems_op=gems_dtpmv_wrapper,
         dtypes=[torch.float64],
@@ -303,7 +451,7 @@ def test_perf_dtpmv_trans():
     if not flag_blas.runtime.device.support_fp64:
         pytest.skip("Device does not support float64")
     bench = TpmvBenchmark(
-        op_name="dtpmv_trans",
+        op_name="dtpmv",
         torch_op=cublas_tpmv_baseline,
         gems_op=gems_dtpmv_wrapper,
         dtypes=[torch.float64],
@@ -319,7 +467,7 @@ def test_perf_dtpmv_upper_trans():
     if not flag_blas.runtime.device.support_fp64:
         pytest.skip("Device does not support float64")
     bench = TpmvBenchmark(
-        op_name="dtpmv_upper_trans",
+        op_name="dtpmv",
         torch_op=cublas_tpmv_baseline,
         gems_op=gems_dtpmv_wrapper,
         dtypes=[torch.float64],
@@ -335,7 +483,7 @@ def test_perf_dtpmv_unit():
     if not flag_blas.runtime.device.support_fp64:
         pytest.skip("Device does not support float64")
     bench = TpmvBenchmark(
-        op_name="dtpmv_unit",
+        op_name="dtpmv",
         torch_op=cublas_tpmv_baseline,
         gems_op=gems_dtpmv_wrapper,
         dtypes=[torch.float64],
@@ -363,7 +511,7 @@ def test_perf_ctpmv():
 @pytest.mark.ctpmv
 def test_perf_ctpmv_upper():
     bench = TpmvBenchmark(
-        op_name="ctpmv_upper",
+        op_name="ctpmv",
         torch_op=cublas_tpmv_baseline,
         gems_op=gems_ctpmv_wrapper,
         dtypes=[torch.complex64],
@@ -377,7 +525,7 @@ def test_perf_ctpmv_upper():
 @pytest.mark.ctpmv
 def test_perf_ctpmv_trans():
     bench = TpmvBenchmark(
-        op_name="ctpmv_trans",
+        op_name="ctpmv",
         torch_op=cublas_tpmv_baseline,
         gems_op=gems_ctpmv_wrapper,
         dtypes=[torch.complex64],
@@ -391,7 +539,7 @@ def test_perf_ctpmv_trans():
 @pytest.mark.ctpmv
 def test_perf_ctpmv_conj():
     bench = TpmvBenchmark(
-        op_name="ctpmv_conj",
+        op_name="ctpmv",
         torch_op=cublas_tpmv_baseline,
         gems_op=gems_ctpmv_wrapper,
         dtypes=[torch.complex64],
@@ -405,7 +553,7 @@ def test_perf_ctpmv_conj():
 @pytest.mark.ctpmv
 def test_perf_ctpmv_upper_conj():
     bench = TpmvBenchmark(
-        op_name="ctpmv_upper_conj",
+        op_name="ctpmv",
         torch_op=cublas_tpmv_baseline,
         gems_op=gems_ctpmv_wrapper,
         dtypes=[torch.complex64],
@@ -419,7 +567,7 @@ def test_perf_ctpmv_upper_conj():
 @pytest.mark.ctpmv
 def test_perf_ctpmv_unit():
     bench = TpmvBenchmark(
-        op_name="ctpmv_unit",
+        op_name="ctpmv",
         torch_op=cublas_tpmv_baseline,
         gems_op=gems_ctpmv_wrapper,
         dtypes=[torch.complex64],
@@ -451,7 +599,7 @@ def test_perf_ztpmv_upper():
     if not flag_blas.runtime.device.support_fp64:
         pytest.skip("Device does not support float64")
     bench = TpmvBenchmark(
-        op_name="ztpmv_upper",
+        op_name="ztpmv",
         torch_op=cublas_tpmv_baseline,
         gems_op=gems_ztpmv_wrapper,
         dtypes=[torch.complex128],
@@ -467,7 +615,7 @@ def test_perf_ztpmv_trans():
     if not flag_blas.runtime.device.support_fp64:
         pytest.skip("Device does not support float64")
     bench = TpmvBenchmark(
-        op_name="ztpmv_trans",
+        op_name="ztpmv",
         torch_op=cublas_tpmv_baseline,
         gems_op=gems_ztpmv_wrapper,
         dtypes=[torch.complex128],
@@ -483,7 +631,7 @@ def test_perf_ztpmv_conj():
     if not flag_blas.runtime.device.support_fp64:
         pytest.skip("Device does not support float64")
     bench = TpmvBenchmark(
-        op_name="ztpmv_conj",
+        op_name="ztpmv",
         torch_op=cublas_tpmv_baseline,
         gems_op=gems_ztpmv_wrapper,
         dtypes=[torch.complex128],
@@ -499,7 +647,7 @@ def test_perf_ztpmv_upper_conj():
     if not flag_blas.runtime.device.support_fp64:
         pytest.skip("Device does not support float64")
     bench = TpmvBenchmark(
-        op_name="ztpmv_upper_conj",
+        op_name="ztpmv",
         torch_op=cublas_tpmv_baseline,
         gems_op=gems_ztpmv_wrapper,
         dtypes=[torch.complex128],
@@ -515,7 +663,7 @@ def test_perf_ztpmv_unit():
     if not flag_blas.runtime.device.support_fp64:
         pytest.skip("Device does not support float64")
     bench = TpmvBenchmark(
-        op_name="ztpmv_unit",
+        op_name="ztpmv",
         torch_op=cublas_tpmv_baseline,
         gems_op=gems_ztpmv_wrapper,
         dtypes=[torch.complex128],

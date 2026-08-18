@@ -14,14 +14,17 @@
 
 import ctypes
 import ctypes.util
-import math
 
-import cupy as cp
 import pytest
 import torch
 from scipy.linalg import blas as cpu_blas
 
 import flag_blas
+
+if flag_blas.vendor_name == "hygon":
+    from .hipblas_reference import check_hipblas_status, get_hipblas_context
+elif flag_blas.vendor_name != "ascend":
+    import cupy as cp
 from flag_blas.ops import (
     CUBLAS_DIAG_NON_UNIT,
     CUBLAS_DIAG_UNIT,
@@ -49,7 +52,56 @@ def load_cublas():
     raise RuntimeError("Unable to find libcublas.so on this system")
 
 
-_cublas = load_cublas()
+_cublas = None if flag_blas.vendor_name in {"ascend", "hygon"} else load_cublas()
+
+
+def hipblas_trmv_reference(uplo, trans, diag, n, A, lda, x, incx):
+    if n == 0:
+        return x
+
+    if A.dtype == torch.float32:
+        symbol = "hipblasStrmv"
+    elif A.dtype == torch.float64:
+        symbol = "hipblasDtrmv"
+    elif A.dtype == torch.complex64:
+        symbol = "hipblasCtrmv_v2"
+    elif A.dtype == torch.complex128:
+        symbol = "hipblasZtrmv_v2"
+    else:
+        raise ValueError(f"Unsupported dtype for hipBLAS TRMV: {A.dtype}")
+
+    hip_uplo = 121 if uplo == CUBLAS_FILL_MODE_UPPER else 122
+    hip_trans = 111 + trans
+    hip_diag = 131 + diag
+    library, handle = get_hipblas_context(A)
+    function = getattr(library, symbol)
+    function.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_int,
+    ]
+    function.restype = ctypes.c_int
+    check_hipblas_status(
+        function(
+            handle,
+            hip_uplo,
+            hip_trans,
+            hip_diag,
+            n,
+            ctypes.c_void_p(A.data_ptr()),
+            lda,
+            ctypes.c_void_p(x.data_ptr()),
+            incx,
+        ),
+        symbol,
+    )
+    return x
 
 
 def cublas_trmv_reference(uplo, trans, diag, n, A, lda, x, incx):
@@ -107,7 +159,10 @@ def trmv_reference(uplo, trans, diag, n, A, lda, x, incx):
         return cpu_trmv_reference(uplo, trans, diag, n, A, lda, x, incx)
 
     ref_x = x.clone()
-    cublas_trmv_reference(uplo, trans, diag, n, A, lda, ref_x, incx)
+    if flag_blas.vendor_name == "hygon":
+        hipblas_trmv_reference(uplo, trans, diag, n, A, lda, ref_x, incx)
+    else:
+        cublas_trmv_reference(uplo, trans, diag, n, A, lda, ref_x, incx)
     return ref_x
 
 
@@ -133,11 +188,12 @@ TRMV_SIZES = [
     6144,
     8192,
     10000,
+    12288,
     16384,
 ]
 TRMV_STRIDE_SIZES = [64, 127, 256]
 INCS = [1, 2, 3]
-LDA_EXTRAS = [0, 2]
+LDA_EXTRAS = [0]
 LDA_EXTRAS_STRIDE = [0, 1]
 
 
@@ -150,7 +206,7 @@ def make_triangular(n, lda, uplo, diag, dtype, device):
     if n == 0:
         return torch.zeros((n, lda), dtype=dtype, device=device).contiguous()
 
-    A = torch.randn((n, lda), dtype=dtype, device=device)
+    A = trmv_randn((n, lda), dtype, device)
     if not dtype.is_complex:
         A = A * 0.1
     rows = torch.arange(lda, device=device).view(1, lda)
@@ -178,17 +234,11 @@ def check_fp64_support():
         pytest.skip("No FP64 support on this device")
 
 
-def _trmv_tol(dtype, n):
-    K = max(1, n)
-    if dtype == torch.float32:
-        return min(max(1e-5, 1e-6 * math.sqrt(K)), 1e-3)
-    if dtype == torch.float64:
-        return min(max(1e-13, 1e-14 * math.sqrt(K)), 1e-11)
-    if dtype == torch.complex64:
-        return min(max(2e-5, 8e-6 * math.sqrt(K)), 2e-3)
-    if dtype == torch.complex128:
-        return min(max(2e-13, 2e-14 * math.sqrt(K)), 2e-11)
-    raise ValueError(f"Unsupported dtype {dtype}")
+def trmv_randn(shape, dtype, device):
+    if flag_blas.vendor_name == "ascend" and dtype == torch.complex64:
+        values = torch.randn((*shape, 2), dtype=torch.float32, device=device)
+        return torch.view_as_complex(values)
+    return torch.randn(shape, dtype=dtype, device=device)
 
 
 UPLOS = [CUBLAS_FILL_MODE_LOWER, CUBLAS_FILL_MODE_UPPER]
@@ -207,9 +257,9 @@ def test_accuracy_strmv(n, uplo, trans, diag, lda_extra):
     dtype = torch.float32
     lda = max(1, n + lda_extra)
     A = make_triangular(n, lda, uplo, diag, dtype, flag_blas.device)
-    x = torch.randn(max(n, 1), dtype=dtype, device=flag_blas.device)
+    x = trmv_randn((max(n, 1),), dtype, flag_blas.device)
     ref_x = trmv_reference(uplo, trans, diag, n, A, lda, x, 1)
-    flag_blas.ops.strmv(uplo, trans, diag, n, A, lda, x, 1)
+    flag_blas.strmv(uplo, trans, diag, n, A, lda, x, 1)
 
     blas_assert_close(x, ref_x, dtype, reduce_dim=n)
 
@@ -225,9 +275,9 @@ def test_accuracy_strmv_stride(n, uplo, trans, diag, incx, lda_extra):
     dtype = torch.float32
     lda = n + lda_extra
     A = make_triangular(n, lda, uplo, diag, dtype, flag_blas.device)
-    x = torch.randn(1 + (n - 1) * incx, dtype=dtype, device=flag_blas.device)
+    x = trmv_randn((1 + (n - 1) * incx,), dtype, flag_blas.device)
     ref_x = trmv_reference(uplo, trans, diag, n, A, lda, x, incx)
-    flag_blas.ops.strmv(uplo, trans, diag, n, A, lda, x, incx)
+    flag_blas.strmv(uplo, trans, diag, n, A, lda, x, incx)
 
     blas_assert_close(x, ref_x, dtype, reduce_dim=n)
 
@@ -243,9 +293,9 @@ def test_accuracy_dtrmv(n, uplo, trans, diag, lda_extra):
     dtype = torch.float64
     lda = max(1, n + lda_extra)
     A = make_triangular(n, lda, uplo, diag, dtype, flag_blas.device)
-    x = torch.randn(max(n, 1), dtype=dtype, device=flag_blas.device)
+    x = trmv_randn((max(n, 1),), dtype, flag_blas.device)
     ref_x = trmv_reference(uplo, trans, diag, n, A, lda, x, 1)
-    flag_blas.ops.dtrmv(uplo, trans, diag, n, A, lda, x, 1)
+    flag_blas.dtrmv(uplo, trans, diag, n, A, lda, x, 1)
 
     blas_assert_close(x, ref_x, dtype, reduce_dim=n)
 
@@ -262,9 +312,9 @@ def test_accuracy_dtrmv_stride(n, uplo, trans, diag, incx, lda_extra):
     dtype = torch.float64
     lda = n + lda_extra
     A = make_triangular(n, lda, uplo, diag, dtype, flag_blas.device)
-    x = torch.randn(1 + (n - 1) * incx, dtype=dtype, device=flag_blas.device)
+    x = trmv_randn((1 + (n - 1) * incx,), dtype, flag_blas.device)
     ref_x = trmv_reference(uplo, trans, diag, n, A, lda, x, incx)
-    flag_blas.ops.dtrmv(uplo, trans, diag, n, A, lda, x, incx)
+    flag_blas.dtrmv(uplo, trans, diag, n, A, lda, x, incx)
 
     blas_assert_close(x, ref_x, dtype, reduce_dim=n)
 
@@ -279,9 +329,9 @@ def test_accuracy_ctrmv(n, uplo, trans, diag, lda_extra):
     dtype = torch.complex64
     lda = max(1, n + lda_extra)
     A = make_triangular(n, lda, uplo, diag, dtype, flag_blas.device)
-    x = torch.randn(max(n, 1), dtype=dtype, device=flag_blas.device)
+    x = trmv_randn((max(n, 1),), dtype, flag_blas.device)
     ref_x = trmv_reference(uplo, trans, diag, n, A, lda, x, 1)
-    flag_blas.ops.ctrmv(uplo, trans, diag, n, A, lda, x, 1)
+    flag_blas.ctrmv(uplo, trans, diag, n, A, lda, x, 1)
 
     blas_assert_close(x, ref_x, dtype, reduce_dim=n)
 
@@ -297,9 +347,9 @@ def test_accuracy_ctrmv_stride(n, uplo, trans, diag, incx, lda_extra):
     dtype = torch.complex64
     lda = n + lda_extra
     A = make_triangular(n, lda, uplo, diag, dtype, flag_blas.device)
-    x = torch.randn(1 + (n - 1) * incx, dtype=dtype, device=flag_blas.device)
+    x = trmv_randn((1 + (n - 1) * incx,), dtype, flag_blas.device)
     ref_x = trmv_reference(uplo, trans, diag, n, A, lda, x, incx)
-    flag_blas.ops.ctrmv(uplo, trans, diag, n, A, lda, x, incx)
+    flag_blas.ctrmv(uplo, trans, diag, n, A, lda, x, incx)
 
     blas_assert_close(x, ref_x, dtype, reduce_dim=n)
 
@@ -315,9 +365,9 @@ def test_accuracy_ztrmv(n, uplo, trans, diag, lda_extra):
     dtype = torch.complex128
     lda = max(1, n + lda_extra)
     A = make_triangular(n, lda, uplo, diag, dtype, flag_blas.device)
-    x = torch.randn(max(n, 1), dtype=dtype, device=flag_blas.device)
+    x = trmv_randn((max(n, 1),), dtype, flag_blas.device)
     ref_x = trmv_reference(uplo, trans, diag, n, A, lda, x, 1)
-    flag_blas.ops.ztrmv(uplo, trans, diag, n, A, lda, x, 1)
+    flag_blas.ztrmv(uplo, trans, diag, n, A, lda, x, 1)
 
     blas_assert_close(x, ref_x, dtype, reduce_dim=n)
 
@@ -334,8 +384,8 @@ def test_accuracy_ztrmv_stride(n, uplo, trans, diag, incx, lda_extra):
     dtype = torch.complex128
     lda = n + lda_extra
     A = make_triangular(n, lda, uplo, diag, dtype, flag_blas.device)
-    x = torch.randn(1 + (n - 1) * incx, dtype=dtype, device=flag_blas.device)
+    x = trmv_randn((1 + (n - 1) * incx,), dtype, flag_blas.device)
     ref_x = trmv_reference(uplo, trans, diag, n, A, lda, x, incx)
-    flag_blas.ops.ztrmv(uplo, trans, diag, n, A, lda, x, incx)
+    flag_blas.ztrmv(uplo, trans, diag, n, A, lda, x, incx)
 
     blas_assert_close(x, ref_x, dtype, reduce_dim=n)

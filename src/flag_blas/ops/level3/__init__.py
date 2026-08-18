@@ -17,6 +17,7 @@ from .dgemm import dgemm
 from .group_gemm import group_bfgemm, group_hgemm, group_mm, group_tf32gemm
 from .hgemm import hgemm
 from .sgemm import sgemm
+from .trmm import CUBLAS_SIDE_LEFT, CUBLAS_SIDE_RIGHT, ctrmm, dtrmm, strmm, ztrmm
 from .zgemm import zgemm
 
 __all__ = [
@@ -30,4 +31,10 @@ __all__ = [
     "group_hgemm",
     "group_bfgemm",
     "group_tf32gemm",
+    "CUBLAS_SIDE_LEFT",
+    "CUBLAS_SIDE_RIGHT",
+    "strmm",
+    "dtrmm",
+    "ctrmm",
+    "ztrmm",
 ]

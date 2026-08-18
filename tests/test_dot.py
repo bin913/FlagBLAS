@@ -20,18 +20,8 @@ from scipy.linalg import blas as cpu_blas
 
 import flag_blas
 
-from .accuracy_utils import DEFAULT_SHAPES, L1_PAIR_STRIDES
+from .accuracy_utils import DEFAULT_SHAPES, L1_PAIR_STRIDES, blas_assert_close
 from .conftest import TO_CPU
-
-
-def _dot_tolerances(dtype, n):
-    if dtype == torch.float32:
-        if TO_CPU:
-            return 1e-3, max(1e-3, 1e-5 * (max(n, 1) ** 0.5))
-        return 1e-5, max(1e-5, 1e-5 * (max(n, 1) ** 0.5))
-    if TO_CPU:
-        return 1e-10, max(1e-10, 1e-12 * (max(n, 1) ** 0.5))
-    return 1e-12, max(1e-12, 1e-12 * (max(n, 1) ** 0.5))
 
 
 def cublas_dot_reference(n, x, incx, y, incy, result):
@@ -78,9 +68,12 @@ def cpu_dot_reference(n, x, incx, y, incy, result):
 
 def dot_reference(n, x, incx, y, incy, result):
     if TO_CPU:
-        cpu_dot_reference(n, x, incx, y, incy, result)
-    else:
-        cublas_dot_reference(n, x, incx, y, incy, result)
+        ref_result = torch.zeros(result.shape, dtype=result.dtype, device="cpu")
+        cpu_dot_reference(n, x, incx, y, incy, ref_result)
+        return ref_result
+
+    cublas_dot_reference(n, x, incx, y, incy, result)
+    return result
 
 
 @pytest.mark.dot
@@ -99,15 +92,13 @@ def test_accuracy_dot_real(dtype, shape, incx, incy):
     ref_result = torch.zeros(1, dtype=dtype, device=flag_blas.device)
     result = torch.zeros(1, dtype=dtype, device=flag_blas.device)
 
-    dot_reference(n, ref_x, incx, ref_y, incy, ref_result)
+    ref_result = dot_reference(n, ref_x, incx, ref_y, incy, ref_result)
 
     if dtype == torch.float32:
         flag_blas.ops.sdot(n, x, incx, y, incy, result)
     else:
         flag_blas.ops.ddot(n, x, incx, y, incy, result)
-    rtol, atol = _dot_tolerances(dtype, n)
-
-    torch.testing.assert_close(result, ref_result, rtol=rtol, atol=atol)
+    blas_assert_close(result, ref_result, dtype, reduce_dim=n)
 
 
 @pytest.mark.dot
@@ -148,15 +139,13 @@ def test_accuracy_dot_different_n_real(dtype, n, vec_size):
     ref_result = torch.zeros(1, dtype=dtype, device=flag_blas.device)
     result = torch.zeros(1, dtype=dtype, device=flag_blas.device)
 
-    dot_reference(n, ref_x, 1, ref_y, 1, ref_result)
+    ref_result = dot_reference(n, ref_x, 1, ref_y, 1, ref_result)
 
     if dtype == torch.float32:
         flag_blas.ops.sdot(n, x, 1, y, 1, result)
     else:
         flag_blas.ops.ddot(n, x, 1, y, 1, result)
-    rtol, atol = _dot_tolerances(dtype, n)
-
-    torch.testing.assert_close(result, ref_result, rtol=rtol, atol=atol)
+    blas_assert_close(result, ref_result, dtype, reduce_dim=n)
 
 
 @pytest.mark.dot

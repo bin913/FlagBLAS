@@ -113,3 +113,23 @@ jobs:
       gpu_check_script: 'tools/check_ascend_gpu.sh'
       pr_id: ${{ needs.preprocess.outputs.pr_id }}
       changed_files: ${{ join(needs.preprocess.outputs.changed_files, ' ') }}
+
+  test-hygon:
+    needs: preprocess
+    # Always run on workflow_dispatch or push to master.
+    # On PR, only run when the 'tests' or 'vendor/Hygon' label is present.
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'push' ||
+      contains(needs.preprocess.outputs.labels, 'tests') ||
+      contains(needs.preprocess.outputs.labels, 'ops') ||
+      contains(needs.preprocess.outputs.labels, 'core') ||
+      contains(needs.preprocess.outputs.labels, 'benchmark') ||
+      contains(needs.preprocess.outputs.labels, 'vendor/Hygon')
+    uses: ./.github/workflows/backend-test.yaml
+    with:
+      vendor: 'hygon'
+      runner_label: 'hygon'
+      gpu_check_script: 'tools/check_hygon_gpu.sh'
+      pr_id: ${{ needs.preprocess.outputs.pr_id }}
+      changed_files: ${{ join(needs.preprocess.outputs.changed_files, ' ') }}

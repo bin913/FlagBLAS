@@ -34,6 +34,12 @@ vendor/Ascend:
           - "src/flag_blas/runtime/backend/_ascend/**"
           - "tools/check_ascend_gpu.sh"
 
+vendor/Hygon:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "src/flag_blas/runtime/backend/_hygon/**"
+          - "tools/check_hygon_gpu.sh"
+
 ci/cd:
   - changed-files:
       - any-glob-to-any-file:

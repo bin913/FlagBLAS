@@ -97,6 +97,62 @@ jobs:
         shell: bash
         run: |
           bash ${{ inputs.test_script }} ${{ inputs.vendor }} ${{ inputs.pr_id }}
+      - name: Diagnose torch on hygon
+        if: ${{ inputs.vendor == 'hygon' && inputs.test_script == '' }}
+        shell: bash
+        run: |
+          set +e
+          source .venv/bin/activate
+          source tools/set-env.sh hygon
+          python - <<'EOF'
+          import sys, os, io, subprocess
+
+          def note(kind, title, text):
+              text = text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+              print(f"::{kind} title={title}::{text}")
+
+          buf = io.StringIO()
+          def log(*a):
+              line = " ".join(str(x) for x in a)
+              print(line)
+              buf.write(line + "\n")
+
+          log("=== hygon torch diagnose ===")
+          log("python:", sys.version.split()[0])
+          try:
+              import torch
+              log("torch:", torch.__version__)
+              log("hip:", getattr(torch.version, "hip", None))
+              log("cuda:", torch.version.cuda)
+              try:
+                  torch.cuda.init()
+                  log("cuda after init:", torch.cuda.is_available(),
+                      "count:", torch.cuda.device_count())
+              except Exception:
+                  import traceback
+                  log(traceback.format_exc())
+          except Exception:
+              import traceback
+              log(traceback.format_exc())
+
+          log("--- driver / env ---")
+          log("/dev/kfd exists:", os.path.exists("/dev/kfd"))
+          log("dri:", os.listdir("/dev/dri") if os.path.isdir("/dev/dri") else "no /dev/dri")
+          try:
+              out = subprocess.run(["hy-smi"], capture_output=True, text=True, timeout=30)
+              log("hy-smi rc:", out.returncode)
+              log((out.stdout or "")[:2000])
+              if out.stderr:
+                  log("hy-smi stderr:", out.stderr[:2000])
+          except Exception as e:
+              log("hy-smi error:", e)
+          for k in ("DTK_ENV", "HIP_PATH", "ROCM_PATH", "LD_LIBRARY_PATH"):
+              log(k, "=", os.environ.get(k, "<unset>"))
+
+          note("error", "hygon diagnose summary", buf.getvalue())
+          EOF
+          exit 0
+
       - name: Run backend tests
         if: ${{ inputs.test_script == '' }}
         shell: bash
@@ -105,4 +161,22 @@ jobs:
         run: |
           source .venv/bin/activate
           source tools/set-env.sh ${{ inputs.vendor }}
-          tools/run_op.sh ${{ inputs.pr_id }}
+          set +e
+          tools/run_op.sh ${{ inputs.pr_id }} 2>&1 | tee /tmp/run_op.log
+          RC=${PIPESTATUS[0]}
+          set -e
+          if [ $RC -ne 0 ]; then
+            tail -25 /tmp/run_op.log > /tmp/run_op_tail.txt
+            python -c "t=open('/tmp/run_op_tail.txt').read().replace('%','%25').replace(chr(13),'%0D').replace(chr(10),'%0A'); print('::error title=run_op failed (tail)::'+t)"
+            python - <<'PYEOF'
+          import traceback, sys
+          try:
+              import flag_blas
+              print("flag_blas import OK")
+          except Exception:
+              tb = traceback.format_exc()
+              print("::error title=flag_blas import traceback::" + tb.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))
+              sys.exit(1)
+          PYEOF
+            exit $RC
+          fi

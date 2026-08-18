@@ -328,6 +328,22 @@ GemvBenchmark:
     - [65536, 64]
   shape_desc: "M, N"
 
+# FP8 GEMV operations base shapes (M, N)
+# These shapes are used for the fp8_gemv (E4M3/E5M2) benchmarks
+Fp8GemvBenchmark:
+  shapes:
+    - [64, 64]
+    - [256, 256]
+    - [512, 512]
+    - [1024, 1024]
+    - [4096, 4096]
+    - [8192, 8192]
+    - [1024, 4096]
+    - [4096, 1024]
+    - [64, 65536]
+    - [65536, 64]
+  shape_desc: "M, N"
+
 # GBMV operations base shapes (M, N)
 # These shapes are used for sgbmv, dgbmv, cgbmv and zgbmv benchmarks
 GbmvBenchmark:
@@ -344,6 +360,21 @@ GbmvBenchmark:
     - [16384, 4096]
     - [10000, 10000]
   shape_desc: "M, N"
+
+# SBMV operations base shapes (N)
+# These shapes are used for ssbmv and dsbmv benchmarks
+SbmvBenchmark:
+  shapes:
+    - [256]
+    - [512]
+    - [1024]
+    - [2048]
+    - [4096]
+    - [6144]
+    - [8192]
+    - [12288]
+    - [16384]
+  shape_desc: "N"
 
 # SYMV operations base shapes (N)
 # These shapes are used for ssymv, dsymv, csymv and zsymv benchmarks
@@ -389,6 +420,36 @@ HemvBenchmark:
     - [4096]
     - [4097]
     - [6144]
+    - [12288]
+    - [16384]
+  shape_desc: "N"
+
+# SPMV operations base shapes (N)
+# These shapes are used for sspmv and dspmv benchmarks
+SpmvBenchmark:
+  shapes:
+    - [256]
+    - [512]
+    - [1024]
+    - [2048]
+    - [4096]
+    - [6144]
+    - [8192]
+    - [12288]
+    - [16384]
+  shape_desc: "N"
+
+# HBMV operations base shapes (N)
+# These shapes are used for chbmv and zhbmv benchmarks
+HbmvBenchmark:
+  shapes:
+    - [256]
+    - [512]
+    - [1024]
+    - [2048]
+    - [4096]
+    - [6144]
+    - [8192]
     - [12288]
     - [16384]
   shape_desc: "N"
@@ -457,6 +518,80 @@ TpmvBenchmark:
     - [16384]
   shape_desc: "N"
 
+# HPMV operations base shapes (N)
+# These shapes are used for chpmv and zhpmv benchmarks
+HpmvBenchmark:
+  shapes:
+    - [256]
+    - [512]
+    - [1024]
+    - [2048]
+    - [4096]
+    - [6144]
+    - [8192]
+    - [12288]
+    - [16384]
+  shape_desc: "N"
+
+GerBenchmark:
+  shapes:
+    - [64, 64]
+    - [256, 256]
+    - [1024, 1024]
+    - [4096, 4096]
+    - [1024, 4096]
+    - [4096, 1024]
+    - [127, 255]
+    - [1023, 4095]
+    - [4095, 1023]
+  shape_desc: "M, N"
+
+# TRMM operations base shapes (M, N)
+# These shapes are used for strmm, dtrmm, ctrmm and ztrmm benchmarks
+TrmmBenchmark:
+  shapes:
+    - [64, 64]
+    - [256, 256]
+    - [512, 256]
+    - [1024, 1024]
+    - [2048, 1024]
+    - [4096, 2048]
+    - [127, 255]
+    - [1023, 4095]
+  shape_desc: "M, N"
+
+# BLAS Level 2 vector and rank-one operation core shapes
+level2_dense_shapes: &level2_dense_shapes
+  shapes:
+    - [64]
+    - [96]
+    - [127]
+    - [128]
+    - [129]
+    - [192]
+    - [255]
+    - [256]
+    - [257]
+    - [384]
+    - [511]
+    - [512]
+    - [513]
+    - [768]
+    - [1023]
+    - [1024]
+    - [1025]
+    - [1536]
+    - [2048]
+    - [3072]
+    - [4096]
+  shape_desc: "N"
+
+TpsvBenchmark:
+  <<: *level2_dense_shapes
+SyrBenchmark:
+  <<: *level2_dense_shapes
+HerBenchmark:
+  <<: *level2_dense_shapes
 # TBSV operations base shapes (N)
 # These shapes are used for stbsv benchmarks
 StbsvBenchmark:
@@ -469,6 +604,19 @@ StbsvBenchmark:
     - [8192]
     - [12288]
     - [16384]
+  shape_desc: "N"
+
+# TRSV operations base shapes (N)
+# These shapes are used for strsv, dtrsv, ctrsv and ztrsv benchmarks
+TrsvBenchmark:
+  shapes:
+    - [64]
+    - [256]
+    - [512]
+    - [1024]
+    - [2048]
+    - [4096]
+    - [8192]
   shape_desc: "N"
 
 # the default shapes info
