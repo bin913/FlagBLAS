@@ -284,7 +284,7 @@ def test_perf_ssyr2():
 @pytest.mark.ssyr2
 def test_perf_ssyr2_upper():
     bench = Syr2Benchmark(
-        op_name="ssyr2_upper",
+        op_name="ssyr2",
         torch_op=cublas_syr2_baseline,
         gems_op=gems_ssyr2_wrapper,
         dtypes=[torch.float32],
@@ -312,7 +312,7 @@ def test_perf_dsyr2_upper():
     if not flag_blas.runtime.device.support_fp64:
         pytest.skip("Device does not support float64")
     bench = Syr2Benchmark(
-        op_name="dsyr2_upper",
+        op_name="dsyr2",
         torch_op=cublas_syr2_baseline,
         gems_op=gems_dsyr2_wrapper,
         dtypes=[torch.float64],

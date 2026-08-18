@@ -374,7 +374,7 @@ def test_perf_chpmv():
 @pytest.mark.chpmv
 def test_perf_chpmv_upper():
     bench = HpmvBenchmark(
-        op_name="chpmv_upper",
+        op_name="chpmv",
         torch_op=cublas_hpmv_baseline,
         gems_op=gems_chpmv_wrapper,
         dtypes=[torch.complex64],
@@ -406,7 +406,7 @@ def test_perf_zhpmv_upper():
     if not flag_blas.runtime.device.support_fp64:
         pytest.skip("Device does not support float64")
     bench = HpmvBenchmark(
-        op_name="zhpmv_upper",
+        op_name="zhpmv",
         torch_op=cublas_hpmv_baseline,
         gems_op=gems_zhpmv_wrapper,
         dtypes=[torch.complex128],
