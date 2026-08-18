@@ -359,7 +359,7 @@ def test_perf_strmv():
 @pytest.mark.strmv
 def test_perf_strmv_upper():
     bench = TrmvBenchmark(
-        op_name="strmv_upper",
+        op_name="strmv",
         torch_op=cublas_trmv_baseline,
         gems_op=gems_strmv_wrapper,
         dtypes=[torch.float32],
@@ -373,7 +373,7 @@ def test_perf_strmv_upper():
 @pytest.mark.strmv
 def test_perf_strmv_trans():
     bench = TrmvBenchmark(
-        op_name="strmv_trans",
+        op_name="strmv",
         torch_op=cublas_trmv_baseline,
         gems_op=gems_strmv_wrapper,
         dtypes=[torch.float32],
@@ -387,7 +387,7 @@ def test_perf_strmv_trans():
 @pytest.mark.strmv
 def test_perf_strmv_upper_trans():
     bench = TrmvBenchmark(
-        op_name="strmv_upper_trans",
+        op_name="strmv",
         torch_op=cublas_trmv_baseline,
         gems_op=gems_strmv_wrapper,
         dtypes=[torch.float32],
@@ -401,7 +401,7 @@ def test_perf_strmv_upper_trans():
 @pytest.mark.strmv
 def test_perf_strmv_unit():
     bench = TrmvBenchmark(
-        op_name="strmv_unit",
+        op_name="strmv",
         torch_op=cublas_trmv_baseline,
         gems_op=gems_strmv_wrapper,
         dtypes=[torch.float32],
@@ -433,7 +433,7 @@ def test_perf_dtrmv_upper():
     if not flag_blas.runtime.device.support_fp64:
         pytest.skip("Device does not support float64")
     bench = TrmvBenchmark(
-        op_name="dtrmv_upper",
+        op_name="dtrmv",
         torch_op=cublas_trmv_baseline,
         gems_op=gems_dtrmv_wrapper,
         dtypes=[torch.float64],
@@ -449,7 +449,7 @@ def test_perf_dtrmv_trans():
     if not flag_blas.runtime.device.support_fp64:
         pytest.skip("Device does not support float64")
     bench = TrmvBenchmark(
-        op_name="dtrmv_trans",
+        op_name="dtrmv",
         torch_op=cublas_trmv_baseline,
         gems_op=gems_dtrmv_wrapper,
         dtypes=[torch.float64],
@@ -465,7 +465,7 @@ def test_perf_dtrmv_upper_trans():
     if not flag_blas.runtime.device.support_fp64:
         pytest.skip("Device does not support float64")
     bench = TrmvBenchmark(
-        op_name="dtrmv_upper_trans",
+        op_name="dtrmv",
         torch_op=cublas_trmv_baseline,
         gems_op=gems_dtrmv_wrapper,
         dtypes=[torch.float64],
@@ -481,7 +481,7 @@ def test_perf_dtrmv_unit():
     if not flag_blas.runtime.device.support_fp64:
         pytest.skip("Device does not support float64")
     bench = TrmvBenchmark(
-        op_name="dtrmv_unit",
+        op_name="dtrmv",
         torch_op=cublas_trmv_baseline,
         gems_op=gems_dtrmv_wrapper,
         dtypes=[torch.float64],
@@ -509,7 +509,7 @@ def test_perf_ctrmv():
 @pytest.mark.ctrmv
 def test_perf_ctrmv_upper():
     bench = TrmvBenchmark(
-        op_name="ctrmv_upper",
+        op_name="ctrmv",
         torch_op=cublas_trmv_baseline,
         gems_op=gems_ctrmv_wrapper,
         dtypes=[torch.complex64],
@@ -523,7 +523,7 @@ def test_perf_ctrmv_upper():
 @pytest.mark.ctrmv
 def test_perf_ctrmv_trans():
     bench = TrmvBenchmark(
-        op_name="ctrmv_trans",
+        op_name="ctrmv",
         torch_op=cublas_trmv_baseline,
         gems_op=gems_ctrmv_wrapper,
         dtypes=[torch.complex64],
@@ -537,7 +537,7 @@ def test_perf_ctrmv_trans():
 @pytest.mark.ctrmv
 def test_perf_ctrmv_conj():
     bench = TrmvBenchmark(
-        op_name="ctrmv_conj",
+        op_name="ctrmv",
         torch_op=cublas_trmv_baseline,
         gems_op=gems_ctrmv_wrapper,
         dtypes=[torch.complex64],
@@ -551,7 +551,7 @@ def test_perf_ctrmv_conj():
 @pytest.mark.ctrmv
 def test_perf_ctrmv_upper_conj():
     bench = TrmvBenchmark(
-        op_name="ctrmv_upper_conj",
+        op_name="ctrmv",
         torch_op=cublas_trmv_baseline,
         gems_op=gems_ctrmv_wrapper,
         dtypes=[torch.complex64],
@@ -565,7 +565,7 @@ def test_perf_ctrmv_upper_conj():
 @pytest.mark.ctrmv
 def test_perf_ctrmv_unit():
     bench = TrmvBenchmark(
-        op_name="ctrmv_unit",
+        op_name="ctrmv",
         torch_op=cublas_trmv_baseline,
         gems_op=gems_ctrmv_wrapper,
         dtypes=[torch.complex64],
@@ -597,7 +597,7 @@ def test_perf_ztrmv_upper():
     if not flag_blas.runtime.device.support_fp64:
         pytest.skip("Device does not support float64")
     bench = TrmvBenchmark(
-        op_name="ztrmv_upper",
+        op_name="ztrmv",
         torch_op=cublas_trmv_baseline,
         gems_op=gems_ztrmv_wrapper,
         dtypes=[torch.complex128],
@@ -613,7 +613,7 @@ def test_perf_ztrmv_trans():
     if not flag_blas.runtime.device.support_fp64:
         pytest.skip("Device does not support float64")
     bench = TrmvBenchmark(
-        op_name="ztrmv_trans",
+        op_name="ztrmv",
         torch_op=cublas_trmv_baseline,
         gems_op=gems_ztrmv_wrapper,
         dtypes=[torch.complex128],
@@ -629,7 +629,7 @@ def test_perf_ztrmv_conj():
     if not flag_blas.runtime.device.support_fp64:
         pytest.skip("Device does not support float64")
     bench = TrmvBenchmark(
-        op_name="ztrmv_conj",
+        op_name="ztrmv",
         torch_op=cublas_trmv_baseline,
         gems_op=gems_ztrmv_wrapper,
         dtypes=[torch.complex128],
@@ -645,7 +645,7 @@ def test_perf_ztrmv_upper_conj():
     if not flag_blas.runtime.device.support_fp64:
         pytest.skip("Device does not support float64")
     bench = TrmvBenchmark(
-        op_name="ztrmv_upper_conj",
+        op_name="ztrmv",
         torch_op=cublas_trmv_baseline,
         gems_op=gems_ztrmv_wrapper,
         dtypes=[torch.complex128],
@@ -661,7 +661,7 @@ def test_perf_ztrmv_unit():
     if not flag_blas.runtime.device.support_fp64:
         pytest.skip("Device does not support float64")
     bench = TrmvBenchmark(
-        op_name="ztrmv_unit",
+        op_name="ztrmv",
         torch_op=cublas_trmv_baseline,
         gems_op=gems_ztrmv_wrapper,
         dtypes=[torch.complex128],

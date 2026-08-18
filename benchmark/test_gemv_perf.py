@@ -1004,7 +1004,7 @@ def test_perf_hgemv():
 @pytest.mark.hgemv
 def test_perf_hgemv_trans():
     bench = HalfGemvBenchmark(
-        op_name="hgemv_trans",
+        op_name="hgemv",
         torch_op=(
             hipblas_low_precision_gemv_baseline if IS_HYGON else cublas_half_gemv
         ),
@@ -1032,7 +1032,7 @@ def test_perf_bfgemv():
 @pytest.mark.bfgemv
 def test_perf_bfgemv_trans():
     bench = HalfGemvBenchmark(
-        op_name="bfgemv_trans",
+        op_name="bfgemv",
         torch_op=(
             hipblas_low_precision_gemv_baseline if IS_HYGON else cublas_half_gemv
         ),

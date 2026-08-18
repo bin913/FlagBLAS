@@ -262,7 +262,7 @@ def test_perf_cher2():
 @pytest.mark.cher2
 def test_perf_cher2_upper():
     bench = Her2Benchmark(
-        op_name="cher2_upper",
+        op_name="cher2",
         torch_op=cublas_her2_baseline,
         gems_op=gems_cher2_wrapper,
         dtypes=[torch.complex64],
@@ -290,7 +290,7 @@ def test_perf_zher2_upper():
     if not flag_blas.runtime.device.support_fp64:
         pytest.skip("Device does not support complex128")
     bench = Her2Benchmark(
-        op_name="zher2_upper",
+        op_name="zher2",
         torch_op=cublas_her2_baseline,
         gems_op=gems_zher2_wrapper,
         dtypes=[torch.complex128],
