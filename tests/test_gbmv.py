@@ -33,7 +33,6 @@ if flag_blas.vendor_name == "hygon":
 from .accuracy_utils import blas_assert_close, to_cpu_blas_tensor, to_reference
 from .conftest import TO_CPU
 
-### multibackend support
 IS_ASCEND = flag_blas.vendor_name == "ascend"
 IS_HYGON = flag_blas.vendor_name == "hygon"
 
