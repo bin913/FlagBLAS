@@ -21,6 +21,8 @@ from scipy.linalg import blas as cpu_blas
 
 import flag_blas
 
+# HEMV is supported on the Ascend platform (uses the CPU reference when
+# running on Ascend, since cupy/cuBLAS is unavailable there).
 if flag_blas.vendor_name == "hygon":
     from .hipblas_reference import (
         HipComplex,
