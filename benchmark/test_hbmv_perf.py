@@ -24,7 +24,6 @@ from benchmark.performance_utils import Benchmark, run_correctness_then_benchmar
 from flag_blas.ops import CUBLAS_FILL_MODE_LOWER, CUBLAS_FILL_MODE_UPPER
 from flag_blas.utils import shape_utils
 
-# multibackend support
 IS_HYGON = flag_blas.vendor_name == "hygon"
 
 if IS_HYGON:
@@ -193,27 +192,11 @@ if IS_HYGON:
         incx,
         beta,
         incy,
-        handle,
         c_func,
-        alpha_ptr,
-        beta_ptr,
-        hip_uplo,
+        vendor_args,
         **kwargs,
     ):
-        status = c_func(
-            handle,
-            hip_uplo,
-            n,
-            k,
-            alpha_ptr,
-            ctypes.c_void_p(A.data_ptr()),
-            lda,
-            ctypes.c_void_p(x.data_ptr()),
-            incx,
-            beta_ptr,
-            ctypes.c_void_p(y.data_ptr()),
-            incy,
-        )
+        status = c_func(*vendor_args)
         _check_hipblas_status(status, "hipBLAS HBMV")
         return y
 
@@ -231,35 +214,20 @@ else:
         incx,
         beta,
         incy,
-        handle,
         c_func,
-        alpha_c,
-        beta_c,
+        vendor_args,
         **kwargs,
     ):
         if n == 0:
             return y
-        status = c_func(
-            ctypes.c_void_p(handle),
-            ctypes.c_int(uplo),
-            ctypes.c_int(n),
-            ctypes.c_int(k),
-            ctypes.byref(alpha_c),
-            ctypes.c_void_p(A.data_ptr()),
-            ctypes.c_int(lda),
-            ctypes.c_void_p(x.data_ptr()),
-            ctypes.c_int(incx),
-            ctypes.byref(beta_c),
-            ctypes.c_void_p(y.data_ptr()),
-            ctypes.c_int(incy),
-        )
+        status = c_func(*vendor_args)
         if status != 0:
             raise RuntimeError(f"cublasXhbmv_v2 failed with status code: {status}")
         return y
 
 
 def _gems_wrapper(op):
-    def _impl(A, x, y, uplo, n, k, alpha, lda, incx, beta, incy, handle, **kwargs):
+    def _impl(A, x, y, uplo, n, k, alpha, lda, incx, beta, incy, handle=None, **kwargs):
         op(uplo, n, k, alpha, A, lda, x, incx, beta, y, incy)
         return y
 
@@ -272,9 +240,18 @@ gems_zhbmv_wrapper = _gems_wrapper(flag_blas.zhbmv)
 
 def _generate_hermitian_banded(n, k, lda, uplo, dtype, device):
     A = torch.randn((n, lda), dtype=dtype, device=device)
-    diag_col = k if uplo == CUBLAS_FILL_MODE_UPPER else 0
+    diag_col = 0 if uplo == CUBLAS_FILL_MODE_UPPER else k
     torch.view_as_real(A)[:, diag_col, 1].zero_()
-    return A
+    column_A = torch.zeros((n, lda), dtype=dtype, device=device)
+    for d in range(k + 1):
+        count = n - d
+        if count <= 0:
+            continue
+        if uplo == CUBLAS_FILL_MODE_UPPER:
+            column_A[d:, k - d] = A[:count, d]
+        else:
+            column_A[:count, d] = A[d:, k - d]
+    return A.contiguous(), column_A.contiguous()
 
 
 def _band_nnz(n, k):
@@ -342,11 +319,42 @@ class HbmvBenchmark(Benchmark):
                     continue
                 seen.add(key)
                 lda = k + 1
-                A = _generate_hermitian_banded(
+                A, column_A = _generate_hermitian_banded(
                     n, k, lda, self.uplo, cur_dtype, self.device
                 )
                 x = torch.randn(n, dtype=cur_dtype, device=self.device)
                 y = torch.randn(n, dtype=cur_dtype, device=self.device)
+
+                if IS_HYGON:
+                    vendor_args = (
+                        handle,
+                        hip_uplo,
+                        n,
+                        k,
+                        alpha_ptr,
+                        ctypes.c_void_p(column_A.data_ptr()),
+                        lda,
+                        ctypes.c_void_p(x.data_ptr()),
+                        1,
+                        beta_ptr,
+                        ctypes.c_void_p(y.data_ptr()),
+                        1,
+                    )
+                else:
+                    vendor_args = (
+                        ctypes.c_void_p(handle),
+                        ctypes.c_int(self.uplo),
+                        ctypes.c_int(n),
+                        ctypes.c_int(k),
+                        alpha_ptr,
+                        ctypes.c_void_p(column_A.data_ptr()),
+                        ctypes.c_int(lda),
+                        ctypes.c_void_p(x.data_ptr()),
+                        ctypes.c_int(1),
+                        beta_ptr,
+                        ctypes.c_void_p(y.data_ptr()),
+                        ctypes.c_int(1),
+                    )
 
                 call_kwargs = {
                     "uplo": self.uplo,
@@ -357,17 +365,12 @@ class HbmvBenchmark(Benchmark):
                     "incx": 1,
                     "beta": self.beta,
                     "incy": 1,
-                    "handle": handle,
                     "c_func": c_func,
+                    "vendor_args": vendor_args,
+                    "column_A": column_A,
+                    "alpha_c": alpha_c,
+                    "beta_c": beta_c,
                 }
-                if IS_HYGON:
-                    call_kwargs.update(
-                        alpha_ptr=alpha_ptr,
-                        beta_ptr=beta_ptr,
-                        hip_uplo=hip_uplo,
-                    )
-                else:
-                    call_kwargs.update(alpha_c=alpha_c, beta_c=beta_c)
                 yield A, x, y, call_kwargs
 
     def get_tflops(self, op, *args, **kwargs):
@@ -394,9 +397,14 @@ class HbmvBenchmark(Benchmark):
 
     def clone_correctness_inputs(self, args, kwargs):
         A, x, y = args
-        ref_args = (A, x, y.clone())
+        ref_y = y.clone()
+        ref_kwargs = dict(kwargs)
+        vendor_args = list(kwargs["vendor_args"])
+        vendor_args[10] = ctypes.c_void_p(ref_y.data_ptr())
+        ref_kwargs["vendor_args"] = tuple(vendor_args)
+        ref_args = (A, x, ref_y)
         blas_args = (A, x, y.clone())
-        return ref_args, kwargs, blas_args, kwargs
+        return ref_args, ref_kwargs, blas_args, kwargs
 
 
 @pytest.mark.chbmv

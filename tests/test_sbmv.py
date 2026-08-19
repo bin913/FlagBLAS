@@ -12,16 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import ctypes
+import ctypes.util
+
 import pytest
 import torch
 from scipy.linalg import blas as cpu_blas
 
 import flag_blas
 
-if flag_blas.vendor_name != "ascend":
-    import ctypes
-    import ctypes.util
-
+if flag_blas.vendor_name == "hygon":
+    from .hipblas_reference import check_hipblas_status, get_hipblas_context
+elif flag_blas.vendor_name != "ascend":
     import cupy as cp
     from cupy_backends.cuda.libs import cublas
 from flag_blas.ops import CUBLAS_FILL_MODE_LOWER, CUBLAS_FILL_MODE_UPPER
@@ -44,7 +46,59 @@ def load_cublas():
     raise RuntimeError("Unable to find libcublas.so on this system")
 
 
-_cublas = None if flag_blas.vendor_name == "ascend" else load_cublas()
+_cublas = None if flag_blas.vendor_name in {"ascend", "hygon"} else load_cublas()
+
+
+def hipblas_sbmv_reference(uplo, n, k, alpha, A, lda, x, incx, beta, y, incy):
+    if n == 0:
+        return
+
+    if A.dtype == torch.float32:
+        symbol = "hipblasSsbmv"
+        scalar_type = ctypes.c_float
+    elif A.dtype == torch.float64:
+        symbol = "hipblasDsbmv"
+        scalar_type = ctypes.c_double
+    else:
+        raise ValueError(f"Unsupported dtype for hipBLAS SBMV: {A.dtype}")
+
+    library, handle = get_hipblas_context(A)
+    function = getattr(library, symbol)
+    function.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.POINTER(scalar_type),
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.POINTER(scalar_type),
+        ctypes.c_void_p,
+        ctypes.c_int,
+    ]
+    function.restype = ctypes.c_int
+    alpha_c = scalar_type(alpha)
+    beta_c = scalar_type(beta)
+    hip_uplo = 121 if uplo == CUBLAS_FILL_MODE_UPPER else 122
+    check_hipblas_status(
+        function(
+            handle,
+            hip_uplo,
+            n,
+            k,
+            ctypes.byref(alpha_c),
+            ctypes.c_void_p(A.data_ptr()),
+            lda,
+            ctypes.c_void_p(x.data_ptr()),
+            incx,
+            ctypes.byref(beta_c),
+            ctypes.c_void_p(y.data_ptr()),
+            incy,
+        ),
+        symbol,
+    )
 
 
 def cublas_sbmv_reference(uplo, n, k, alpha, A, lda, x, incx, beta, y, incy):
@@ -111,11 +165,19 @@ def cpu_sbmv_reference(uplo, n, k, alpha, A, lda, x, incx, beta, y, incy):
 
 
 def sbmv_reference(uplo, n, k, alpha, A, lda, x, incx, beta, y, incy):
+    uplo = (
+        CUBLAS_FILL_MODE_LOWER
+        if uplo == CUBLAS_FILL_MODE_UPPER
+        else CUBLAS_FILL_MODE_UPPER
+    )
     if TO_CPU:
         return cpu_sbmv_reference(uplo, n, k, alpha, A, lda, x, incx, beta, y, incy)
 
     ref_y = y.clone()
-    cublas_sbmv_reference(uplo, n, k, alpha, A, lda, x, incx, beta, ref_y, incy)
+    if flag_blas.vendor_name == "hygon":
+        hipblas_sbmv_reference(uplo, n, k, alpha, A, lda, x, incx, beta, ref_y, incy)
+    else:
+        cublas_sbmv_reference(uplo, n, k, alpha, A, lda, x, incx, beta, ref_y, incy)
     return ref_y
 
 

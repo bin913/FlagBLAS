@@ -192,6 +192,14 @@ def _check_common(A, x, y, uplo, n, k, lda, incx, incy):
         assert A.numel() >= n * lda
 
 
+def _row_major_sbmv_uplo(uplo):
+    return (
+        CUBLAS_FILL_MODE_LOWER
+        if uplo == CUBLAS_FILL_MODE_UPPER
+        else CUBLAS_FILL_MODE_UPPER
+    )
+
+
 def _strided_y(y: torch.Tensor, n: int, incy: int) -> torch.Tensor:
     return y[: (n - 1) * incy + 1 : incy]
 
@@ -226,6 +234,7 @@ def ssbmv(
             y_view.mul_(beta)
         return
 
+    uplo = _row_major_sbmv_uplo(uplo)
     beta_is_zero = beta == 0.0
     with torch_device_fn.device(A.device):
         grid = lambda meta: (triton.cdiv(n, meta["BLOCK_SIZE_M"]),)
@@ -281,6 +290,7 @@ def dsbmv(
     beta_int = _f64_to_i64(beta_val)
     beta_is_zero = beta_val == 0.0
 
+    uplo = _row_major_sbmv_uplo(uplo)
     with torch_device_fn.device(A.device):
         grid = lambda meta: (triton.cdiv(n, meta["BLOCK_SIZE_M"]),)
         dsbmv_kernel[grid](
