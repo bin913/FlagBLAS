@@ -1,3 +1,17 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import logging
 import struct
 from typing import Union
@@ -19,6 +33,14 @@ CUBLAS_FILL_MODE_UPPER = 1
 
 def _f64_to_i64(value: float) -> int:
     return struct.unpack("<q", struct.pack("<d", value))[0]
+
+
+def _row_major_uplo(uplo: int) -> int:
+    return (
+        CUBLAS_FILL_MODE_LOWER
+        if uplo == CUBLAS_FILL_MODE_UPPER
+        else CUBLAS_FILL_MODE_UPPER
+    )
 
 
 @libentry()
@@ -60,7 +82,7 @@ def _her_kernel(
     y_n = tl.load(x + offs_n * incx * 2 + 1, mask=offs_n < n, other=0.0)
 
     prod_r = x_m[:, None] * x_n[None, :] + y_m[:, None] * y_n[None, :]
-    prod_i = y_m[:, None] * x_n[None, :] - x_m[:, None] * y_n[None, :]
+    prod_i = x_m[:, None] * y_n[None, :] - y_m[:, None] * x_n[None, :]
 
     a_off = (offs_m[:, None] + offs_n[None, :] * lda) * 2
     old_r = tl.load(A + a_off, mask=mask, other=0.0)
@@ -77,6 +99,59 @@ def _her_kernel(
 
     tl.store(A + a_off, out_r, mask=mask)
     tl.store(A + a_off + 1, out_i, mask=mask)
+
+
+@libentry()
+@triton.jit
+def _zher_vector_kernel(
+    x,
+    A,
+    n: tl.constexpr,
+    alpha,
+    incx: tl.constexpr,
+    lda: tl.constexpr,
+    uplo: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    major = ((tl.sqrt(8.0 * pid + 1.0) - 1.0) * 0.5).to(tl.int32)
+    minor = pid - major * (major + 1) // 2
+    if uplo == 0:
+        pid_m = major
+        pid_n = minor
+    else:
+        pid_m = minor
+        pid_n = major
+
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    mask = (offs_m[:, None] < n) & (offs_n[None, :] < n)
+    if uplo == 1:
+        mask = mask & (offs_m[:, None] <= offs_n[None, :])
+    else:
+        mask = mask & (offs_m[:, None] >= offs_n[None, :])
+
+    x_mr = tl.load(x + offs_m * incx * 2, mask=offs_m < n, other=0.0)
+    x_mi = tl.load(x + offs_m * incx * 2 + 1, mask=offs_m < n, other=0.0)
+    x_nr = tl.load(x + offs_n * incx * 2, mask=offs_n < n, other=0.0)
+    x_ni = tl.load(x + offs_n * incx * 2 + 1, mask=offs_n < n, other=0.0)
+
+    prod_r = x_mr[:, None] * x_nr[None, :] + x_mi[:, None] * x_ni[None, :]
+    prod_i = x_mr[:, None] * x_ni[None, :] - x_mi[:, None] * x_nr[None, :]
+    alpha_value = alpha.to(tl.float64, bitcast=True)
+
+    a_off = (offs_m[:, None] + offs_n[None, :] * lda) * 2
+    components = tl.arange(0, 2)
+    complex_off = a_off[:, :, None] + components[None, None, :]
+    complex_mask = mask[:, :, None]
+    old = tl.load(A + complex_off, mask=complex_mask, other=0.0)
+    is_real = components[None, None, :] == 0
+    prod = tl.where(is_real, prod_r[:, :, None], prod_i[:, :, None])
+    out = old + alpha_value * prod
+    diag = offs_m[:, None] == offs_n[None, :]
+    out = tl.where(diag[:, :, None] & ~is_real, 0.0, out)
+    tl.store(A + complex_off, out, mask=complex_mask)
 
 
 def _check_her_args(name, uplo, n, alpha, x, incx, A, lda, dtype, alpha_dtype):
@@ -110,6 +185,7 @@ def _her_impl(name, uplo, n, alpha, x, incx, A, lda, dtype, alpha_dtype):
     _check_her_args(name, uplo, n, alpha, x, incx, A, lda, dtype, alpha_dtype)
     if n == 0:
         return A
+    uplo = _row_major_uplo(uplo)
 
     alpha_value = float(alpha.item() if isinstance(alpha, torch.Tensor) else alpha)
     is_double = dtype == torch.complex128
@@ -121,18 +197,31 @@ def _her_impl(name, uplo, n, alpha, x, incx, A, lda, dtype, alpha_dtype):
     tile_count = triton.cdiv(n, block_m)
     grid = (tile_count * (tile_count + 1) // 2,)
     with torch_device_fn.device(A.device):
-        _her_kernel[grid](
-            x_real,
-            A_real,
-            n,
-            kernel_alpha,
-            incx,
-            lda,
-            uplo,
-            IS_DOUBLE=is_double,
-            BLOCK_M=block_m,
-            BLOCK_N=block_n,
-        )
+        if is_double:
+            _zher_vector_kernel[grid](
+                x_real,
+                A_real,
+                n,
+                kernel_alpha,
+                incx,
+                lda,
+                uplo,
+                BLOCK_M=block_m,
+                BLOCK_N=block_n,
+            )
+        else:
+            _her_kernel[grid](
+                x_real,
+                A_real,
+                n,
+                kernel_alpha,
+                incx,
+                lda,
+                uplo,
+                IS_DOUBLE=False,
+                BLOCK_M=block_m,
+                BLOCK_N=block_n,
+            )
     return A
 
 
