@@ -1,3 +1,17 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import numpy as np
 import pytest
 import torch
@@ -5,12 +19,24 @@ from scipy.linalg import blas as cpu_blas
 
 import flag_blas
 
-if flag_blas.vendor_name != "ascend":
-    import cupy as cp
-    from cupy_backends.cuda.libs import cublas
-
 from .accuracy_utils import blas_assert_close, to_cpu_blas_tensor, to_reference
 from .conftest import TO_CPU
+
+IS_ASCEND = flag_blas.vendor_name == "ascend"
+IS_HYGON = flag_blas.vendor_name == "hygon"
+
+if IS_HYGON:
+    import ctypes
+
+    from .hipblas_reference import (
+        HipComplex,
+        HipDoubleComplex,
+        check_hipblas_status,
+        get_hipblas_context,
+    )
+elif not IS_ASCEND:
+    import cupy as cp
+    from cupy_backends.cuda.libs import cublas
 
 GER_OPS = {
     "sger": (torch.float32, np.float32, 1.5),
@@ -89,6 +115,56 @@ def cublas_ger_reference(op_name, m, n, alpha, x, incx, y, incy, A, lda):
     )
 
 
+def hipblas_ger_reference(op_name, m, n, alpha, x, incx, y, incy, A, lda):
+    if m == 0 or n == 0:
+        return
+
+    library, handle = get_hipblas_context(A)
+    symbols = {
+        "sger": ("hipblasSger", ctypes.c_float),
+        "dger": ("hipblasDger", ctypes.c_double),
+        "cgeru": ("hipblasCgeru_v2", HipComplex),
+        "cgerc": ("hipblasCgerc_v2", HipComplex),
+        "zgeru": ("hipblasZgeru_v2", HipDoubleComplex),
+        "zgerc": ("hipblasZgerc_v2", HipDoubleComplex),
+    }
+    symbol, scalar_type = symbols[op_name]
+    function = getattr(library, symbol)
+    function.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_int,
+    ]
+    function.restype = ctypes.c_int
+    if op_name.startswith(("c", "z")):
+        alpha_value = complex(alpha)
+        scalar = scalar_type(alpha_value.real, alpha_value.imag)
+    else:
+        scalar = scalar_type(alpha)
+    check_hipblas_status(
+        function(
+            handle,
+            m,
+            n,
+            ctypes.byref(scalar),
+            ctypes.c_void_p(x.data_ptr()),
+            incx,
+            ctypes.c_void_p(y.data_ptr()),
+            incy,
+            ctypes.c_void_p(A.data_ptr()),
+            lda,
+        ),
+        symbol,
+    )
+
+
 def cpu_ger_reference(op_name, m, n, alpha, x, incx, y, incy, A, lda):
     if m == 0 or n == 0:
         return to_cpu_blas_tensor(A)
@@ -122,7 +198,10 @@ def ger_reference(op_name, m, n, alpha, x, incx, y, incy, A, lda):
         return cpu_ger_reference(op_name, m, n, alpha, x, incx, y, incy, A, lda)
 
     ref_A = A.clone()
-    cublas_ger_reference(op_name, m, n, alpha, x, incx, y, incy, ref_A, lda)
+    if IS_HYGON:
+        hipblas_ger_reference(op_name, m, n, alpha, x, incx, y, incy, ref_A, lda)
+    else:
+        cublas_ger_reference(op_name, m, n, alpha, x, incx, y, incy, ref_A, lda)
     return ref_A
 
 
@@ -146,7 +225,9 @@ def run_ger_case(op_name, m, n, alpha, incx=1, incy=1):
 def test_ger_exports(op_name):
     assert hasattr(flag_blas.ops, op_name)
     assert hasattr(flag_blas, op_name)
-    if flag_blas.vendor_name != "ascend":
+    if IS_HYGON and op_name.startswith(("c", "z")):
+        assert getattr(flag_blas, op_name) is not getattr(flag_blas.ops, op_name)
+    elif not IS_ASCEND:
         assert getattr(flag_blas, op_name) is getattr(flag_blas.ops, op_name)
 
 
@@ -172,6 +253,24 @@ def test_accuracy_ger_stride(op_name, m, n, incx, incy):
 @pytest.mark.parametrize("m,n", [(64, 64), (127, 65), (1, 128), (128, 1)])
 def test_accuracy_ger_alpha_zero(op_name, m, n):
     run_ger_case(op_name, m, n, alpha=0.0)
+
+
+@pytest.mark.ger
+@pytest.mark.parametrize("op_name", GER_OPS)
+def test_ger_row_major_padded_layout(op_name):
+    dtype, _, alpha = GER_OPS[op_name]
+    _skip_if_unsupported(dtype)
+    m, n, lda = 3, 2, 5
+    x = ger_randn(m, dtype=dtype, device=flag_blas.device)
+    y = ger_randn(n, dtype=dtype, device=flag_blas.device)
+    A = ger_randn(m, lda, dtype=dtype, device=flag_blas.device)
+    expected = A.clone()
+    rhs = y.conj() if op_name.endswith("gerc") else y
+    expected[:, :n] += alpha * x[:, None] * rhs[None, :]
+
+    getattr(flag_blas, op_name)(m, n, alpha, x, 1, y, 1, A, lda)
+
+    blas_assert_close(A, to_reference(expected), dtype, reduce_dim=1)
 
 
 @pytest.mark.ger
@@ -215,7 +314,7 @@ def test_accuracy_ger_conjugate_difference(op_u, op_c, dtype, alpha):
 
     blas_assert_close(A_u, to_reference(ref_u), dtype)
     blas_assert_close(A_c, to_reference(ref_c), dtype)
-    if flag_blas.vendor_name == "ascend":
+    if IS_ASCEND:
         # torch.equal does not support complex tensors on Ascend.
         assert not torch.equal(torch.view_as_real(A_u), torch.view_as_real(A_c))
     else:

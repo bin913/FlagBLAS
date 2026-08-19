@@ -1,3 +1,17 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import struct
 from typing import Union
 
@@ -17,6 +31,14 @@ ScalarType = Union[float, int, complex, torch.Tensor]
 
 def _f64_to_i64(value: float) -> int:
     return struct.unpack("<q", struct.pack("<d", value))[0]
+
+
+def _row_major_uplo(uplo: int) -> int:
+    return (
+        CUBLAS_FILL_MODE_LOWER
+        if uplo == CUBLAS_FILL_MODE_UPPER
+        else CUBLAS_FILL_MODE_UPPER
+    )
 
 
 @libentry()
@@ -124,6 +146,62 @@ def _syr_complex_kernel(
     tl.store(A + elem * 2 + 1, old_i + upd_i, mask=mask)
 
 
+@libentry()
+@triton.jit
+def _zsyr_vector_kernel(
+    A,
+    x,
+    alpha_r,
+    alpha_i,
+    n: tl.constexpr,
+    lda: tl.constexpr,
+    incx: tl.constexpr,
+    uplo: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    major = ((tl.sqrt(8.0 * pid + 1.0) - 1.0) * 0.5).to(tl.int32)
+    minor = pid - major * (major + 1) // 2
+    if uplo == 0:
+        tile_count: tl.constexpr = (n + BLOCK_M - 1) // BLOCK_M
+        pid_m = tile_count - 1 - minor
+        pid_n = tile_count - 1 - major
+    else:
+        pid_m = minor
+        pid_n = major
+
+    rows = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    cols = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    mask_bounds = (rows[:, None] < n) & (cols[None, :] < n)
+    if uplo == 0:
+        mask_tri = rows[:, None] >= cols[None, :]
+    else:
+        mask_tri = rows[:, None] <= cols[None, :]
+    mask = mask_bounds & mask_tri
+
+    xr = tl.load(x + rows * incx * 2, mask=rows < n, other=0.0)
+    xi = tl.load(x + rows * incx * 2 + 1, mask=rows < n, other=0.0)
+    yr = tl.load(x + cols * incx * 2, mask=cols < n, other=0.0)
+    yi = tl.load(x + cols * incx * 2 + 1, mask=cols < n, other=0.0)
+    prod_r = xr[:, None] * yr[None, :] - xi[:, None] * yi[None, :]
+    prod_i = xr[:, None] * yi[None, :] + xi[:, None] * yr[None, :]
+    alpha_real = alpha_r.to(tl.float64, bitcast=True)
+    alpha_imag = alpha_i.to(tl.float64, bitcast=True)
+    upd_r = alpha_real * prod_r - alpha_imag * prod_i
+    upd_i = alpha_real * prod_i + alpha_imag * prod_r
+
+    elem = (rows[:, None] + cols[None, :] * lda) * 2
+    components = tl.arange(0, 2)
+    complex_off = elem[:, :, None] + components[None, None, :]
+    complex_mask = mask[:, :, None]
+    old = tl.load(A + complex_off, mask=complex_mask, other=0.0)
+    update = tl.where(
+        components[None, None, :] == 0, upd_r[:, :, None], upd_i[:, :, None]
+    )
+    tl.store(A + complex_off, old + update, mask=complex_mask)
+
+
 def _check_syr_args(uplo, n, x, incx, A, lda, dtype):
     assert uplo in (CUBLAS_FILL_MODE_UPPER, CUBLAS_FILL_MODE_LOWER)
     assert n >= 0
@@ -150,6 +228,7 @@ def _syr_real(
     _check_syr_args(uplo, n, x, incx, A, lda, dtype)
     if n == 0:
         return A
+    uplo = _row_major_uplo(uplo)
     alpha_value = float(alpha.item() if isinstance(alpha, torch.Tensor) else alpha)
     is_double = dtype == torch.float64
     kernel_alpha = _f64_to_i64(alpha_value) if is_double else alpha_value
@@ -185,6 +264,7 @@ def _syr_complex(
     _check_syr_args(uplo, n, x, incx, A, lda, dtype)
     if n == 0:
         return A
+    uplo = _row_major_uplo(uplo)
     alpha_c = complex(alpha.item() if isinstance(alpha, torch.Tensor) else alpha)
     is_double = dtype == torch.complex128
     alpha_r = _f64_to_i64(alpha_c.real) if is_double else alpha_c.real
@@ -202,21 +282,36 @@ def _syr_complex(
     else:
         grid = (tile_count, tile_count)
     with torch_device_fn.device(A.device):
-        _syr_complex_kernel[grid](
-            A_real,
-            x_real,
-            alpha_r,
-            alpha_i,
-            n,
-            lda,
-            incx,
-            uplo,
-            IS_DOUBLE=is_double,
-            TRIANGULAR_GRID=triangular_grid,
-            BLOCK_M=block_size,
-            BLOCK_N=block_size,
-            num_warps=8 if is_double and block_size == 32 else 4,
-        )
+        if is_double:
+            _zsyr_vector_kernel[grid](
+                A_real,
+                x_real,
+                alpha_r,
+                alpha_i,
+                n,
+                lda,
+                incx,
+                uplo,
+                BLOCK_M=block_size,
+                BLOCK_N=block_size,
+                num_warps=8 if block_size == 32 else 4,
+            )
+        else:
+            _syr_complex_kernel[grid](
+                A_real,
+                x_real,
+                alpha_r,
+                alpha_i,
+                n,
+                lda,
+                incx,
+                uplo,
+                IS_DOUBLE=False,
+                TRIANGULAR_GRID=triangular_grid,
+                BLOCK_M=block_size,
+                BLOCK_N=block_size,
+                num_warps=4,
+            )
     return A
 
 
