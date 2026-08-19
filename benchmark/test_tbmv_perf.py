@@ -194,18 +194,7 @@ if IS_HYGON:
         hip_diag,
         **kwargs,
     ):
-        status = c_func(
-            handle,
-            hip_uplo,
-            hip_trans,
-            hip_diag,
-            n,
-            k,
-            ctypes.c_void_p(A.data_ptr()),
-            lda,
-            ctypes.c_void_p(x.data_ptr()),
-            incx,
-        )
+        status = c_func(*kwargs["vendor_args"])
         _check_hipblas_status(status, "hipBLAS TBMV")
         return x
 
@@ -225,18 +214,7 @@ else:
         c_func,
         **kwargs,
     ):
-        status = c_func(
-            ctypes.c_void_p(handle),
-            ctypes.c_int(uplo),
-            ctypes.c_int(trans),
-            ctypes.c_int(diag),
-            ctypes.c_int(n),
-            ctypes.c_int(k),
-            ctypes.c_void_p(A.data_ptr()),
-            ctypes.c_int(lda),
-            ctypes.c_void_p(x.data_ptr()),
-            ctypes.c_int(incx),
-        )
+        status = c_func(*kwargs["vendor_args"])
         if status != 0:
             raise RuntimeError(f"cublasXtbmv_v2 failed with status code: {status}")
         return x
@@ -258,21 +236,17 @@ gems_ztbmv_wrapper = _gems_wrapper(flag_blas.ztbmv)
 
 def _generate_triangular_banded(n, k, lda, uplo, dtype, device):
     A = torch.zeros((n, lda), dtype=dtype, device=device)
-    if uplo == CUBLAS_FILL_MODE_UPPER:
-        for j in range(n):
-            i_min = max(0, j - k)
-            cnt = j - i_min + 1
-            if cnt > 0:
-                vals = torch.randn(cnt, dtype=dtype, device=device) * 0.1
-                A[j, k + i_min - j : k + 1] = vals
-    else:
-        for j in range(n):
-            i_max = min(n - 1, j + k)
-            cnt = i_max - j + 1
-            if cnt > 0:
-                vals = torch.randn(cnt, dtype=dtype, device=device) * 0.1
-                A[j, 0:cnt] = vals
-    return A.contiguous()
+    column_A = torch.zeros((n, lda), dtype=dtype, device=device)
+    for d in range(k + 1):
+        count = n - d
+        vals = torch.randn(count, dtype=dtype, device=device) * 0.1
+        if uplo == CUBLAS_FILL_MODE_UPPER:
+            A[:count, d] = vals
+            column_A[d:, k - d] = vals
+        else:
+            A[d:, k - d] = vals
+            column_A[:count, d] = vals
+    return A.contiguous(), column_A.contiguous()
 
 
 def _triangular_banded_nnz(n, k):
@@ -336,10 +310,37 @@ class TbmvBenchmark(Benchmark):
                     continue
                 seen.add(key)
                 lda = k + 1
-                A = _generate_triangular_banded(
+                A, column_A = _generate_triangular_banded(
                     n, k, lda, self.uplo, cur_dtype, self.device
                 )
                 x = torch.randn(n, dtype=cur_dtype, device=self.device)
+                vendor_args = (
+                    (
+                        handle,
+                        hip_uplo,
+                        hip_trans,
+                        hip_diag,
+                        n,
+                        k,
+                        ctypes.c_void_p(column_A.data_ptr()),
+                        lda,
+                        ctypes.c_void_p(x.data_ptr()),
+                        1,
+                    )
+                    if IS_HYGON
+                    else (
+                        ctypes.c_void_p(handle),
+                        ctypes.c_int(self.uplo),
+                        ctypes.c_int(self.trans),
+                        ctypes.c_int(self.diag),
+                        ctypes.c_int(n),
+                        ctypes.c_int(k),
+                        ctypes.c_void_p(column_A.data_ptr()),
+                        ctypes.c_int(lda),
+                        ctypes.c_void_p(x.data_ptr()),
+                        ctypes.c_int(1),
+                    )
+                )
 
                 kwargs = {
                     "uplo": self.uplo,
@@ -351,6 +352,8 @@ class TbmvBenchmark(Benchmark):
                     "incx": 1,
                     "handle": handle,
                     "c_func": c_func,
+                    "column_A": column_A,
+                    "vendor_args": vendor_args,
                 }
                 if IS_HYGON:
                     kwargs.update(
@@ -383,9 +386,14 @@ class TbmvBenchmark(Benchmark):
 
     def clone_correctness_inputs(self, args, kwargs):
         A, x = args
-        ref_args = (A, x.clone())
+        ref_x = x.clone()
+        ref_kwargs = kwargs.copy()
+        vendor_args = list(kwargs["vendor_args"])
+        vendor_args[8] = ctypes.c_void_p(ref_x.data_ptr())
+        ref_kwargs["vendor_args"] = tuple(vendor_args)
+        ref_args = (A, ref_x)
         blas_args = (A, x.clone())
-        return ref_args, kwargs, blas_args, kwargs
+        return ref_args, ref_kwargs, blas_args, kwargs
 
 
 @pytest.mark.stbmv
@@ -430,7 +438,7 @@ def test_perf_stbmv_trans():
     run_correctness_then_benchmark(bench)
 
 
-@pytest.mark.dtbmv
+@pytest.mark.stbmv
 def test_perf_stbmv_upper_trans():
     bench = TbmvBenchmark(
         op_name="stbmv",
@@ -506,7 +514,7 @@ def test_perf_dtbmv_trans():
     run_correctness_then_benchmark(bench)
 
 
-@pytest.mark.ctbmv
+@pytest.mark.dtbmv
 def test_perf_dtbmv_upper_trans():
     if not flag_blas.runtime.device.support_fp64:
         pytest.skip("Device does not support float64")
@@ -594,7 +602,7 @@ def test_perf_ctbmv_conj():
     run_correctness_then_benchmark(bench)
 
 
-@pytest.mark.ztbmv
+@pytest.mark.ctbmv
 def test_perf_ctbmv_upper_trans():
     bench = TbmvBenchmark(
         op_name="ctbmv",

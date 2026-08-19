@@ -78,9 +78,9 @@ def strmv_kernel(
             j = tl.max_contiguous(tl.multiple_of(j, BLOCK_K), BLOCK_K)
             j_mask = j < n
             if TRANS == 0:
-                a_off = rows[:, None] + j[None, :] * LDA
+                a_off = rows[:, None] * LDA + j[None, :]
             else:
-                a_off = j[None, :] + rows[:, None] * LDA
+                a_off = j[None, :] * LDA + rows[:, None]
             mask = row_mask[:, None] & j_mask[None, :]
             a_vals = tl.load(
                 a_ptr + a_off, mask=mask, other=0.0, eviction_policy="evict_first"
@@ -103,13 +103,13 @@ def strmv_kernel(
                 tri = j[None, :] >= rows[:, None]
             else:
                 tri = j[None, :] <= rows[:, None]
-            a_off = rows[:, None] + j[None, :] * LDA
+            a_off = rows[:, None] * LDA + j[None, :]
         else:
             if UPLO == 1:
                 tri = j[None, :] <= rows[:, None]
             else:
                 tri = j[None, :] >= rows[:, None]
-            a_off = j[None, :] + rows[:, None] * LDA
+            a_off = j[None, :] * LDA + rows[:, None]
         if UNIT:
             tri = tri & (j[None, :] != rows[:, None])
         mask = row_mask[:, None] & j_mask[None, :] & tri
@@ -128,9 +128,9 @@ def strmv_kernel(
             j = tl.max_contiguous(tl.multiple_of(j, BLOCK_K), BLOCK_K)
             j_mask = j < n
             if TRANS == 0:
-                a_off = rows[:, None] + j[None, :] * LDA
+                a_off = rows[:, None] * LDA + j[None, :]
             else:
-                a_off = j[None, :] + rows[:, None] * LDA
+                a_off = j[None, :] * LDA + rows[:, None]
             mask = row_mask[:, None] & j_mask[None, :]
             a_vals = tl.load(
                 a_ptr + a_off, mask=mask, other=0.0, eviction_policy="evict_first"
@@ -180,9 +180,9 @@ def dtrmv_kernel(
             j = kb + offs_k
             j_mask = j < n
             if TRANS == 0:
-                a_off = rows[:, None] + j[None, :] * LDA
+                a_off = rows[:, None] * LDA + j[None, :]
             else:
-                a_off = j[None, :] + rows[:, None] * LDA
+                a_off = j[None, :] * LDA + rows[:, None]
             mask = row_mask[:, None] & j_mask[None, :]
             a_vals = tl.load(a_ptr + a_off, mask=mask, other=0.0)
             x_vals = tl.load(xin_ptr + j, mask=j_mask, other=0.0)
@@ -199,13 +199,13 @@ def dtrmv_kernel(
                 tri = j[None, :] >= rows[:, None]
             else:
                 tri = j[None, :] <= rows[:, None]
-            a_off = rows[:, None] + j[None, :] * LDA
+            a_off = rows[:, None] * LDA + j[None, :]
         else:
             if UPLO == 1:
                 tri = j[None, :] <= rows[:, None]
             else:
                 tri = j[None, :] >= rows[:, None]
-            a_off = j[None, :] + rows[:, None] * LDA
+            a_off = j[None, :] * LDA + rows[:, None]
         if UNIT:
             tri = tri & (j[None, :] != rows[:, None])
         mask = row_mask[:, None] & j_mask[None, :] & tri
@@ -218,9 +218,9 @@ def dtrmv_kernel(
             j = kb + offs_k
             j_mask = j < n
             if TRANS == 0:
-                a_off = rows[:, None] + j[None, :] * LDA
+                a_off = rows[:, None] * LDA + j[None, :]
             else:
-                a_off = j[None, :] + rows[:, None] * LDA
+                a_off = j[None, :] * LDA + rows[:, None]
             mask = row_mask[:, None] & j_mask[None, :]
             a_vals = tl.load(a_ptr + a_off, mask=mask, other=0.0)
             x_vals = tl.load(xin_ptr + j, mask=j_mask, other=0.0)
@@ -268,9 +268,9 @@ def ctrmv_kernel(
             j = kb + offs_k
             j_mask = j < n
             if TRANS == 0:
-                a_off = (rows[:, None] + j[None, :] * LDA) * 2
+                a_off = (rows[:, None] * LDA + j[None, :]) * 2
             else:
-                a_off = (j[None, :] + rows[:, None] * LDA) * 2
+                a_off = (j[None, :] * LDA + rows[:, None]) * 2
             mask = row_mask[:, None] & j_mask[None, :]
             ar = tl.load(
                 a_ptr + a_off, mask=mask, other=0.0, eviction_policy="evict_first"
@@ -303,13 +303,13 @@ def ctrmv_kernel(
                 tri = j[None, :] >= rows[:, None]
             else:
                 tri = j[None, :] <= rows[:, None]
-            a_off = (rows[:, None] + j[None, :] * LDA) * 2
+            a_off = (rows[:, None] * LDA + j[None, :]) * 2
         else:
             if UPLO == 1:
                 tri = j[None, :] <= rows[:, None]
             else:
                 tri = j[None, :] >= rows[:, None]
-            a_off = (j[None, :] + rows[:, None] * LDA) * 2
+            a_off = (j[None, :] * LDA + rows[:, None]) * 2
         if UNIT:
             tri = tri & (j[None, :] != rows[:, None])
         mask = row_mask[:, None] & j_mask[None, :] & tri
@@ -336,9 +336,9 @@ def ctrmv_kernel(
             j = kb + offs_k
             j_mask = j < n
             if TRANS == 0:
-                a_off = (rows[:, None] + j[None, :] * LDA) * 2
+                a_off = (rows[:, None] * LDA + j[None, :]) * 2
             else:
-                a_off = (j[None, :] + rows[:, None] * LDA) * 2
+                a_off = (j[None, :] * LDA + rows[:, None]) * 2
             mask = row_mask[:, None] & j_mask[None, :]
             ar = tl.load(
                 a_ptr + a_off, mask=mask, other=0.0, eviction_policy="evict_first"
@@ -418,9 +418,9 @@ def ztrmv_kernel(
             j = kb + offs_k
             j_mask = j < n
             if TRANS == 0:
-                a_off = (rows[:, None] + j[None, :] * LDA) * 2
+                a_off = (rows[:, None] * LDA + j[None, :]) * 2
             else:
-                a_off = (j[None, :] + rows[:, None] * LDA) * 2
+                a_off = (j[None, :] * LDA + rows[:, None]) * 2
             mask = row_mask[:, None] & j_mask[None, :]
             ar = tl.load(a_ptr + a_off, mask=mask, other=0.0)
             ai = tl.load(a_ptr + a_off + 1, mask=mask, other=0.0)
@@ -442,13 +442,13 @@ def ztrmv_kernel(
                 tri = j[None, :] >= rows[:, None]
             else:
                 tri = j[None, :] <= rows[:, None]
-            a_off = (rows[:, None] + j[None, :] * LDA) * 2
+            a_off = (rows[:, None] * LDA + j[None, :]) * 2
         else:
             if UPLO == 1:
                 tri = j[None, :] <= rows[:, None]
             else:
                 tri = j[None, :] >= rows[:, None]
-            a_off = (j[None, :] + rows[:, None] * LDA) * 2
+            a_off = (j[None, :] * LDA + rows[:, None]) * 2
         if UNIT:
             tri = tri & (j[None, :] != rows[:, None])
         mask = row_mask[:, None] & j_mask[None, :] & tri
@@ -466,9 +466,9 @@ def ztrmv_kernel(
             j = kb + offs_k
             j_mask = j < n
             if TRANS == 0:
-                a_off = (rows[:, None] + j[None, :] * LDA) * 2
+                a_off = (rows[:, None] * LDA + j[None, :]) * 2
             else:
-                a_off = (j[None, :] + rows[:, None] * LDA) * 2
+                a_off = (j[None, :] * LDA + rows[:, None]) * 2
             mask = row_mask[:, None] & j_mask[None, :]
             ar = tl.load(a_ptr + a_off, mask=mask, other=0.0)
             ai = tl.load(a_ptr + a_off + 1, mask=mask, other=0.0)

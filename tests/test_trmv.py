@@ -55,6 +55,13 @@ def load_cublas():
 _cublas = None if flag_blas.vendor_name in {"ascend", "hygon"} else load_cublas()
 
 
+def row_to_column_full(A, n, lda):
+    column_A = torch.empty((n, lda), dtype=A.dtype, device=A.device)
+    if n > 0:
+        column_A[:, :n] = A[:n, :n].T
+    return column_A
+
+
 def hipblas_trmv_reference(uplo, trans, diag, n, A, lda, x, incx):
     if n == 0:
         return x
@@ -70,10 +77,11 @@ def hipblas_trmv_reference(uplo, trans, diag, n, A, lda, x, incx):
     else:
         raise ValueError(f"Unsupported dtype for hipBLAS TRMV: {A.dtype}")
 
+    column_A = row_to_column_full(A, n, lda)
     hip_uplo = 121 if uplo == CUBLAS_FILL_MODE_UPPER else 122
     hip_trans = 111 + trans
     hip_diag = 131 + diag
-    library, handle = get_hipblas_context(A)
+    library, handle = get_hipblas_context(column_A)
     function = getattr(library, symbol)
     function.argtypes = [
         ctypes.c_void_p,
@@ -94,7 +102,7 @@ def hipblas_trmv_reference(uplo, trans, diag, n, A, lda, x, incx):
             hip_trans,
             hip_diag,
             n,
-            ctypes.c_void_p(A.data_ptr()),
+            ctypes.c_void_p(column_A.data_ptr()),
             lda,
             ctypes.c_void_p(x.data_ptr()),
             incx,
@@ -107,6 +115,7 @@ def hipblas_trmv_reference(uplo, trans, diag, n, A, lda, x, incx):
 def cublas_trmv_reference(uplo, trans, diag, n, A, lda, x, incx):
     if n == 0:
         return
+    column_A = row_to_column_full(A, n, lda)
     handle = cp.cuda.device.get_cublas_handle()
     dtype = A.dtype
     if dtype == torch.float32:
@@ -126,7 +135,7 @@ def cublas_trmv_reference(uplo, trans, diag, n, A, lda, x, incx):
         ctypes.c_int(trans),
         ctypes.c_int(diag),
         ctypes.c_int(n),
-        ctypes.c_void_p(A.data_ptr()),
+        ctypes.c_void_p(column_A.data_ptr()),
         ctypes.c_int(lda),
         ctypes.c_void_p(x.data_ptr()),
         ctypes.c_int(incx),
@@ -143,7 +152,7 @@ def cpu_trmv_reference(uplo, trans, diag, n, A, lda, x, incx):
     ref_A = to_cpu_blas_tensor(A)
     func = cpu_blas.ztrmv if ref_A.dtype.is_complex else cpu_blas.dtrmv
     xout = func(
-        ref_A[:n, :n].T.numpy(),
+        ref_A[:n, :n].numpy(),
         ref_x.numpy(),
         incx=incx,
         lower=int(uplo == CUBLAS_FILL_MODE_LOWER),
@@ -198,29 +207,22 @@ LDA_EXTRAS_STRIDE = [0, 1]
 
 
 def make_triangular(n, lda, uplo, diag, dtype, device):
-    """Fill the active triangle with random values and poison everything else
-    (the ignored triangle, the diagonal when UNIT, and the lda-vs-n padding
-    region) with NaN. A correct kernel masks those cells out; any stray read
-    propagates NaN and fails assert_close. cuBLAS and flag_blas both skip
-    those cells by spec, so the poison is safe for the reference."""
     if n == 0:
         return torch.zeros((n, lda), dtype=dtype, device=device).contiguous()
 
     A = trmv_randn((n, lda), dtype, device)
     if not dtype.is_complex:
         A = A * 0.1
-    rows = torch.arange(lda, device=device).view(1, lda)
-    cols = torch.arange(n, device=device).view(n, 1)
+    rows = torch.arange(n, device=device).view(n, 1)
+    cols = torch.arange(lda, device=device).view(1, lda)
     unit = diag == CUBLAS_DIAG_UNIT
 
     if uplo == CUBLAS_FILL_MODE_UPPER:
-        valid = rows <= cols
-        if unit:
-            valid &= rows != cols
+        valid = (cols >= rows) & (cols < n)
     else:
-        valid = (rows >= cols) & (rows < n)
-        if unit:
-            valid &= rows != cols
+        valid = cols <= rows
+    if unit:
+        valid &= rows != cols
 
     if dtype.is_complex:
         torch.view_as_real(A).masked_fill_(~valid.unsqueeze(-1), float("nan"))

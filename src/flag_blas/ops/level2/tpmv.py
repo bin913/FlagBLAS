@@ -38,6 +38,7 @@ ScalarType = Union[float, int, complex, torch.Tensor]
 
 _TPMV_KEY = ["n", "mode_key"]
 _TPMV_RESTORE = ["x_ptr"]
+_TPMV_SMALL_N = 32
 
 
 def _prune_tpmv_configs(configs, named_args, **kwargs):
@@ -56,6 +57,70 @@ def _prune_tpmv_configs(configs, named_args, **kwargs):
         and config.kwargs["BLOCK_SIZE_M"] <= 256
         and config.kwargs["BLOCK_K"] <= 64
     ]
+
+
+@triton.jit
+def tpmv_small_kernel(
+    ap_ptr,
+    x_ptr,
+    n,
+    INCX,
+    UPLO: tl.constexpr,
+    TRANS: tl.constexpr,
+    UNIT: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    ACC_TYPE: tl.constexpr,
+):
+    rows = tl.arange(0, BLOCK_SIZE_N)
+    row_mask = rows < n
+    xin = tl.load(x_ptr + rows * INCX, mask=row_mask, other=0.0)
+    acc = tl.zeros((BLOCK_SIZE_N,), dtype=ACC_TYPE)
+    n64 = tl.full((), n, tl.int64)
+    rows64 = rows.to(tl.int64)
+    offs_k = tl.arange(0, BLOCK_K)
+
+    for kb in tl.range(0, n, BLOCK_K):
+        j = kb + offs_k
+        j_mask = j < n
+        j64 = j.to(tl.int64)
+        if TRANS == 0:
+            if UPLO == 1:
+                tri = j[None, :] >= rows[:, None]
+                off = j64[None, :] * (j64[None, :] + 1) // 2 + rows64[:, None]
+            else:
+                tri = j[None, :] <= rows[:, None]
+                off = (
+                    j64[None, :] * n64
+                    - j64[None, :] * (j64[None, :] - 1) // 2
+                    + rows64[:, None]
+                    - j64[None, :]
+                )
+        else:
+            if UPLO == 1:
+                tri = j[None, :] <= rows[:, None]
+                off = rows64[:, None] * (rows64[:, None] + 1) // 2 + j64[None, :]
+            else:
+                tri = j[None, :] >= rows[:, None]
+                off = (
+                    rows64[:, None] * n64
+                    - rows64[:, None] * (rows64[:, None] - 1) // 2
+                    + j64[None, :]
+                    - rows64[:, None]
+                )
+        if UNIT:
+            tri = tri & (j[None, :] != rows[:, None])
+        mask = row_mask[:, None] & j_mask[None, :] & tri
+        safe_off = tl.where(mask, off, 0)
+        a_vals = tl.load(ap_ptr + safe_off, mask=mask, other=0.0)
+        x_vals = tl.load(x_ptr + j * INCX, mask=j_mask, other=0.0)
+        acc += tl.sum(a_vals * x_vals[None, :], axis=1)
+
+    if UNIT:
+        acc += xin
+
+    tl.debug_barrier()
+    tl.store(x_ptr + rows * INCX, acc, mask=row_mask)
 
 
 @libentry()
@@ -894,6 +959,16 @@ def _check_tpmv(AP, x, uplo, trans, diag, n, incx, complex_ok):
         assert AP.numel() >= n * (n + 1) // 2
 
 
+def _row_major_tpmv_args(uplo, trans):
+    physical_uplo = (
+        CUBLAS_FILL_MODE_LOWER
+        if uplo == CUBLAS_FILL_MODE_UPPER
+        else CUBLAS_FILL_MODE_UPPER
+    )
+    physical_trans = CUBLAS_OP_T if trans == CUBLAS_OP_N else CUBLAS_OP_N
+    return physical_uplo, physical_trans, int(trans == CUBLAS_OP_C)
+
+
 def _mode_key(uplo, trans, unit):
     return (uplo << 4) | (trans << 2) | unit
 
@@ -920,10 +995,27 @@ def stpmv(
     if n == 0:
         return
     unit = 1 if diag == CUBLAS_DIAG_UNIT else 0
+    uplo, trans, conj = _row_major_tpmv_args(uplo, trans)
     trans_flag = 0 if trans == CUBLAS_OP_N else 1
     split_k = _stpmv_split_k(n)
 
     with torch_device_fn.device(AP.device):
+        if n <= _TPMV_SMALL_N:
+            tpmv_small_kernel[(1,)](
+                AP,
+                x,
+                n,
+                incx,
+                UPLO=uplo,
+                TRANS=trans_flag,
+                UNIT=unit,
+                BLOCK_SIZE_N=_TPMV_SMALL_N,
+                BLOCK_K=_TPMV_SMALL_N,
+                ACC_TYPE=tl.float32,
+                num_warps=1,
+                num_stages=1,
+            )
+            return
         xin = x.as_strided((n,), (incx,)).clone()
         if trans_flag == 0 and incx == 1 and 7500 < n <= 11000:
             BLOCK_N = 1024
@@ -1007,9 +1099,26 @@ def dtpmv(
     if n == 0:
         return
     unit = 1 if diag == CUBLAS_DIAG_UNIT else 0
+    uplo, trans, conj = _row_major_tpmv_args(uplo, trans)
     trans_flag = 0 if trans == CUBLAS_OP_N else 1
 
     with torch_device_fn.device(AP.device):
+        if n <= _TPMV_SMALL_N:
+            tpmv_small_kernel[(1,)](
+                AP,
+                x,
+                n,
+                incx,
+                UPLO=uplo,
+                TRANS=trans_flag,
+                UNIT=unit,
+                BLOCK_SIZE_N=_TPMV_SMALL_N,
+                BLOCK_K=_TPMV_SMALL_N,
+                ACC_TYPE=tl.float64,
+                num_warps=1,
+                num_stages=2,
+            )
+            return
         xin = x.as_strided((n,), (incx,)).clone()
         grid = lambda meta: (triton.cdiv(n, meta["BLOCK_SIZE_M"]),)
         dtpmv_kernel[grid](
@@ -1063,8 +1172,8 @@ def ctpmv(
     if n == 0:
         return
     unit = 1 if diag == CUBLAS_DIAG_UNIT else 0
+    uplo, trans, conj = _row_major_tpmv_args(uplo, trans)
     trans_flag = 0 if trans == CUBLAS_OP_N else 1
-    conj = 1 if trans == CUBLAS_OP_C else 0
     split_k = _ctpmv_split_k(n, trans_flag)
 
     with torch_device_fn.device(AP.device):
@@ -1132,8 +1241,8 @@ def ztpmv(
     if n == 0:
         return
     unit = 1 if diag == CUBLAS_DIAG_UNIT else 0
+    uplo, trans, conj = _row_major_tpmv_args(uplo, trans)
     trans_flag = 0 if trans == CUBLAS_OP_N else 1
-    conj = 1 if trans == CUBLAS_OP_C else 0
 
     with torch_device_fn.device(AP.device):
         xin = x.as_strided((n,), (incx,)).clone()
