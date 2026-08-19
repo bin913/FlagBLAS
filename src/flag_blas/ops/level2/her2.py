@@ -1,3 +1,17 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import logging
 import struct
 from typing import Union
@@ -23,12 +37,23 @@ _HER2_CONFIGS = [
     triton.Config({"BLOCK_SIZE": 16}, num_warps=2, num_stages=2),
     triton.Config({"BLOCK_SIZE": 32}, num_warps=4, num_stages=2),
 ]
+_ZHER2_CONFIGS = [
+    triton.Config({"BLOCK_SIZE": 32}, num_warps=8, num_stages=1),
+]
 _HER2_KEY = ["n", "LDA", "INCX", "INCY", "UPLO"]
 _HER2_RESTORE = ["a_ptr"]
 
 
 def _f64_to_i64(v: float) -> int:
     return struct.unpack("<q", struct.pack("<d", v))[0]
+
+
+def _row_major_uplo(uplo: int) -> int:
+    return (
+        CUBLAS_FILL_MODE_LOWER
+        if uplo == CUBLAS_FILL_MODE_UPPER
+        else CUBLAS_FILL_MODE_UPPER
+    )
 
 
 @libentry()
@@ -81,10 +106,10 @@ def cher2_kernel(
     ycr = tl.load(y_ptr + y_cols_off, mask=col_mask, other=0.0)
     yci = tl.load(y_ptr + y_cols_off + 1, mask=col_mask, other=0.0)
 
-    p1r = xrr[:, None] * ycr[None, :] + xri[:, None] * yci[None, :]
-    p1i = xri[:, None] * ycr[None, :] - xrr[:, None] * yci[None, :]
-    p2r = yrr[:, None] * xcr[None, :] + yri[:, None] * xci[None, :]
-    p2i = yri[:, None] * xcr[None, :] - yrr[:, None] * xci[None, :]
+    p1r = yrr[:, None] * xcr[None, :] + yri[:, None] * xci[None, :]
+    p1i = yrr[:, None] * xci[None, :] - yri[:, None] * xcr[None, :]
+    p2r = xrr[:, None] * ycr[None, :] + xri[:, None] * yci[None, :]
+    p2i = xrr[:, None] * yci[None, :] - xri[:, None] * ycr[None, :]
 
     update_r = alpha_r * p1r - alpha_i * p1i + alpha_r * p2r + alpha_i * p2i
     update_i = alpha_r * p1i + alpha_i * p1r + alpha_r * p2i - alpha_i * p2r
@@ -99,7 +124,7 @@ def cher2_kernel(
 
 
 @libentry()
-@triton.autotune(configs=_HER2_CONFIGS, key=_HER2_KEY, restore_value=_HER2_RESTORE)
+@triton.autotune(configs=_ZHER2_CONFIGS, key=_HER2_KEY, restore_value=_HER2_RESTORE)
 @triton.jit
 def zher2_kernel(
     a_ptr,
@@ -150,10 +175,10 @@ def zher2_kernel(
     ycr = tl.load(y_ptr + y_cols_off, mask=col_mask, other=0.0)
     yci = tl.load(y_ptr + y_cols_off + 1, mask=col_mask, other=0.0)
 
-    p1r = xrr[:, None] * ycr[None, :] + xri[:, None] * yci[None, :]
-    p1i = xri[:, None] * ycr[None, :] - xrr[:, None] * yci[None, :]
-    p2r = yrr[:, None] * xcr[None, :] + yri[:, None] * xci[None, :]
-    p2i = yri[:, None] * xcr[None, :] - yrr[:, None] * xci[None, :]
+    p1r = yrr[:, None] * xcr[None, :] + yri[:, None] * xci[None, :]
+    p1i = yrr[:, None] * xci[None, :] - yri[:, None] * xcr[None, :]
+    p2r = xrr[:, None] * ycr[None, :] + xri[:, None] * yci[None, :]
+    p2i = xrr[:, None] * yci[None, :] - xri[:, None] * ycr[None, :]
 
     update_r = alpha_r * p1r - alpha_i * p1i + alpha_r * p2r + alpha_i * p2i
     update_i = alpha_r * p1i + alpha_i * p1r + alpha_r * p2i - alpha_i * p2r
@@ -202,6 +227,7 @@ def cher2(
     _check_her2_args(torch.complex64, uplo, n, x, incx, y, incy, A, lda)
     if n == 0:
         return
+    uplo = _row_major_uplo(uplo)
     ar, ai = _complex_scalar(alpha)
     if ar == 0.0 and ai == 0.0:
         return
@@ -239,6 +265,7 @@ def zher2(
     _check_her2_args(torch.complex128, uplo, n, x, incx, y, incy, A, lda)
     if n == 0:
         return
+    uplo = _row_major_uplo(uplo)
     ar, ai = _complex_scalar(alpha)
     if ar == 0.0 and ai == 0.0:
         return
