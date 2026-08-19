@@ -395,7 +395,7 @@ def _run_syr(op_name, dtype, uplo, alpha):
     ):
         pytest.skip("fp64 is not supported on this device")
     bench = SyrBenchmark(
-        op_name=f"{op_name}_{uplo}",
+        op_name=op_name,
         torch_op=vendor_syr_baseline,
         gems_op=GEMS_SYR_WRAPPERS[op_name],
         dtypes=[dtype],

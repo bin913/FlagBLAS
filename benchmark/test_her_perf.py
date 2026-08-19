@@ -378,7 +378,7 @@ def _run_her(op_name, dtype, uplo):
     if dtype == torch.complex128 and not flag_blas.runtime.device.support_fp64:
         pytest.skip("Device does not support complex128")
     bench = HerBenchmark(
-        op_name=f"{op_name}_{uplo}",
+        op_name=op_name,
         torch_op=vendor_her_baseline,
         gems_op=GEMS_HER_WRAPPERS[op_name],
         dtypes=[dtype],
