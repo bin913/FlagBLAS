@@ -1,3 +1,17 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Ascend-specific complex64 HPMV kernel."""
 
 from typing import Union
@@ -7,7 +21,12 @@ import triton
 import triton.language as tl
 
 from flag_blas import runtime
-from flag_blas.ops.level2.hpmv import _check_common, _complex_scalars, _strided_y
+from flag_blas.ops.level2.hpmv import (
+    _check_common,
+    _complex_scalars,
+    _row_major_uplo,
+    _strided_y,
+)
 from flag_blas.runtime import torch_device_fn
 from flag_blas.utils import libentry, libtuner
 
@@ -75,6 +94,7 @@ def chpmv_kernel(
         xr = tl.load(x_ptr + x_off, mask=j_mask, other=0.0)
         xi = tl.load(x_ptr + x_off + 1, mask=j_mask, other=0.0)
         ai = tl.where(use_conj, -ai, ai)
+        ai = -ai
         ai = tl.where(diag, 0.0, ai)
         acc_r += tl.sum(ar * xr[None, :] - ai * xi[None, :], axis=1)
         acc_i += tl.sum(ar * xi[None, :] + ai * xr[None, :], axis=1)
@@ -106,6 +126,7 @@ def chpmv(
     _check_common(AP, x, y, uplo, n, incx, incy)
     if n == 0:
         return
+    uplo = _row_major_uplo(uplo)
 
     ar, ai, br, bi = _complex_scalars(alpha, beta)
     y_view = _strided_y(y, n, incy)

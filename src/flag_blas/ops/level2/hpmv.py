@@ -1,3 +1,17 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import logging
 import struct
 from typing import Union
@@ -38,6 +52,14 @@ _RESTORE = ["y_ptr"]
 
 def _f64_to_i64(v: float) -> int:
     return struct.unpack("<q", struct.pack("<d", v))[0]
+
+
+def _row_major_uplo(uplo: int) -> int:
+    return (
+        CUBLAS_FILL_MODE_LOWER
+        if uplo == CUBLAS_FILL_MODE_UPPER
+        else CUBLAS_FILL_MODE_UPPER
+    )
 
 
 @triton.autotune(configs=_CHPMV_CONFIGS, key=_HPMV_KEY, restore_value=_RESTORE)
@@ -95,6 +117,7 @@ def chpmv_kernel(
         xr = tl.load(x_ptr + x_off, mask=j_mask, other=0.0)
         xi = tl.load(x_ptr + x_off + 1, mask=j_mask, other=0.0)
         ai = tl.where(use_conj, -ai, ai)
+        ai = -ai
         ai = tl.where(diag, 0.0, ai)
         acc_r += tl.sum(ar * xr[None, :] - ai * xi[None, :], axis=1)
         acc_i += tl.sum(ar * xi[None, :] + ai * xr[None, :], axis=1)
@@ -170,6 +193,7 @@ def zhpmv_kernel(
         xr = tl.load(x_ptr + x_off, mask=j_mask, other=0.0)
         xi = tl.load(x_ptr + x_off + 1, mask=j_mask, other=0.0)
         ai = tl.where(use_conj, -ai, ai)
+        ai = -ai
         ai = tl.where(diag, 0.0, ai)
         acc_r += tl.sum(ar * xr[None, :] - ai * xi[None, :], axis=1)
         acc_i += tl.sum(ar * xi[None, :] + ai * xr[None, :], axis=1)
@@ -227,6 +251,7 @@ def chpmv(
     _check_common(AP, x, y, uplo, n, incx, incy)
     if n == 0:
         return
+    uplo = _row_major_uplo(uplo)
 
     ar, ai, br, bi = _complex_scalars(alpha, beta)
     y_view = _strided_y(y, n, incy)
@@ -276,6 +301,7 @@ def zhpmv(
     _check_common(AP, x, y, uplo, n, incx, incy)
     if n == 0:
         return
+    uplo = _row_major_uplo(uplo)
 
     ar, ai, br, bi = _complex_scalars(alpha, beta)
     y_view = _strided_y(y, n, incy)
