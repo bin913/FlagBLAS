@@ -68,30 +68,28 @@ case $VENDOR in
 
   hygon)
     # Install PyTorch for Hygon DCU (ROCm/HIP).
-    # The flagos-pypi-hygon index only hosts vendor wheels, so add a general
-    # PyPI mirror (same one FlagGems uses) to resolve torch's transitive deps.
-    # --index-strategy unsafe-best-match is required: under uv's default
-    # first-index strategy, torch is found on the aliyun mirror and the DTK
-    # build from the flagos index is never considered.
+    # The DTK-patched torch (2.4.1+das.opt2.dtk2504) is NOT published on the
+    # flagos-pypi-hygon index; it is downloaded directly from the internal DCU
+    # software mirror (same source used to provision the local dev machine).
+    # The aliyun mirror resolves torch's transitive deps (filelock, sympy, ...).
     UV_INDEX_URL="https://resource.flagos.net/repository/flagos-pypi-hygon/simple"
     UV_EXTRA_INDEX_URL="https://mirrors.aliyun.com/pypi/simple"
+    TORCH_WHEEL_URL="http://10.16.4.1:8000/dcuai-pre-release/pytorch/dtk25.04-rc5/torch-2.4.1%2Bdas.opt2.dtk2504-cp310-cp310-manylinux_2_28_x86_64.whl"
 
-    uv pip install torch==2.9.0+das.opt1.dtk2604 \
-        --index-url ${UV_INDEX_URL} \
-        --extra-index-url ${UV_EXTRA_INDEX_URL} \
-        --index-strategy unsafe-best-match || {
-          echo "::error title=hygon torch install failed::uv pip install torch==2.9.0+das.opt1.dtk2604 (indexes: ${UV_INDEX_URL}, ${UV_EXTRA_INDEX_URL})"
+    uv pip install "${TORCH_WHEEL_URL}" \
+        --index-url ${UV_EXTRA_INDEX_URL} || {
+          echo "::error title=hygon torch install failed::uv pip install ${TORCH_WHEEL_URL}"
           exit 1
         }
     echo "::warning title=hygon setup::torch installed"
 
     # Install FlagTree compiler for Hygon DCU
     uv pip uninstall triton || true
-    uv pip install flagtree==0.5.1+hcu3.1 \
+    uv pip install flagtree==0.6.0+hcu3.6 \
         --index-url ${UV_INDEX_URL} \
         --extra-index-url ${UV_EXTRA_INDEX_URL} \
         --index-strategy unsafe-best-match || {
-          echo "::error title=hygon flagtree install failed::uv pip install flagtree==0.5.1+hcu3.1"
+          echo "::error title=hygon flagtree install failed::uv pip install flagtree==0.6.0+hcu3.6"
           exit 1
         }
     echo "::warning title=hygon setup::flagtree installed"
@@ -111,7 +109,7 @@ case $VENDOR in
     # sqlalchemy/packaging/pybind11 are FlagBLAS runtime deps that were skipped
     # by the --no-deps install above (sqlalchemy is imported at module load time
     # via flag_blas.utils.models).
-    # numpy must stay on 1.x: the DTK-patched torch 2.9.0 is built against the
+    # numpy must stay on 1.x: the DTK-patched torch 2.4.1 is built against the
     # numpy 1.x C API ("_ARRAY_API not found" under numpy 2.x).
     if ! uv pip install pytest numpy\<2 scipy distro gitpython pyyaml coverage pytest-md-report \
          sqlalchemy packaging pybind11 \
@@ -122,15 +120,15 @@ case $VENDOR in
     echo "::warning title=hygon setup::testdeps installed"
 
     # Sanity check: make sure the DTK-patched torch survived the installs above.
-    # NOTE: torch.__version__ drops the +das.opt1.dtk2604 local tag (it reports
-    # "2.9.0"), so check the installed distribution version instead.
+    # NOTE: torch.__version__ drops the +das.opt2.dtk2504 local tag (it reports
+    # "2.4.1"), so check the installed distribution version instead.
     set +e
     python - <<'PYEOF'
 import sys, importlib.metadata, traceback
 try:
     dist = importlib.metadata.version("torch")
     print("hygon torch dist:", dist)
-    assert dist.startswith("2.9.0+das.opt1.dtk2604"), \
+    assert dist.startswith("2.4.1+das.opt2.dtk2504"), \
         f"unexpected torch distribution: {dist}"
     import torch
     print("torch.__version__:", torch.__version__)
