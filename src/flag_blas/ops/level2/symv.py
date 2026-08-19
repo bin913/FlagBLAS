@@ -45,6 +45,14 @@ def _f64_to_i64(v: float) -> int:
     return struct.unpack("<q", struct.pack("<d", v))[0]
 
 
+def _row_major_uplo(uplo):
+    return (
+        CUBLAS_FILL_MODE_LOWER
+        if uplo == CUBLAS_FILL_MODE_UPPER
+        else CUBLAS_FILL_MODE_UPPER
+    )
+
+
 @triton.autotune(configs=_SSYMV_CONFIGS, key=_SYMV_KEY, restore_value=_RESTORE)
 @triton.jit
 def ssymv_kernel(
@@ -236,6 +244,53 @@ def csymv_kernel(
     tl.atomic_add(y_ptr + y_cols_off + 1, col_res_i, mask=col_mask, sem="relaxed")
 
 
+@triton.jit
+def zsymv_split_kernel(
+    a_ptr,
+    x_ptr,
+    y_ptr,
+    alpha_r_int: tl.int64,
+    alpha_i_int: tl.int64,
+    n,
+    LDA,
+    INCX,
+    INCY,
+    UPLO: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+    rows = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    cols = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    row_mask = rows < n
+    col_mask = cols < n
+    i = rows[None, :]
+    j = cols[:, None]
+    mask = col_mask[:, None] & row_mask[None, :]
+    if UPLO == 0:
+        use_direct = i >= j
+    else:
+        use_direct = i <= j
+    elem_off = tl.where(use_direct, i * LDA + j, j * LDA + i)
+    a_off = elem_off * 2
+    ar = tl.load(a_ptr + a_off, mask=mask, other=0.0)
+    ai = tl.load(a_ptr + a_off + 1, mask=mask, other=0.0)
+
+    x_off = cols * INCX * 2
+    xr = tl.load(x_ptr + x_off, mask=col_mask, other=0.0)
+    xi = tl.load(x_ptr + x_off + 1, mask=col_mask, other=0.0)
+    acc_r = tl.sum(ar * xr[:, None] - ai * xi[:, None], axis=0)
+    acc_i = tl.sum(ar * xi[:, None] + ai * xr[:, None], axis=0)
+    alpha_r = alpha_r_int.to(tl.float64, bitcast=True)
+    alpha_i = alpha_i_int.to(tl.float64, bitcast=True)
+    res_r = alpha_r * acc_r - alpha_i * acc_i
+    res_i = alpha_r * acc_i + alpha_i * acc_r
+    y_off = rows * INCY * 2
+    tl.atomic_add(y_ptr + y_off, res_r, mask=row_mask, sem="relaxed")
+    tl.atomic_add(y_ptr + y_off + 1, res_i, mask=row_mask, sem="relaxed")
+
+
 @triton.autotune(configs=_ZSYMV_CONFIGS, key=_SYMV_KEY, restore_value=_RESTORE)
 @triton.jit
 def zsymv_kernel(
@@ -395,7 +450,7 @@ def ssymv(
             lda,
             incx,
             incy,
-            UPLO=uplo,
+            UPLO=_row_major_uplo(uplo),
         )
 
 
@@ -451,7 +506,7 @@ def dsymv(
             lda,
             incx,
             incy,
-            UPLO=uplo,
+            UPLO=_row_major_uplo(uplo),
         )
 
 
@@ -507,7 +562,7 @@ def csymv(
             lda,
             incx,
             incy,
-            UPLO=uplo,
+            UPLO=_row_major_uplo(uplo),
         )
 
 
@@ -549,6 +604,25 @@ def zsymv(
         elif br != 1.0 or bi != 0.0:
             y_view.mul_(complex(br, bi))
 
+        if n <= 256:
+            zsymv_split_kernel[(triton.cdiv(n, 16), triton.cdiv(n, 32))](
+                A_real,
+                x_real,
+                y_real,
+                ar_i,
+                ai_i,
+                n,
+                lda,
+                incx,
+                incy,
+                UPLO=uplo,
+                BLOCK_M=16,
+                BLOCK_N=32,
+                num_warps=2,
+                num_stages=1,
+            )
+            return
+
         def grid(meta):
             return (
                 triton.cdiv(n, meta["BLOCK_SIZE"]),
@@ -565,5 +639,5 @@ def zsymv(
             lda,
             incx,
             incy,
-            UPLO=uplo,
+            UPLO=_row_major_uplo(uplo),
         )

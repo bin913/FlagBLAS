@@ -197,48 +197,25 @@ def cublas_hemv_baseline(
     alpha_c,
     beta_c,
     hip_uplo=None,
+    vendor_args=None,
     **kwargs,
 ):
     if n == 0:
         return y
 
     if flag_blas.vendor_name == "hygon":
-        status = c_func(
-            handle,
-            hip_uplo,
-            n,
-            ctypes.byref(alpha_c),
-            ctypes.c_void_p(A.data_ptr()),
-            lda,
-            ctypes.c_void_p(x.data_ptr()),
-            incx,
-            ctypes.byref(beta_c),
-            ctypes.c_void_p(y.data_ptr()),
-            incy,
-        )
+        status = c_func(*vendor_args)
         _check_hipblas_status(status, "hipBLAS HEMV")
         return y
 
-    status = c_func(
-        ctypes.c_void_p(handle),
-        ctypes.c_int(uplo),
-        ctypes.c_int(n),
-        ctypes.byref(alpha_c),
-        ctypes.c_void_p(A.data_ptr()),
-        ctypes.c_int(lda),
-        ctypes.c_void_p(x.data_ptr()),
-        ctypes.c_int(incx),
-        ctypes.byref(beta_c),
-        ctypes.c_void_p(y.data_ptr()),
-        ctypes.c_int(incy),
-    )
+    status = c_func(*vendor_args)
     if status != 0:
         raise RuntimeError(f"cublasXhemv_v2 execution failed with error code: {status}")
     return y
 
 
 def _gems_wrapper(op):
-    def _impl(A, x, y, uplo, n, alpha, lda, incx, beta, incy, handle, **kwargs):
+    def _impl(A, x, y, uplo, n, alpha, lda, incx, beta, incy, handle=None, **kwargs):
         op(uplo, n, alpha, A, lda, x, incx, beta, y, incy)
         return y
 
@@ -251,11 +228,13 @@ gems_zhemv_wrapper = _gems_wrapper(flag_blas.zhemv)
 
 def _generate_her_A(n, lda, dtype, device):
     A = torch.zeros((n, lda), dtype=dtype, device=device)
+    column_A = torch.zeros((n, lda), dtype=dtype, device=device)
     data = torch.randn(n, n, dtype=dtype, device=device)
     diag_real = data.diagonal().real.clone()
     data.diagonal().copy_(diag_real.to(dtype))
     A[:, :n] = data
-    return A.contiguous()
+    column_A[:, :n] = data.T
+    return A.contiguous(), column_A.contiguous()
 
 
 class HemvBenchmark(Benchmark):
@@ -301,9 +280,38 @@ class HemvBenchmark(Benchmark):
         for shape in self.shapes:
             n = shape[0] if isinstance(shape, (tuple, list)) else shape
             lda = n
-            A = _generate_her_A(n, lda, cur_dtype, self.device)
+            A, column_A = _generate_her_A(n, lda, cur_dtype, self.device)
             x = torch.randn(n, dtype=cur_dtype, device=self.device)
             y = torch.randn(n, dtype=cur_dtype, device=self.device)
+            vendor_args = (
+                (
+                    handle,
+                    hip_uplo,
+                    n,
+                    ctypes.byref(alpha_c),
+                    ctypes.c_void_p(column_A.data_ptr()),
+                    lda,
+                    ctypes.c_void_p(x.data_ptr()),
+                    1,
+                    ctypes.byref(beta_c),
+                    ctypes.c_void_p(y.data_ptr()),
+                    1,
+                )
+                if flag_blas.vendor_name == "hygon"
+                else (
+                    ctypes.c_void_p(handle),
+                    ctypes.c_int(self.uplo),
+                    ctypes.c_int(n),
+                    ctypes.byref(alpha_c),
+                    ctypes.c_void_p(column_A.data_ptr()),
+                    ctypes.c_int(lda),
+                    ctypes.c_void_p(x.data_ptr()),
+                    ctypes.c_int(1),
+                    ctypes.byref(beta_c),
+                    ctypes.c_void_p(y.data_ptr()),
+                    ctypes.c_int(1),
+                )
+            )
 
             kwargs = {
                 "uplo": self.uplo,
@@ -317,6 +325,8 @@ class HemvBenchmark(Benchmark):
                 "c_func": c_func,
                 "alpha_c": alpha_c,
                 "beta_c": beta_c,
+                "column_A": column_A,
+                "vendor_args": vendor_args,
             }
             if flag_blas.vendor_name == "hygon":
                 kwargs["hip_uplo"] = hip_uplo
@@ -340,9 +350,14 @@ class HemvBenchmark(Benchmark):
 
     def clone_correctness_inputs(self, args, kwargs):
         A, x, y = args
-        ref_args = (A, x, y.clone())
+        ref_y = y.clone()
+        ref_kwargs = kwargs.copy()
+        vendor_args = list(kwargs["vendor_args"])
+        vendor_args[9] = ctypes.c_void_p(ref_y.data_ptr())
+        ref_kwargs["vendor_args"] = tuple(vendor_args)
+        ref_args = (A, x, ref_y)
         blas_args = (A, x, y.clone())
-        return ref_args, kwargs, blas_args, kwargs
+        return ref_args, ref_kwargs, blas_args, kwargs
 
 
 @pytest.mark.chemv
