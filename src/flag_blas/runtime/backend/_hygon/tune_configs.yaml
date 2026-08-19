@@ -1767,6 +1767,16 @@ zher_hygon:
     num_warps: 8
     num_stages: 1
 
+chpr_hygon:
+  - META: {BLOCK_SIZE: 128}
+    num_warps: 2
+    num_stages: 2
+
+zhpr_hygon:
+  - META: {BLOCK_SIZE: 128}
+    num_warps: 2
+    num_stages: 2
+
 zhpr2_hygon:
   - META: {BLOCK_SIZE: 128}
     num_warps: 2

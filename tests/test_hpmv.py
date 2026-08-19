@@ -1,3 +1,17 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import ctypes
 import ctypes.util
 
@@ -46,6 +60,17 @@ class cuComplex(ctypes.Structure):
 
 class cuDoubleComplex(ctypes.Structure):
     _fields_ = [("x", ctypes.c_double), ("y", ctypes.c_double)]
+
+
+def _row_to_column_hpmv(AP, uplo):
+    column_AP = torch.empty_like(AP)
+    column_AP.copy_(AP.conj())
+    column_uplo = (
+        CUBLAS_FILL_MODE_LOWER
+        if uplo == CUBLAS_FILL_MODE_UPPER
+        else CUBLAS_FILL_MODE_UPPER
+    )
+    return column_AP, column_uplo
 
 
 def hipblas_hpmv_reference(uplo, n, alpha, AP, x, incx, beta, y, incy):
@@ -162,14 +187,21 @@ def cpu_hpmv_reference(uplo, n, alpha, AP, x, incx, beta, y, incy):
 
 
 def hpmv_reference(uplo, n, alpha, AP, x, incx, beta, y, incy):
+    column_AP, column_uplo = _row_to_column_hpmv(AP, uplo)
     if TO_CPU:
-        return cpu_hpmv_reference(uplo, n, alpha, AP, x, incx, beta, y, incy)
+        return cpu_hpmv_reference(
+            column_uplo, n, alpha, column_AP, x, incx, beta, y, incy
+        )
 
     ref_y = y.clone()
     if flag_blas.vendor_name == "hygon":
-        hipblas_hpmv_reference(uplo, n, alpha, AP, x, incx, beta, ref_y, incy)
+        hipblas_hpmv_reference(
+            column_uplo, n, alpha, column_AP, x, incx, beta, ref_y, incy
+        )
     else:
-        cublas_hpmv_reference(uplo, n, alpha, AP, x, incx, beta, ref_y, incy)
+        cublas_hpmv_reference(
+            column_uplo, n, alpha, column_AP, x, incx, beta, ref_y, incy
+        )
     return ref_y
 
 
@@ -220,8 +252,8 @@ def make_hermitian_packed(n, dtype, device):
 def _diag_packed_offsets(n, uplo, device):
     k = torch.arange(n, dtype=torch.int64, device=device)
     if uplo == CUBLAS_FILL_MODE_UPPER:
-        return k * (k + 1) // 2 + k
-    return k * (2 * n - k - 1) // 2 + k
+        return k * n - k * (k - 1) // 2
+    return k * (k + 1) // 2 + k
 
 
 def check_fp64_support():

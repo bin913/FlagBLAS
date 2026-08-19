@@ -1,3 +1,17 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import ctypes
 import ctypes.util
 from typing import Generator
@@ -172,31 +186,11 @@ if IS_HYGON:
         incx,
         beta,
         incy,
-        handle,
         c_func,
-        alpha_ptr,
-        beta_ptr,
-        AP_ptr,
-        x_ptr,
-        y_ptr,
-        hip_uplo_arg,
-        n_arg,
-        incx_arg,
-        incy_arg,
+        vendor_args,
         **kwargs,
     ):
-        status = c_func(
-            handle,
-            hip_uplo_arg,
-            n_arg,
-            alpha_ptr,
-            AP_ptr,
-            x_ptr,
-            incx_arg,
-            beta_ptr,
-            y_ptr,
-            incy_arg,
-        )
+        status = c_func(*vendor_args)
         _check_hipblas_status(status, "hipBLAS HPMV")
         return y
 
@@ -212,33 +206,20 @@ else:
         incx,
         beta,
         incy,
-        handle,
         c_func,
-        alpha_c,
-        beta_c,
+        vendor_args,
         **kwargs,
     ):
         if n == 0:
             return y
-        status = c_func(
-            ctypes.c_void_p(handle),
-            ctypes.c_int(uplo),
-            ctypes.c_int(n),
-            ctypes.byref(alpha_c),
-            ctypes.c_void_p(AP.data_ptr()),
-            ctypes.c_void_p(x.data_ptr()),
-            ctypes.c_int(incx),
-            ctypes.byref(beta_c),
-            ctypes.c_void_p(y.data_ptr()),
-            ctypes.c_int(incy),
-        )
+        status = c_func(*vendor_args)
         if status != 0:
             raise RuntimeError(f"cublasXhpmv_v2 failed with status code: {status}")
         return y
 
 
 def _gems_wrapper(op):
-    def _impl(AP, x, y, uplo, n, alpha, incx, beta, incy, handle, **kwargs):
+    def _impl(AP, x, y, uplo, n, alpha, incx, beta, incy, handle=None, **kwargs):
         op(uplo, n, alpha, AP, x, incx, beta, y, incy)
         return y
 
@@ -250,7 +231,10 @@ gems_zhpmv_wrapper = _gems_wrapper(flag_blas.zhpmv)
 
 
 def _generate_packed_her(n, dtype, device):
-    return torch.randn(n * (n + 1) // 2, dtype=dtype, device=device)
+    AP = torch.randn(n * (n + 1) // 2, dtype=dtype, device=device)
+    column_AP = torch.empty_like(AP)
+    column_AP.copy_(AP.conj())
+    return AP, column_AP
 
 
 class HpmvBenchmark(Benchmark):
@@ -279,9 +263,6 @@ class HpmvBenchmark(Benchmark):
         if IS_HYGON:
             library, handle = _prepare_hipblas(self.device)
             c_func, ctor = _resolve_hipblas_hpmv(library, cur_dtype)
-            hip_uplo_arg = ctypes.c_int(
-                121 if self.uplo == CUBLAS_FILL_MODE_UPPER else 122
-            )
         else:
             handle = cp.cuda.device.get_cublas_handle()
             cublas.setPointerMode(handle, cublas.CUBLAS_POINTER_MODE_HOST)
@@ -295,9 +276,41 @@ class HpmvBenchmark(Benchmark):
 
         for shape in self.shapes:
             n = shape[0] if isinstance(shape, (tuple, list)) else shape
-            AP = _generate_packed_her(n, cur_dtype, self.device)
+            AP, column_AP = _generate_packed_her(n, cur_dtype, self.device)
             x = torch.randn(n, dtype=cur_dtype, device=self.device)
             y = torch.randn(n, dtype=cur_dtype, device=self.device)
+            reference_uplo = (
+                CUBLAS_FILL_MODE_LOWER
+                if self.uplo == CUBLAS_FILL_MODE_UPPER
+                else CUBLAS_FILL_MODE_UPPER
+            )
+            vendor_uplo = 121 if reference_uplo == CUBLAS_FILL_MODE_UPPER else 122
+            if IS_HYGON:
+                vendor_args = (
+                    handle,
+                    ctypes.c_int(vendor_uplo),
+                    ctypes.c_int(n),
+                    alpha_ptr,
+                    ctypes.c_void_p(column_AP.data_ptr()),
+                    ctypes.c_void_p(x.data_ptr()),
+                    ctypes.c_int(1),
+                    beta_ptr,
+                    ctypes.c_void_p(y.data_ptr()),
+                    ctypes.c_int(1),
+                )
+            else:
+                vendor_args = (
+                    ctypes.c_void_p(handle),
+                    ctypes.c_int(reference_uplo),
+                    ctypes.c_int(n),
+                    alpha_ptr,
+                    ctypes.c_void_p(column_AP.data_ptr()),
+                    ctypes.c_void_p(x.data_ptr()),
+                    ctypes.c_int(1),
+                    beta_ptr,
+                    ctypes.c_void_p(y.data_ptr()),
+                    ctypes.c_int(1),
+                )
 
             call_kwargs = {
                 "uplo": self.uplo,
@@ -306,23 +319,12 @@ class HpmvBenchmark(Benchmark):
                 "incx": 1,
                 "beta": self.beta,
                 "incy": 1,
-                "handle": handle,
                 "c_func": c_func,
+                "vendor_args": vendor_args,
+                "column_AP": column_AP,
+                "alpha_c": alpha_c,
+                "beta_c": beta_c,
             }
-            if IS_HYGON:
-                call_kwargs.update(
-                    AP_ptr=ctypes.c_void_p(AP.data_ptr()),
-                    x_ptr=ctypes.c_void_p(x.data_ptr()),
-                    y_ptr=ctypes.c_void_p(y.data_ptr()),
-                    alpha_ptr=alpha_ptr,
-                    beta_ptr=beta_ptr,
-                    hip_uplo_arg=hip_uplo_arg,
-                    n_arg=ctypes.c_int(n),
-                    incx_arg=ctypes.c_int(1),
-                    incy_arg=ctypes.c_int(1),
-                )
-            else:
-                call_kwargs.update(alpha_c=alpha_c, beta_c=beta_c)
             yield AP, x, y, call_kwargs
 
     def get_tflops(self, op, *args, **kwargs):
@@ -345,15 +347,10 @@ class HpmvBenchmark(Benchmark):
         ref_y = y.clone()
         ref_args = (AP, x, ref_y)
         blas_args = (AP, x, y.clone())
-        if IS_HYGON:
-            ref_kwargs = kwargs.copy()
-            ref_kwargs.update(
-                AP_ptr=ctypes.c_void_p(AP.data_ptr()),
-                x_ptr=ctypes.c_void_p(x.data_ptr()),
-                y_ptr=ctypes.c_void_p(ref_y.data_ptr()),
-            )
-        else:
-            ref_kwargs = kwargs
+        ref_kwargs = kwargs.copy()
+        vendor_args = list(kwargs["vendor_args"])
+        vendor_args[8] = ctypes.c_void_p(ref_y.data_ptr())
+        ref_kwargs["vendor_args"] = tuple(vendor_args)
         return ref_args, ref_kwargs, blas_args, kwargs
 
 

@@ -159,6 +159,11 @@ def cpu_spmv_reference(uplo, n, alpha, AP, x, incx, beta, y, incy):
 
 
 def spmv_reference(uplo, n, alpha, AP, x, incx, beta, y, incy):
+    uplo = (
+        CUBLAS_FILL_MODE_LOWER
+        if uplo == CUBLAS_FILL_MODE_UPPER
+        else CUBLAS_FILL_MODE_UPPER
+    )
     if TO_CPU:
         return cpu_spmv_reference(uplo, n, alpha, AP, x, incx, beta, y, incy)
 

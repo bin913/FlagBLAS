@@ -1,3 +1,17 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import ctypes
 import ctypes.util
 
@@ -10,6 +24,9 @@ from flag_blas.ops import CUBLAS_FILL_MODE_LOWER, CUBLAS_FILL_MODE_UPPER
 
 from .accuracy_utils import blas_assert_close, to_cpu_blas_tensor
 from .conftest import TO_CPU
+
+if flag_blas.vendor_name == "hygon":
+    from .hipblas_reference import check_hipblas_status, get_hipblas_context
 
 
 def load_cublas():
@@ -96,7 +113,47 @@ def cublas_spr_reference(uplo, n, alpha, x, incx, AP):
     )
     if status != 0:
         raise RuntimeError(f"cublasXspr_v2 execution failed with error code: {status}")
-    torch.cuda.synchronize(AP.device)
+
+
+def hipblas_spr_reference(uplo, n, alpha, x, incx, AP):
+    if n == 0:
+        return
+
+    if AP.dtype == torch.float32:
+        symbol = "hipblasSspr"
+        scalar_type = ctypes.c_float
+    elif AP.dtype == torch.float64:
+        symbol = "hipblasDspr"
+        scalar_type = ctypes.c_double
+    else:
+        raise ValueError(f"Unsupported dtype for hipBLAS SPR: {AP.dtype}")
+
+    library, handle = get_hipblas_context(AP)
+    function = getattr(library, symbol)
+    function.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.POINTER(scalar_type),
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+    ]
+    function.restype = ctypes.c_int
+    alpha_c = scalar_type(alpha.item() if isinstance(alpha, torch.Tensor) else alpha)
+    hip_uplo = 121 if uplo == CUBLAS_FILL_MODE_UPPER else 122
+    check_hipblas_status(
+        function(
+            handle,
+            hip_uplo,
+            n,
+            ctypes.byref(alpha_c),
+            ctypes.c_void_p(x.data_ptr()),
+            incx,
+            ctypes.c_void_p(AP.data_ptr()),
+        ),
+        symbol,
+    )
 
 
 def cpu_spr_reference(uplo, n, alpha, x, incx, AP):
@@ -118,10 +175,18 @@ def cpu_spr_reference(uplo, n, alpha, x, incx, AP):
 
 
 def spr_reference(uplo, n, alpha, x, incx, AP):
+    uplo = (
+        CUBLAS_FILL_MODE_LOWER
+        if uplo == CUBLAS_FILL_MODE_UPPER
+        else CUBLAS_FILL_MODE_UPPER
+    )
     if TO_CPU:
         return cpu_spr_reference(uplo, n, alpha, x, incx, AP)
     ref_AP = AP.clone()
-    cublas_spr_reference(uplo, n, alpha, x, incx, ref_AP)
+    if flag_blas.vendor_name == "hygon":
+        hipblas_spr_reference(uplo, n, alpha, x, incx, ref_AP)
+    else:
+        cublas_spr_reference(uplo, n, alpha, x, incx, ref_AP)
     return ref_AP
 
 

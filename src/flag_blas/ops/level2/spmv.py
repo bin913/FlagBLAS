@@ -55,6 +55,14 @@ def _f64_to_i64(v: float) -> int:
     return struct.unpack("<q", struct.pack("<d", v))[0]
 
 
+def _row_major_uplo(uplo: int) -> int:
+    return (
+        CUBLAS_FILL_MODE_LOWER
+        if uplo == CUBLAS_FILL_MODE_UPPER
+        else CUBLAS_FILL_MODE_UPPER
+    )
+
+
 @triton.autotune(configs=_SSPMV_CONFIGS, key=_SPMV_KEY, restore_value=_RESTORE)
 @triton.jit
 def sspmv_kernel(
@@ -198,6 +206,7 @@ def sspmv(
     _check_common(AP, x, y, uplo, n, incx, incy)
     if n == 0:
         return
+    uplo = _row_major_uplo(uplo)
 
     alpha = float(alpha.item() if isinstance(alpha, torch.Tensor) else alpha)
     beta = float(beta.item() if isinstance(beta, torch.Tensor) else beta)
@@ -244,6 +253,7 @@ def dspmv(
     _check_common(AP, x, y, uplo, n, incx, incy)
     if n == 0:
         return
+    uplo = _row_major_uplo(uplo)
 
     alpha_val = float(alpha.item() if isinstance(alpha, torch.Tensor) else alpha)
     beta_val = float(beta.item() if isinstance(beta, torch.Tensor) else beta)

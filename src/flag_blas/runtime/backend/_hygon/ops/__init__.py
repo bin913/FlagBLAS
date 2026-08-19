@@ -5,6 +5,7 @@ from .hbmv import chbmv, zhbmv
 from .hemv import chemv, zhemv
 from .her import cher, zher
 from .hpmv import chpmv, zhpmv
+from .hpr import chpr, zhpr
 from .hpr2 import zhpr2
 from .spmv import dspmv, sspmv
 from .symv import csymv, zsymv
@@ -19,6 +20,7 @@ __all__ = [
     "chbmv",
     "chemv",
     "cher",
+    "chpr",
     "chpmv",
     "csymv",
     "csyr",
@@ -38,6 +40,7 @@ __all__ = [
     "zhbmv",
     "zher",
     "zhpmv",
+    "zhpr",
     "zhpr2",
     "zsymv",
     "zsyr",
