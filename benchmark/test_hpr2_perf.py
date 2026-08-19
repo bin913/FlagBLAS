@@ -464,7 +464,7 @@ def test_perf_chpr2():
 @pytest.mark.chpr2
 def test_perf_chpr2_upper():
     bench = Hpr2Benchmark(
-        op_name="chpr2_upper",
+        op_name="chpr2",
         torch_op=hipblas_hpr2_baseline if IS_HYGON else cublas_hpr2_baseline,
         gems_op=gems_chpr2_wrapper,
         dtypes=[torch.complex64],
@@ -492,7 +492,7 @@ def test_perf_zhpr2_upper():
     if not flag_blas.runtime.device.support_fp64:
         pytest.skip("Device does not support complex128")
     bench = Hpr2Benchmark(
-        op_name="zhpr2_upper",
+        op_name="zhpr2",
         torch_op=hipblas_hpr2_baseline if IS_HYGON else cublas_hpr2_baseline,
         gems_op=gems_zhpr2_wrapper,
         dtypes=[torch.complex128],
