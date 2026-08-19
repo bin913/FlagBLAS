@@ -1,3 +1,18 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import atexit
 import ctypes
 import ctypes.util
 from typing import Generator
@@ -9,6 +24,8 @@ import flag_blas
 from benchmark.performance_utils import Benchmark, run_correctness_then_benchmark
 from flag_blas.ops import CUBLAS_FILL_MODE_LOWER, CUBLAS_FILL_MODE_UPPER
 from flag_blas.utils import shape_utils
+
+IS_HYGON = flag_blas.vendor_name == "hygon"
 
 SPR_SIZES = [
     64,
@@ -106,6 +123,97 @@ _CUBLAS_SPR_FUNCS = None
 CUBLAS_POINTER_MODE_HOST = 0
 
 
+_HIPBLAS_LIBRARY = None
+_HIPBLAS_HANDLES = {}
+_HIPBLAS_SPR_FUNCS = {
+    torch.float32: ("hipblasSspr", ctypes.c_float),
+    torch.float64: ("hipblasDspr", ctypes.c_double),
+}
+
+
+def _check_hipblas_status(status, operation):
+    if status != 0:
+        raise RuntimeError(f"{operation} failed with hipBLAS status {status}")
+
+
+def _load_hipblas():
+    global _HIPBLAS_LIBRARY
+    if _HIPBLAS_LIBRARY is None:
+        library_name = ctypes.util.find_library("hipblas")
+        if library_name is None:
+            raise RuntimeError("Unable to find the hipBLAS shared library")
+        library = ctypes.CDLL(library_name)
+        library.hipblasCreate.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
+        library.hipblasCreate.restype = ctypes.c_int
+        library.hipblasDestroy.argtypes = [ctypes.c_void_p]
+        library.hipblasDestroy.restype = ctypes.c_int
+        library.hipblasSetStream.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        library.hipblasSetStream.restype = ctypes.c_int
+        library.hipblasSetPointerMode.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        library.hipblasSetPointerMode.restype = ctypes.c_int
+        _HIPBLAS_LIBRARY = library
+    return _HIPBLAS_LIBRARY
+
+
+def _prepare_hipblas(device):
+    library = _load_hipblas()
+    torch_device = torch.device(device)
+    device_index = torch_device.index
+    if device_index is None:
+        device_index = torch.cuda.current_device()
+    handle = _HIPBLAS_HANDLES.get(device_index)
+    if handle is None:
+        with torch.cuda.device(device_index):
+            handle = ctypes.c_void_p()
+            _check_hipblas_status(
+                library.hipblasCreate(ctypes.byref(handle)), "hipblasCreate"
+            )
+            _check_hipblas_status(
+                library.hipblasSetPointerMode(handle, 0),
+                "hipblasSetPointerMode",
+            )
+        _HIPBLAS_HANDLES[device_index] = handle
+    stream = torch.cuda.current_stream(device).cuda_stream
+    _check_hipblas_status(
+        library.hipblasSetStream(handle, ctypes.c_void_p(stream)),
+        "hipblasSetStream",
+    )
+    return library, handle
+
+
+def _destroy_hipblas_handles():
+    if _HIPBLAS_LIBRARY is None:
+        return
+    for handle in tuple(_HIPBLAS_HANDLES.values()):
+        try:
+            _HIPBLAS_LIBRARY.hipblasDestroy(handle)
+        except Exception:
+            pass
+    _HIPBLAS_HANDLES.clear()
+
+
+def _resolve_hipblas_spr(library, dtype):
+    try:
+        symbol, scalar_type = _HIPBLAS_SPR_FUNCS[dtype]
+    except KeyError as error:
+        raise ValueError(f"Unsupported Hygon SPR benchmark dtype: {dtype}") from error
+    function = getattr(library, symbol)
+    function.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.POINTER(scalar_type),
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+    ]
+    function.restype = ctypes.c_int
+    return function, scalar_type
+
+
+atexit.register(_destroy_hipblas_handles)
+
+
 def _configure_cublas_signatures():
     _cublas.cublasCreate_v2.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
     _cublas.cublasCreate_v2.restype = ctypes.c_int
@@ -137,31 +245,39 @@ def _ensure_cublas():
     return _cublas
 
 
-def cublas_spr_baseline(AP, x, uplo, n, incx, handle, c_func, alpha_c, **kwargs):
+def hipblas_spr_baseline(
+    AP,
+    x,
+    uplo,
+    n,
+    incx,
+    c_func,
+    vendor_args,
+    **kwargs,
+):
     if n == 0:
         return AP
-    status = c_func(
-        handle,
-        ctypes.c_int(uplo),
-        ctypes.c_int(n),
-        ctypes.byref(alpha_c),
-        ctypes.c_void_p(x.data_ptr()),
-        ctypes.c_int(incx),
-        ctypes.c_void_p(AP.data_ptr()),
-    )
+    status = c_func(*vendor_args)
+    _check_hipblas_status(status, "hipBLAS SPR")
+    return AP
+
+
+def cublas_spr_baseline(AP, x, uplo, n, incx, c_func, vendor_args, **kwargs):
+    if n == 0:
+        return AP
+    status = c_func(*vendor_args)
     if status != 0:
         raise RuntimeError(f"cublasXspr_v2 failed with status code: {status}")
-    torch.cuda.synchronize(AP.device)
     return AP
 
 
-def gems_sspr_wrapper(AP, x, uplo, n, alpha, incx, handle, **kwargs):
-    flag_blas.ops.sspr(uplo, n, alpha, x, incx, AP)
+def gems_sspr_wrapper(AP, x, uplo, n, alpha, incx, handle=None, **kwargs):
+    flag_blas.sspr(uplo, n, alpha, x, incx, AP)
     return AP
 
 
-def gems_dspr_wrapper(AP, x, uplo, n, alpha, incx, handle, **kwargs):
-    flag_blas.ops.dspr(uplo, n, alpha, x, incx, AP)
+def gems_dspr_wrapper(AP, x, uplo, n, alpha, incx, handle=None, **kwargs):
+    flag_blas.dspr(uplo, n, alpha, x, incx, AP)
     return AP
 
 
@@ -177,6 +293,7 @@ class SprBenchmark(Benchmark):
         super().__init__(*args, **kwargs)
         self.uplo = uplo
         self.alpha = alpha
+        self.correctness_reference = "hipBLAS" if IS_HYGON else "cuBLAS"
 
     def set_more_metrics(self):
         return ["tflops", "gbps"]
@@ -193,31 +310,63 @@ class SprBenchmark(Benchmark):
             self.shape_desc = self.DEFAULT_SHAPE_DESC
 
     def get_input_iter(self, cur_dtype) -> Generator:
-        cublas = _ensure_cublas()
-        handle = ctypes.c_void_p()
-        status = cublas.cublasCreate_v2(ctypes.byref(handle))
-        if status != 0:
-            raise RuntimeError(f"cublasCreate_v2 failed with status code: {status}")
-        status = cublas.cublasSetPointerMode_v2(handle, CUBLAS_POINTER_MODE_HOST)
-        if status != 0:
-            raise RuntimeError(
-                f"cublasSetPointerMode_v2 failed with status code: {status}"
-            )
-        c_func, ctor = _CUBLAS_SPR_FUNCS[cur_dtype]
+        if IS_HYGON:
+            library, handle = _prepare_hipblas(self.device)
+            c_func, ctor = _resolve_hipblas_spr(library, cur_dtype)
+        else:
+            cublas = _ensure_cublas()
+            handle = ctypes.c_void_p()
+            status = cublas.cublasCreate_v2(ctypes.byref(handle))
+            if status != 0:
+                raise RuntimeError(f"cublasCreate_v2 failed with status code: {status}")
+            status = cublas.cublasSetPointerMode_v2(handle, CUBLAS_POINTER_MODE_HOST)
+            if status != 0:
+                raise RuntimeError(
+                    f"cublasSetPointerMode_v2 failed with status code: {status}"
+                )
+            c_func, ctor = _CUBLAS_SPR_FUNCS[cur_dtype]
         alpha_c = ctor(self.alpha)
+        alpha_ptr = ctypes.byref(alpha_c)
+
         for shape in self.shapes:
             n = shape[0] if isinstance(shape, (tuple, list)) else shape
             AP = _generate_packed(n, cur_dtype, self.device)
             x = torch.randn(n, dtype=cur_dtype, device=self.device)
-            yield AP, x, {
+            reference_uplo = (
+                CUBLAS_FILL_MODE_LOWER
+                if self.uplo == CUBLAS_FILL_MODE_UPPER
+                else CUBLAS_FILL_MODE_UPPER
+            )
+            if IS_HYGON:
+                vendor_args = (
+                    handle,
+                    121 if reference_uplo == CUBLAS_FILL_MODE_UPPER else 122,
+                    n,
+                    alpha_ptr,
+                    ctypes.c_void_p(x.data_ptr()),
+                    1,
+                    ctypes.c_void_p(AP.data_ptr()),
+                )
+            else:
+                vendor_args = (
+                    handle,
+                    ctypes.c_int(reference_uplo),
+                    ctypes.c_int(n),
+                    alpha_ptr,
+                    ctypes.c_void_p(x.data_ptr()),
+                    ctypes.c_int(1),
+                    ctypes.c_void_p(AP.data_ptr()),
+                )
+            call_kwargs = {
                 "uplo": self.uplo,
                 "n": n,
                 "alpha": self.alpha,
                 "incx": 1,
-                "handle": handle,
                 "c_func": c_func,
+                "vendor_args": vendor_args,
                 "alpha_c": alpha_c,
             }
+            yield AP, x, call_kwargs
 
     def get_tflops(self, op, *args, **kwargs):
         return kwargs.get("n", 0) * kwargs.get("n", 0)
@@ -228,18 +377,24 @@ class SprBenchmark(Benchmark):
         return io_amount * 1e-9 / (latency * 1e-3)
 
     def get_correctness_reduce_dim(self, args, kwargs):
-        return max(1, kwargs.get("n", 0))
+        return 1
 
     def clone_correctness_inputs(self, args, kwargs):
         AP, x = args
-        return (AP.clone(), x), kwargs, (AP.clone(), x), kwargs
+        ref_AP = AP.clone()
+        blas_AP = AP.clone()
+        ref_kwargs = kwargs.copy()
+        vendor_args = list(kwargs["vendor_args"])
+        vendor_args[6] = ctypes.c_void_p(ref_AP.data_ptr())
+        ref_kwargs["vendor_args"] = tuple(vendor_args)
+        return (ref_AP, x), ref_kwargs, (blas_AP, x), kwargs
 
 
 @pytest.mark.sspr
 def test_perf_sspr():
     bench = SprBenchmark(
         op_name="sspr",
-        torch_op=cublas_spr_baseline,
+        torch_op=hipblas_spr_baseline if IS_HYGON else cublas_spr_baseline,
         gems_op=gems_sspr_wrapper,
         dtypes=[torch.float32],
         uplo=CUBLAS_FILL_MODE_LOWER,
@@ -250,8 +405,8 @@ def test_perf_sspr():
 @pytest.mark.sspr
 def test_perf_sspr_upper():
     bench = SprBenchmark(
-        op_name="sspr_upper",
-        torch_op=cublas_spr_baseline,
+        op_name="sspr",
+        torch_op=hipblas_spr_baseline if IS_HYGON else cublas_spr_baseline,
         gems_op=gems_sspr_wrapper,
         dtypes=[torch.float32],
         uplo=CUBLAS_FILL_MODE_UPPER,
@@ -265,7 +420,7 @@ def test_perf_dspr():
         pytest.skip("Device does not support float64")
     bench = SprBenchmark(
         op_name="dspr",
-        torch_op=cublas_spr_baseline,
+        torch_op=hipblas_spr_baseline if IS_HYGON else cublas_spr_baseline,
         gems_op=gems_dspr_wrapper,
         dtypes=[torch.float64],
         uplo=CUBLAS_FILL_MODE_LOWER,
@@ -278,8 +433,8 @@ def test_perf_dspr_upper():
     if not flag_blas.runtime.device.support_fp64:
         pytest.skip("Device does not support float64")
     bench = SprBenchmark(
-        op_name="dspr_upper",
-        torch_op=cublas_spr_baseline,
+        op_name="dspr",
+        torch_op=hipblas_spr_baseline if IS_HYGON else cublas_spr_baseline,
         gems_op=gems_dspr_wrapper,
         dtypes=[torch.float64],
         uplo=CUBLAS_FILL_MODE_UPPER,
