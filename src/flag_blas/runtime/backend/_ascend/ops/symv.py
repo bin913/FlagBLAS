@@ -1,3 +1,17 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Ascend-specific SYMV kernels.
 
 The public implementation keeps its NVIDIA/Tianshu launch geometry unchanged.
@@ -12,7 +26,12 @@ import triton
 import triton.language as tl
 
 from flag_blas import runtime
-from flag_blas.ops.level2.symv import _check_common, _complex_scalars, _strided_y
+from flag_blas.ops.level2.symv import (
+    _check_common,
+    _complex_scalars,
+    _row_major_uplo,
+    _strided_y,
+)
 from flag_blas.runtime import torch_device_fn
 from flag_blas.utils import libentry, libtuner
 
@@ -226,7 +245,9 @@ def ssymv(
             y_view.zero_()
         elif beta != 1.0:
             y_view.mul_(beta)
-        ssymv_kernel[_triangular_grid(n)](A, x, y, alpha, n, lda, incx, incy, UPLO=uplo)
+        ssymv_kernel[_triangular_grid(n)](
+            A, x, y, alpha, n, lda, incx, incy, UPLO=_row_major_uplo(uplo)
+        )
 
 
 def csymv(
@@ -264,7 +285,16 @@ def csymv(
         elif br != 1.0 or bi != 0.0:
             y_view.mul_(complex(br, bi))
         csymv_kernel[_triangular_grid(n)](
-            A_real, x_real, y_real, ar, ai, n, lda, incx, incy, UPLO=uplo
+            A_real,
+            x_real,
+            y_real,
+            ar,
+            ai,
+            n,
+            lda,
+            incx,
+            incy,
+            UPLO=_row_major_uplo(uplo),
         )
 
 

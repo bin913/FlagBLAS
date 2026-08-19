@@ -441,6 +441,15 @@ zhemv_hygon:
     num_warps: 4
     num_stages: 2
   - META: {BLOCK_SIZE: 32}
+    num_warps: 4
+    num_stages: 3
+  - META: {BLOCK_SIZE: 32}
+    num_warps: 2
+    num_stages: 1
+  - META: {BLOCK_SIZE: 32}
+    num_warps: 2
+    num_stages: 2
+  - META: {BLOCK_SIZE: 32}
     num_warps: 8
     num_stages: 2
   - META: {BLOCK_SIZE: 32}
@@ -452,6 +461,17 @@ zhemv_hygon:
   - META: {BLOCK_SIZE: 64}
     num_warps: 8
     num_stages: 2
+
+chemv_hygon_swizzle:
+  - META: {BLOCK_SIZE: 64, GROUP_SIZE_M: 1}
+    num_warps: 2
+    num_stages: 1
+
+
+zhemv_hygon_swizzle:
+  - META: {BLOCK_SIZE: 64, GROUP_SIZE_M: 1}
+    num_warps: 4
+    num_stages: 1
 
 dsymv:
   - META: {BLOCK_SIZE: 16}
