@@ -123,6 +123,158 @@ dgbmv_t_tiled_hygon:
     num_warps: 1
     num_stages: 2
 
+dgbmv_n_hygon:
+  - META: {BLOCK_SIZE_M: 16}
+    num_warps: 1
+    num_stages: 1
+  - META: {BLOCK_SIZE_M: 32}
+    num_warps: 1
+    num_stages: 1
+  - META: {BLOCK_SIZE_M: 32}
+    num_warps: 2
+    num_stages: 1
+  - META: {BLOCK_SIZE_M: 32}
+    num_warps: 2
+    num_stages: 2
+  - META: {BLOCK_SIZE_M: 32}
+    num_warps: 4
+    num_stages: 1
+  - META: {BLOCK_SIZE_M: 64}
+    num_warps: 1
+    num_stages: 1
+  - META: {BLOCK_SIZE_M: 64}
+    num_warps: 2
+    num_stages: 1
+  - META: {BLOCK_SIZE_M: 64}
+    num_warps: 4
+    num_stages: 1
+  - META: {BLOCK_SIZE_M: 64}
+    num_warps: 4
+    num_stages: 2
+  - META: {BLOCK_SIZE_M: 128}
+    num_warps: 2
+    num_stages: 1
+  - META: {BLOCK_SIZE_M: 128}
+    num_warps: 4
+    num_stages: 1
+  - META: {BLOCK_SIZE_M: 128}
+    num_warps: 8
+    num_stages: 1
+  - META: {BLOCK_SIZE_M: 128}
+    num_warps: 8
+    num_stages: 2
+  - META: {BLOCK_SIZE_M: 256}
+    num_warps: 4
+    num_stages: 1
+  - META: {BLOCK_SIZE_M: 256}
+    num_warps: 8
+    num_stages: 1
+
+dgbmv_n_tiled_hygon:
+  - META: {BLOCK_SIZE_M: 8, BAND_TILE: 16}
+    num_warps: 1
+    num_stages: 1
+  - META: {BLOCK_SIZE_M: 8, BAND_TILE: 32}
+    num_warps: 1
+    num_stages: 1
+  - META: {BLOCK_SIZE_M: 16, BAND_TILE: 16}
+    num_warps: 1
+    num_stages: 1
+  - META: {BLOCK_SIZE_M: 16, BAND_TILE: 32}
+    num_warps: 2
+    num_stages: 1
+  - META: {BLOCK_SIZE_M: 32, BAND_TILE: 16}
+    num_warps: 2
+    num_stages: 1
+  - META: {BLOCK_SIZE_M: 32, BAND_TILE: 32}
+    num_warps: 4
+    num_stages: 1
+  - META: {BLOCK_SIZE_M: 4, BAND_TILE: 256}
+    num_warps: 1
+    num_stages: 1
+  - META: {BLOCK_SIZE_M: 8, BAND_TILE: 64}
+    num_warps: 1
+    num_stages: 4
+
+cgbmv_n_hygon:
+  - META: {BLOCK_SIZE_M: 16, BAND_TILE: 16}
+    num_warps: 1
+    num_stages: 1
+  - META: {BLOCK_SIZE_M: 16, BAND_TILE: 32}
+    num_warps: 1
+    num_stages: 1
+  - META: {BLOCK_SIZE_M: 16, BAND_TILE: 64}
+    num_warps: 4
+    num_stages: 1
+  - META: {BLOCK_SIZE_M: 32, BAND_TILE: 16}
+    num_warps: 2
+    num_stages: 1
+  - META: {BLOCK_SIZE_M: 32, BAND_TILE: 32}
+    num_warps: 2
+    num_stages: 1
+  - META: {BLOCK_SIZE_M: 32, BAND_TILE: 64}
+    num_warps: 2
+    num_stages: 1
+  - META: {BLOCK_SIZE_M: 32, BAND_TILE: 32}
+    num_warps: 4
+    num_stages: 1
+  - META: {BLOCK_SIZE_M: 64, BAND_TILE: 16}
+    num_warps: 4
+    num_stages: 1
+  - META: {BLOCK_SIZE_M: 64, BAND_TILE: 32}
+    num_warps: 4
+    num_stages: 1
+  - META: {BLOCK_SIZE_M: 64, BAND_TILE: 64}
+    num_warps: 4
+    num_stages: 1
+  - META: {BLOCK_SIZE_M: 64, BAND_TILE: 64}
+    num_warps: 4
+    num_stages: 2
+  - META: {BLOCK_SIZE_M: 64, BAND_TILE: 128}
+    num_warps: 4
+    num_stages: 1
+  - META: {BLOCK_SIZE_M: 128, BAND_TILE: 16}
+    num_warps: 8
+    num_stages: 1
+  - META: {BLOCK_SIZE_M: 128, BAND_TILE: 32}
+    num_warps: 8
+    num_stages: 1
+  - META: {BLOCK_SIZE_M: 128, BAND_TILE: 64}
+    num_warps: 8
+    num_stages: 1
+  - META: {BLOCK_SIZE_M: 128, BAND_TILE: 64}
+    num_warps: 8
+    num_stages: 2
+
+complex_gbmv_n_active_hygon:
+  - META: {BLOCK_SIZE_M: 8, BAND_TILE: 16}
+    num_warps: 1
+    num_stages: 1
+  - META: {BLOCK_SIZE_M: 8, BAND_TILE: 32}
+    num_warps: 1
+    num_stages: 2
+  - META: {BLOCK_SIZE_M: 8, BAND_TILE: 64}
+    num_warps: 1
+    num_stages: 1
+  - META: {BLOCK_SIZE_M: 16, BAND_TILE: 16}
+    num_warps: 1
+    num_stages: 1
+  - META: {BLOCK_SIZE_M: 16, BAND_TILE: 16}
+    num_warps: 1
+    num_stages: 2
+  - META: {BLOCK_SIZE_M: 16, BAND_TILE: 16}
+    num_warps: 1
+    num_stages: 3
+  - META: {BLOCK_SIZE_M: 16, BAND_TILE: 32}
+    num_warps: 1
+    num_stages: 1
+  - META: {BLOCK_SIZE_M: 16, BAND_TILE: 64}
+    num_warps: 1
+    num_stages: 1
+  - META: {BLOCK_SIZE_M: 32, BAND_TILE: 16}
+    num_warps: 1
+    num_stages: 3
+
 cgbmv_t_tiled_hygon:
   - META: {BLOCK_SIZE_M: 4, BAND_TILE: 32}
     num_warps: 1
@@ -206,6 +358,9 @@ zgbmv_t_pair_hygon:
     num_stages: 3
 
 zgbmv_n_small_hygon:
+  - META: {BLOCK_SIZE_M: 8, SPLIT_LANES: 32}
+    num_warps: 4
+    num_stages: 1
   - META: {BLOCK_SIZE_M: 32, SPLIT_LANES: 16}
     num_warps: 8
     num_stages: 1
