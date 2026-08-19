@@ -69,14 +69,20 @@ case $VENDOR in
   hygon)
     # Install PyTorch for Hygon DCU (ROCm/HIP).
     # The DTK-patched torch (2.4.1+das.opt2.dtk2504) is NOT published on the
-    # flagos-pypi-hygon index; it is downloaded directly from the internal DCU
-    # software mirror (same source used to provision the local dev machine).
-    # The aliyun mirror resolves torch's transitive deps (filelock, sympy, ...).
+    # flagos-pypi-hygon index; it is downloaded directly from the internal
+    # software mirror download.sourcefind.cn (same source used to provision
+    # the local dev machine). The aliyun mirror resolves torch's transitive
+    # deps (filelock, sympy, ...).
     UV_INDEX_URL="https://resource.flagos.net/repository/flagos-pypi-hygon/simple"
     UV_EXTRA_INDEX_URL="https://mirrors.aliyun.com/pypi/simple"
-    TORCH_WHEEL_URL="http://10.16.4.1:8000/dcuai-pre-release/pytorch/dtk25.04-rc5/torch-2.4.1%2Bdas.opt2.dtk2504-cp310-cp310-manylinux_2_28_x86_64.whl"
+    TORCH_WHEEL_URL="https://download.sourcefind.cn:65024/file/4/torch/DAS1.5/torch-2.4.1+das.opt2.dtk2504-cp310-cp310-manylinux_2_28_x86_64.whl"
+    TORCH_WHEEL_NAME="${TORCH_WHEEL_URL##*/}"
 
-    uv pip install "${TORCH_WHEEL_URL}" \
+    wget --content-disposition "${TORCH_WHEEL_URL}" -O "${TORCH_WHEEL_NAME}" || {
+      echo "::error title=hygon torch download failed::wget --content-disposition ${TORCH_WHEEL_URL}"
+      exit 1
+    }
+    uv pip install "./${TORCH_WHEEL_NAME}" \
         --index-url ${UV_EXTRA_INDEX_URL} || {
           echo "::error title=hygon torch install failed::uv pip install ${TORCH_WHEEL_URL}"
           exit 1
