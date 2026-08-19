@@ -1,3 +1,17 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import ctypes
 import ctypes.util
 
@@ -10,6 +24,9 @@ from flag_blas.ops import CUBLAS_FILL_MODE_LOWER, CUBLAS_FILL_MODE_UPPER
 
 from .accuracy_utils import blas_assert_close, to_cpu_blas_tensor, to_reference
 from .conftest import TO_CPU
+
+if flag_blas.vendor_name == "hygon":
+    from .hipblas_reference import check_hipblas_status, get_hipblas_context
 
 
 def load_cublas():
@@ -90,10 +107,17 @@ def _get_cublas_handle():
     return _cublas_handle
 
 
+def _row_to_column_full(A, n, lda):
+    column_A = torch.zeros((n, lda), dtype=A.dtype, device=A.device)
+    column_A[:, :n] = A[:n, :n].T
+    return column_A
+
+
 def cublas_syr2_reference(uplo, n, alpha, x, incx, y, incy, A, lda):
     if n == 0:
         return
 
+    column_A = _row_to_column_full(A, n, lda)
     handle = _get_cublas_handle()
     _ensure_cublas()
     func, ctor, is_complex = _CUBLAS_SYR2_FUNCS[A.dtype]
@@ -107,12 +131,61 @@ def cublas_syr2_reference(uplo, n, alpha, x, incx, y, incy, A, lda):
         ctypes.c_int(incx),
         ctypes.c_void_p(y.data_ptr()),
         ctypes.c_int(incy),
-        ctypes.c_void_p(A.data_ptr()),
+        ctypes.c_void_p(column_A.data_ptr()),
         ctypes.c_int(lda),
     )
     if status != 0:
         raise RuntimeError(f"cublasXsyr2_v2 execution failed with error code: {status}")
-    torch.cuda.synchronize(A.device)
+    A[:n, :n] = column_A[:, :n].T
+
+
+def hipblas_syr2_reference(uplo, n, alpha, x, incx, y, incy, A, lda):
+    if n == 0:
+        return
+
+    column_A = _row_to_column_full(A, n, lda)
+    if A.dtype == torch.float32:
+        symbol = "hipblasSsyr2"
+        scalar_type = ctypes.c_float
+    elif A.dtype == torch.float64:
+        symbol = "hipblasDsyr2"
+        scalar_type = ctypes.c_double
+    else:
+        raise ValueError(f"Unsupported dtype for hipBLAS SYR2: {A.dtype}")
+
+    library, handle = get_hipblas_context(column_A)
+    function = getattr(library, symbol)
+    function.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.POINTER(scalar_type),
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_int,
+    ]
+    function.restype = ctypes.c_int
+    alpha_c = scalar_type(alpha)
+    hip_uplo = 121 if uplo == CUBLAS_FILL_MODE_UPPER else 122
+    check_hipblas_status(
+        function(
+            handle,
+            hip_uplo,
+            n,
+            ctypes.byref(alpha_c),
+            ctypes.c_void_p(x.data_ptr()),
+            incx,
+            ctypes.c_void_p(y.data_ptr()),
+            incy,
+            ctypes.c_void_p(column_A.data_ptr()),
+            lda,
+        ),
+        symbol,
+    )
+    A[:n, :n] = column_A[:, :n].T
 
 
 def cpu_syr2_reference(uplo, n, alpha, x, incx, y, incy, A, lda):
@@ -122,7 +195,7 @@ def cpu_syr2_reference(uplo, n, alpha, x, incx, y, incy, A, lda):
 
     ref_x = to_cpu_blas_tensor(x)
     ref_y = to_cpu_blas_tensor(y)
-    logical_A = ref_A[:n, :n].T.numpy().copy(order="F")
+    logical_A = ref_A[:n, :n].numpy().copy(order="F")
     alpha = alpha.item() if isinstance(alpha, torch.Tensor) else alpha
     lower = int(uplo == CUBLAS_FILL_MODE_LOWER)
     updated = cpu_blas.dsyr2(
@@ -137,7 +210,7 @@ def cpu_syr2_reference(uplo, n, alpha, x, incx, y, incy, A, lda):
         overwrite_a=1,
     )
 
-    ref_A[:n, :n] = torch.from_numpy(updated.T.copy())
+    ref_A[:n, :n] = torch.from_numpy(updated.copy(order="C"))
     return ref_A
 
 
@@ -146,7 +219,10 @@ def syr2_reference(uplo, n, alpha, x, incx, y, incy, A, lda):
         return cpu_syr2_reference(uplo, n, alpha, x, incx, y, incy, A, lda)
 
     ref_A = A.clone()
-    cublas_syr2_reference(uplo, n, alpha, x, incx, y, incy, ref_A, lda)
+    if flag_blas.vendor_name == "hygon":
+        hipblas_syr2_reference(uplo, n, alpha, x, incx, y, incy, ref_A, lda)
+    else:
+        cublas_syr2_reference(uplo, n, alpha, x, incx, y, incy, ref_A, lda)
     return ref_A
 
 
@@ -175,21 +251,68 @@ SYR2_SIZES = [
     127,
     128,
     129,
+    160,
     191,
     192,
     193,
+    224,
     255,
     256,
     257,
+    320,
     383,
     384,
     385,
+    448,
     511,
     512,
     513,
+    640,
     767,
     768,
     769,
+    896,
+    1023,
+    1024,
+    1025,
+    1280,
+    1535,
+    1536,
+    1537,
+    1792,
+    2047,
+    2048,
+    2049,
+    2304,
+    2559,
+    2560,
+    2561,
+    2816,
+    3071,
+    3072,
+    3073,
+    3328,
+    3583,
+    3584,
+    3585,
+    3840,
+    4095,
+    4096,
+    4607,
+    4608,
+    4609,
+    5119,
+    5120,
+    5121,
+    5632,
+    6143,
+    6144,
+    6145,
+    7167,
+    7168,
+    7169,
+    8191,
+    8192,
 ]
 SYR2_STRIDE_SIZES = [
     15,

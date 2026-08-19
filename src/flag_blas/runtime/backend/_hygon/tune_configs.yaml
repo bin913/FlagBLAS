@@ -1647,6 +1647,104 @@ zhpmv_hygon:
     num_warps: 8
     num_stages: 2
 
+ssyr2_hygon:
+  - META: {BLOCK_SIZE: 8}
+    num_warps: 1
+    num_stages: 2
+  - META: {BLOCK_SIZE: 16}
+    num_warps: 1
+    num_stages: 2
+  - META: {BLOCK_SIZE: 16}
+    num_warps: 2
+    num_stages: 2
+  - META: {BLOCK_SIZE: 32}
+    num_warps: 4
+    num_stages: 2
+  - META: {BLOCK_SIZE: 32}
+    num_warps: 8
+    num_stages: 1
+  - META: {BLOCK_SIZE: 32}
+    num_warps: 8
+    num_stages: 2
+  - META: {BLOCK_SIZE: 32}
+    num_warps: 8
+    num_stages: 3
+
+ssyr2_large_lower_hygon:
+  - META: {BLOCK_SIZE: 32}
+    num_warps: 8
+    num_stages: 1
+
+dsyr2_hygon:
+  - META: {BLOCK_SIZE: 8}
+    num_warps: 1
+    num_stages: 2
+  - META: {BLOCK_SIZE: 16}
+    num_warps: 1
+    num_stages: 2
+  - META: {BLOCK_SIZE: 16}
+    num_warps: 2
+    num_stages: 2
+  - META: {BLOCK_SIZE: 32}
+    num_warps: 4
+    num_stages: 2
+
+cher2_hygon:
+  - META: {BLOCK_SIZE: 8}
+    num_warps: 1
+    num_stages: 2
+  - META: {BLOCK_SIZE: 16}
+    num_warps: 1
+    num_stages: 2
+  - META: {BLOCK_SIZE: 16}
+    num_warps: 2
+    num_stages: 2
+  - META: {BLOCK_SIZE: 32}
+    num_warps: 2
+    num_stages: 1
+  - META: {BLOCK_SIZE: 32}
+    num_warps: 2
+    num_stages: 2
+  - META: {BLOCK_SIZE: 32}
+    num_warps: 4
+    num_stages: 1
+  - META: {BLOCK_SIZE: 32}
+    num_warps: 4
+    num_stages: 2
+
+cher2_large_hygon:
+  - META: {BLOCK_SIZE: 32}
+    num_warps: 4
+    num_stages: 1
+
+cher2_mid_hygon:
+  - META: {BLOCK_SIZE: 32}
+    num_warps: 8
+    num_stages: 2
+
+zher2_hygon:
+  - META: {BLOCK_SIZE: 8}
+    num_warps: 1
+    num_stages: 2
+  - META: {BLOCK_SIZE: 16}
+    num_warps: 1
+    num_stages: 2
+  - META: {BLOCK_SIZE: 16}
+    num_warps: 2
+    num_stages: 2
+  - META: {BLOCK_SIZE: 32}
+    num_warps: 2
+    num_stages: 2
+  - META: {BLOCK_SIZE: 32}
+    num_warps: 4
+    num_stages: 2
+  - META: {BLOCK_SIZE: 64}
+    num_warps: 8
+    num_stages: 1
+  - META: {BLOCK_SIZE: 64}
+    num_warps: 8
+    num_stages: 3
+
 zhpr2_hygon:
   - META: {BLOCK_SIZE: 128}
     num_warps: 2
