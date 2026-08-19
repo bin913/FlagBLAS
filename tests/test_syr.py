@@ -1,3 +1,17 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import ctypes
 import ctypes.util
 
@@ -7,9 +21,13 @@ import torch
 from scipy.linalg import blas as cpu_blas
 
 import flag_blas
+
+if flag_blas.vendor_name == "hygon":
+    from .hipblas_reference import check_hipblas_status, get_hipblas_context
+
 from flag_blas.ops import CUBLAS_FILL_MODE_LOWER, CUBLAS_FILL_MODE_UPPER
 
-from .accuracy_utils import blas_assert_close
+from .accuracy_utils import blas_assert_close, to_cpu_blas_tensor
 from .conftest import TO_CPU
 
 pytestmark = pytest.mark.syr
@@ -63,18 +81,26 @@ def _load_cublas():
     raise RuntimeError("Unable to find libcublas.so")
 
 
-_cublas = _load_cublas()
+_cublas = None
 _cublas_handle = None
+
+
+def _ensure_cublas():
+    global _cublas
+    if _cublas is None:
+        _cublas = _load_cublas()
+    return _cublas
 
 
 def _get_cublas_handle():
     global _cublas_handle
+    cublas = _ensure_cublas()
     if _cublas_handle is None:
         _cublas_handle = ctypes.c_void_p()
-        status = _cublas.cublasCreate_v2(ctypes.byref(_cublas_handle))
+        status = cublas.cublasCreate_v2(ctypes.byref(_cublas_handle))
         if status != 0:
             raise RuntimeError(f"cublasCreate_v2 failed with status code: {status}")
-        status = _cublas.cublasSetPointerMode_v2(_cublas_handle, 0)
+        status = cublas.cublasSetPointerMode_v2(_cublas_handle, 0)
         if status != 0:
             raise RuntimeError(
                 f"cublasSetPointerMode_v2 failed with status code: {status}"
@@ -98,43 +124,53 @@ def _make_inputs(n, incx, dtype, device):
     return x, A
 
 
+def _row_to_column_full(A, n, lda):
+    column_A = torch.zeros((n, lda), dtype=A.dtype, device=A.device)
+    column_A[:, :n] = A[:n, :n].T
+    return column_A
+
+
 def _cpu_ref(name, uplo, n, alpha, x, incx, A, lda):
-    x_cpu = x.detach().cpu().contiguous()
-    ref = A.detach().cpu().contiguous()
-    logical_A = ref[:n, :n].T.numpy().copy(order="F")
+    x_cpu = to_cpu_blas_tensor(x)
+    ref = to_cpu_blas_tensor(A)
+    logical_A = ref[:n, :n].numpy().copy(order="F")
     lower = int(uplo == CUBLAS_FILL_MODE_LOWER)
-    if name == "ssyr":
-        updated = cpu_blas.ssyr(
-            alpha, x_cpu.numpy(), a=logical_A, lower=lower, incx=incx, overwrite_a=1
-        )
-    elif name == "dsyr":
+    if name in ("ssyr", "dsyr"):
         updated = cpu_blas.dsyr(
-            alpha, x_cpu.numpy(), a=logical_A, lower=lower, incx=incx, overwrite_a=1
-        )
-    elif name == "csyr":
-        updated = cpu_blas.csyr(
-            alpha, x_cpu.numpy(), a=logical_A, lower=lower, incx=incx, overwrite_a=1
+            float(alpha),
+            x_cpu.numpy(),
+            a=logical_A,
+            lower=lower,
+            incx=incx,
+            overwrite_a=1,
         )
     else:
         updated = cpu_blas.zsyr(
-            alpha, x_cpu.numpy(), a=logical_A, lower=lower, incx=incx, overwrite_a=1
+            complex(alpha),
+            x_cpu.numpy(),
+            a=logical_A,
+            lower=lower,
+            incx=incx,
+            overwrite_a=1,
         )
-    ref[:n, :n] = torch.from_numpy(updated.T.copy())
+    ref[:n, :n] = torch.from_numpy(updated.copy(order="C"))
     return ref
 
 
 def _cublas_ref(name, uplo, n, alpha, x, incx, A, lda):
+    cublas = _ensure_cublas()
     ref = A.clone()
+    column_A = _row_to_column_full(ref, n, lda)
     if name == "ssyr":
-        func, scalar = _cublas.cublasSsyr_v2, ctypes.c_float(alpha)
+        func, scalar = cublas.cublasSsyr_v2, ctypes.c_float(alpha)
     elif name == "dsyr":
-        func, scalar = _cublas.cublasDsyr_v2, ctypes.c_double(alpha)
+        func, scalar = cublas.cublasDsyr_v2, ctypes.c_double(alpha)
     elif name == "csyr":
         value = complex(alpha)
-        func, scalar = _cublas.cublasCsyr_v2, _ComplexFloat(value.real, value.imag)
+        func, scalar = cublas.cublasCsyr_v2, _ComplexFloat(value.real, value.imag)
     else:
         value = complex(alpha)
-        func, scalar = _cublas.cublasZsyr_v2, _ComplexDouble(value.real, value.imag)
+        func, scalar = cublas.cublasZsyr_v2, _ComplexDouble(value.real, value.imag)
     status = func(
         _get_cublas_handle(),
         ctypes.c_int(uplo),
@@ -142,32 +178,78 @@ def _cublas_ref(name, uplo, n, alpha, x, incx, A, lda):
         ctypes.byref(scalar),
         ctypes.c_void_p(x.data_ptr()),
         ctypes.c_int(incx),
-        ctypes.c_void_p(ref.data_ptr()),
+        ctypes.c_void_p(column_A.data_ptr()),
         ctypes.c_int(lda),
     )
     if status != 0:
         raise RuntimeError(f"cublasXsyr_v2 failed with status code: {status}")
-    torch.cuda.synchronize(ref.device)
+    ref[:n, :n] = column_A[:, :n].T
     return ref
+
+
+def _hipblas_syr_reference(name, uplo, n, alpha, x, incx, A, lda):
+    ref = A.clone()
+    if n == 0:
+        return ref
+    column_A = _row_to_column_full(ref, n, lda)
+    library, handle = get_hipblas_context(column_A)
+    symbols = {
+        "ssyr": ("hipblasSsyr", ctypes.c_float),
+        "dsyr": ("hipblasDsyr", ctypes.c_double),
+        "csyr": ("hipblasCsyr_v2", _ComplexFloat),
+        "zsyr": ("hipblasZsyr_v2", _ComplexDouble),
+    }
+    symbol, scalar_type = symbols[name]
+    function = getattr(library, symbol)
+    function.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_int,
+    ]
+    function.restype = ctypes.c_int
+    if name in ("csyr", "zsyr"):
+        alpha_value = complex(alpha)
+        scalar = scalar_type(alpha_value.real, alpha_value.imag)
+    else:
+        scalar = scalar_type(alpha)
+    hip_uplo = 121 if uplo == CUBLAS_FILL_MODE_UPPER else 122
+    check_hipblas_status(
+        function(
+            handle,
+            hip_uplo,
+            n,
+            ctypes.byref(scalar),
+            ctypes.c_void_p(x.data_ptr()),
+            incx,
+            ctypes.c_void_p(column_A.data_ptr()),
+            lda,
+        ),
+        symbol,
+    )
+    ref[:n, :n] = column_A[:, :n].T
+    return ref
+
+
+def _reference(name, uplo, n, alpha, x, incx, A, lda):
+    if TO_CPU:
+        return _cpu_ref(name, uplo, n, alpha, x, incx, A, lda)
+    if flag_blas.vendor_name == "hygon":
+        return _hipblas_syr_reference(name, uplo, n, alpha, x, incx, A, lda)
+    return _cublas_ref(name, uplo, n, alpha, x, incx, A, lda)
 
 
 def _run_syr(name, dtype, alpha, uplo, n, incx):
     device = flag_blas.device
     x, A = _make_inputs(n, incx, dtype, device)
     lda = n
-    if TO_CPU:
-        ref = _cpu_ref(name, uplo, n, alpha, x, incx, A, lda)
-    else:
-        ref = _cublas_ref(name, uplo, n, alpha, x, incx, A, lda)
-    if name == "ssyr":
-        flag_blas.ops.ssyr(uplo, n, alpha, x, incx, A, lda)
-    elif name == "dsyr":
-        flag_blas.ops.dsyr(uplo, n, alpha, x, incx, A, lda)
-    elif name == "csyr":
-        flag_blas.ops.csyr(uplo, n, alpha, x, incx, A, lda)
-    else:
-        flag_blas.ops.zsyr(uplo, n, alpha, x, incx, A, lda)
-    blas_assert_close(A, ref, dtype, reduce_dim=n)
+    ref = _reference(name, uplo, n, alpha, x, incx, A, lda)
+    getattr(flag_blas, name)(uplo, n, alpha, x, incx, A, lda)
+    blas_assert_close(A, ref, dtype, reduce_dim=1)
 
 
 @pytest.mark.parametrize("n", SYR_SIZES)
@@ -230,9 +312,7 @@ def _make_regression_inputs(n, incx, dtype, lda):
 
 
 def _regression_reference(name, uplo, n, alpha, x, incx, A, lda):
-    if TO_CPU:
-        return _cpu_ref(name, uplo, n, alpha, x, incx, A, lda)
-    return _cublas_ref(name, uplo, n, alpha, x, incx, A, lda)
+    return _reference(name, uplo, n, alpha, x, incx, A, lda)
 
 
 @pytest.mark.parametrize(
@@ -255,7 +335,7 @@ def test_syr_accepts_scalar_cuda_tensor_alpha(name, dtype):
 
     getattr(flag_blas, name)(CUBLAS_FILL_MODE_LOWER, n, alpha, x, 1, A, lda)
 
-    blas_assert_close(A, ref, dtype, reduce_dim=n)
+    blas_assert_close(A, ref, dtype, reduce_dim=1)
 
 
 @pytest.mark.parametrize(
@@ -274,11 +354,11 @@ def test_syr_preserves_double_scalar_precision(name, dtype, alpha):
     x, A = _make_regression_inputs(n, 1, dtype, n)
     ref = _regression_reference(
         name, CUBLAS_FILL_MODE_UPPER, n, alpha, x, 1, A.clone(), n
-    ).to(A.device)
+    )
 
     getattr(flag_blas, name)(CUBLAS_FILL_MODE_UPPER, n, alpha, x, 1, A, n)
 
-    torch.testing.assert_close(A, ref, rtol=2e-13, atol=2e-13)
+    blas_assert_close(A, ref, dtype, reduce_dim=1)
 
 
 def test_syr_n_zero_is_noop():
@@ -297,6 +377,12 @@ def test_syr_rejects_noncontiguous_matrix():
 
     with pytest.raises(AssertionError):
         flag_blas.ssyr(CUBLAS_FILL_MODE_LOWER, n, 0.75, x, 1, A, n)
+
+
+@pytest.mark.skipif(flag_blas.vendor_name != "hygon", reason="Hygon only")
+def test_syr_root_api_uses_hygon_backend():
+    for name in ("ssyr", "dsyr", "csyr", "zsyr"):
+        assert getattr(flag_blas, name).__module__ == "_hygon.ops.syr"
 
 
 SYR_BALANCED_SIZES = (1, 2, 7, 16, 17, 33, 127)
@@ -331,5 +417,5 @@ def test_accuracy_syr_balanced(name, dtype, alpha, uplo, n, incx, lda_pad):
 
     getattr(flag_blas, name)(uplo, n, alpha, x, incx, A, lda)
 
-    blas_assert_close(A, ref, dtype, reduce_dim=n)
+    blas_assert_close(A, ref, dtype, reduce_dim=1)
     torch.testing.assert_close(x, x_before)

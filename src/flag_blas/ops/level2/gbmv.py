@@ -14,6 +14,7 @@
 
 import logging
 import struct
+from contextlib import nullcontext
 from typing import Union
 
 import torch
@@ -103,6 +104,8 @@ _CGBMV_SPLIT_BAND_CONFIGS = [
 ]
 
 _ZGBMV_N_CONFIGS = [
+    triton.Config({"BLOCK_SIZE_M": 16, "BAND_TILE": 4}, num_warps=1, num_stages=1),
+    triton.Config({"BLOCK_SIZE_M": 64, "BAND_TILE": 1}, num_warps=1, num_stages=1),
     triton.Config({"BLOCK_SIZE_M": 16, "BAND_TILE": 16}, num_warps=2, num_stages=1),
     triton.Config({"BLOCK_SIZE_M": 32, "BAND_TILE": 16}, num_warps=4, num_stages=1),
     triton.Config({"BLOCK_SIZE_M": 32, "BAND_TILE": 16}, num_warps=4, num_stages=2),
@@ -110,6 +113,9 @@ _ZGBMV_N_CONFIGS = [
 ]
 
 _ZGBMV_T_CONFIGS = [
+    triton.Config({"BLOCK_SIZE_M": 32, "BAND_TILE": 1}, num_warps=1, num_stages=2),
+    triton.Config({"BLOCK_SIZE_M": 32, "BAND_TILE": 4}, num_warps=1, num_stages=2),
+    triton.Config({"BLOCK_SIZE_M": 64, "BAND_TILE": 8}, num_warps=2, num_stages=2),
     triton.Config({"BLOCK_SIZE_M": 16, "BAND_TILE": 16}, num_warps=2, num_stages=1),
     triton.Config({"BLOCK_SIZE_M": 32, "BAND_TILE": 16}, num_warps=4, num_stages=1),
     triton.Config({"BLOCK_SIZE_M": 32, "BAND_TILE": 16}, num_warps=4, num_stages=2),
@@ -117,6 +123,7 @@ _ZGBMV_T_CONFIGS = [
 ]
 
 _ZGBMV_SPLIT_BAND_CONFIGS = [
+    triton.Config({"BLOCK_SIZE_M": 16, "BAND_TILE": 32}, num_warps=1, num_stages=1),
     triton.Config({"BLOCK_SIZE_M": 16, "BAND_TILE": 16}, num_warps=2, num_stages=1),
     triton.Config({"BLOCK_SIZE_M": 32, "BAND_TILE": 16}, num_warps=4, num_stages=1),
     triton.Config({"BLOCK_SIZE_M": 32, "BAND_TILE": 16}, num_warps=4, num_stages=2),
@@ -1066,6 +1073,11 @@ def zgbmv_t_split_band_kernel(
     tl.atomic_add(y_ptr + y_off + 1, res_i, mask=col_mask, sem="relaxed")
 
 
+def _row_major_gbmv_args(trans, m, n, kl, ku):
+    physical_trans = CUBLAS_OP_T if trans == CUBLAS_OP_N else CUBLAS_OP_N
+    return physical_trans, n, m, ku, kl, int(trans == CUBLAS_OP_C)
+
+
 def _check_common(A, x, y, trans, m, n, kl, ku, lda, incx, incy, complex_ok):
     assert A.is_contiguous() and x.is_contiguous() and y.is_contiguous()
     assert A.device == x.device == y.device
@@ -1083,7 +1095,7 @@ def _check_common(A, x, y, trans, m, n, kl, ku, lda, incx, incy, complex_ok):
     len_y = m if trans == CUBLAS_OP_N else n
     assert x.numel() >= 1 + (len_x - 1) * incx if len_x > 0 else x.numel() >= 0
     assert y.numel() >= 1 + (len_y - 1) * incy if len_y > 0 else y.numel() >= 0
-    assert A.numel() >= n * lda
+    assert A.numel() >= m * lda
 
 
 def _pick_split_band(
@@ -1098,6 +1110,13 @@ def _pick_split_band(
     cap = max(1, band // 16)
     split = min(want, cap, 64)
     return split if split >= 2 else 1
+
+
+def _device_guard(tensor: torch.Tensor):
+    device_index = tensor.device.index
+    if device_index is None or device_index == torch_device_fn.current_device():
+        return nullcontext()
+    return torch_device_fn.device(tensor.device)
 
 
 def sgbmv(
@@ -1130,6 +1149,7 @@ def sgbmv(
             y.mul_(beta)
         return
 
+    trans, m, n, kl, ku, conj = _row_major_gbmv_args(trans, m, n, kl, ku)
     band = kl + ku + 1
     out_len = m if trans == CUBLAS_OP_N else n
     bucket = _band_bucket(band)
@@ -1228,6 +1248,7 @@ def dgbmv(
 
     alpha_int = _f64_to_i64(alpha_val)
     beta_int = _f64_to_i64(beta_val)
+    trans, m, n, kl, ku, conj = _row_major_gbmv_args(trans, m, n, kl, ku)
     band = kl + ku + 1
     out_len = m if trans == CUBLAS_OP_N else n
     inner_len = n if trans == CUBLAS_OP_N else m
@@ -1334,8 +1355,8 @@ def cgbmv(
             y.mul_(complex(br, bi))
         return
 
+    trans, m, n, kl, ku, conj = _row_major_gbmv_args(trans, m, n, kl, ku)
     band = kl + ku + 1
-    conj = 1 if trans == CUBLAS_OP_C else 0
     out_len = m if trans == CUBLAS_OP_N else n
     inner_len = n if trans == CUBLAS_OP_N else m
     bucket = _band_bucket(band)
@@ -1343,11 +1364,11 @@ def cgbmv(
     if split_band == 1 and band >= 512 and out_len >= 4 * inner_len:
         split_band = 2
 
-    A_real = torch.view_as_real(A)
-    x_real = torch.view_as_real(x)
-    y_real = torch.view_as_real(y)
+    A_real = triton.reinterpret(A, tl.float32)
+    x_real = triton.reinterpret(x, tl.float32)
+    y_real = triton.reinterpret(y, tl.float32)
 
-    with torch_device_fn.device(A.device):
+    with _device_guard(A):
         if split_band > 1:
             if br == 0.0 and bi == 0.0:
                 y.zero_()
@@ -1443,18 +1464,18 @@ def zgbmv(
     ai_i = _f64_to_i64(ai)
     br_i = _f64_to_i64(br)
     bi_i = _f64_to_i64(bi)
+    trans, m, n, kl, ku, conj = _row_major_gbmv_args(trans, m, n, kl, ku)
     band = kl + ku + 1
-    conj = 1 if trans == CUBLAS_OP_C else 0
     out_len = m if trans == CUBLAS_OP_N else n
     bucket = _band_bucket(band)
     split_band = _pick_split_band(out_len, band)
     if out_len <= 256 and band >= 256:
         split_band = 1
-    A_real = torch.view_as_real(A)
-    x_real = torch.view_as_real(x)
-    y_real = torch.view_as_real(y)
+    A_real = triton.reinterpret(A, tl.float64)
+    x_real = triton.reinterpret(x, tl.float64)
+    y_real = triton.reinterpret(y, tl.float64)
 
-    with torch_device_fn.device(A.device):
+    with _device_guard(A):
         if split_band > 1:
             if br == 0.0 and bi == 0.0:
                 y.zero_()

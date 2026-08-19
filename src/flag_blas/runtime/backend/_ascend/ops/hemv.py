@@ -1,3 +1,17 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Ascend-specific complex64 HEMV kernel."""
 
 from typing import Union
@@ -84,7 +98,7 @@ def chemv_kernel(
                 use_direct = j <= i
             else:
                 use_direct = j >= i
-            elem_off = tl.where(use_direct, i + j * LDA, j + i * LDA)
+            elem_off = tl.where(use_direct, i * LDA + j, j * LDA + i)
             a_off = elem_off * 2
             ar = tl.load(a_ptr + a_off, mask=mask2d, other=0.0)
             ai = tl.load(a_ptr + a_off + 1, mask=mask2d, other=0.0)
@@ -97,7 +111,7 @@ def chemv_kernel(
             tl.atomic_add(y_ptr + y_rows_off, res_r, mask=row_mask, sem="relaxed")
             tl.atomic_add(y_ptr + y_rows_off + 1, res_i, mask=row_mask, sem="relaxed")
         else:
-            elem_off = rows[:, None] + cols[None, :] * LDA
+            elem_off = rows[:, None] * LDA + cols[None, :]
             a_off = elem_off * 2
             ar = tl.load(a_ptr + a_off, mask=mask2d, other=0.0)
             ai = tl.load(a_ptr + a_off + 1, mask=mask2d, other=0.0)

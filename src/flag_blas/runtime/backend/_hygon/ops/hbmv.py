@@ -22,6 +22,7 @@ from flag_blas.ops.level2.hbmv import (
     _check_common,
     _complex_scalars,
     _f64_to_i64,
+    _row_major_uplo,
     _strided_y,
 )
 from flag_blas.ops.level2.hbmv import chbmv as common_chbmv
@@ -75,6 +76,7 @@ def chbmv(
 
     assert A.dtype == torch.complex64 == x.dtype == y.dtype
     _check_common(A, x, y, uplo, n, k, lda, incx, incy)
+    uplo = _row_major_uplo(uplo)
     ar, ai, br, bi = _complex_scalars(alpha, beta)
     y_view = _strided_y(y, n, incy)
     if ar == 0.0 and ai == 0.0:
@@ -128,6 +130,7 @@ def zhbmv(
 
     assert A.dtype == torch.complex128 == x.dtype == y.dtype
     _check_common(A, x, y, uplo, n, k, lda, incx, incy)
+    uplo = _row_major_uplo(uplo)
     ar, ai, br, bi = _complex_scalars(alpha, beta)
     y_view = _strided_y(y, n, incy)
     if ar == 0.0 and ai == 0.0:

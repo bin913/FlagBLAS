@@ -1,3 +1,17 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import logging
 import struct
 from typing import Union
@@ -18,10 +32,7 @@ logger = logging.getLogger(__name__)
 ScalarType = Union[float, int, complex, torch.Tensor]
 
 _HPR_CONFIGS = [
-    triton.Config({"BLOCK_SIZE": 8}, num_warps=1, num_stages=2),
-    triton.Config({"BLOCK_SIZE": 16}, num_warps=1, num_stages=2),
-    triton.Config({"BLOCK_SIZE": 16}, num_warps=2, num_stages=2),
-    triton.Config({"BLOCK_SIZE": 32}, num_warps=4, num_stages=2),
+    triton.Config({"BLOCK_SIZE": 128}, num_warps=2, num_stages=2),
 ]
 _HPR_KEY = ["n", "INCX", "UPLO"]
 _HPR_RESTORE = ["ap_ptr"]
@@ -29,6 +40,37 @@ _HPR_RESTORE = ["ap_ptr"]
 
 def _f64_to_i64(v: float) -> int:
     return struct.unpack("<q", struct.pack("<d", v))[0]
+
+
+@triton.jit
+def _hpr_row_col(packed_off, packed_size, n, UPLO: tl.constexpr):
+    if UPLO == 0:
+        triangle_off = packed_off
+    else:
+        triangle_off = packed_size - 1 - packed_off
+
+    major = ((tl.sqrt(8.0 * triangle_off.to(tl.float32) + 1.0) - 1.0) * 0.5).to(
+        tl.int64
+    )
+    major_base = major * (major + 1) // 2
+    major = tl.where(major_base > triangle_off, major - 1, major)
+    next_base = (major + 1) * (major + 2) // 2
+    major = tl.where(next_base <= triangle_off, major + 1, major)
+    major_base = major * (major + 1) // 2
+    minor = triangle_off - major_base
+
+    if UPLO == 0:
+        return major, minor
+    n64 = tl.full((), n, tl.int64)
+    return n64 - 1 - major, n64 - 1 - minor
+
+
+def _hpr_grid(n):
+    def grid(meta):
+        packed_size = n * (n + 1) // 2
+        return (triton.cdiv(packed_size, meta["BLOCK_SIZE"]),)
+
+    return grid
 
 
 @libentry()
@@ -43,41 +85,24 @@ def chpr_kernel(
     UPLO: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
-    pid_m = tl.program_id(0)
-    pid_n = tl.program_id(1)
-    if UPLO == 0:
-        if pid_m < pid_n:
-            return
-    else:
-        if pid_m > pid_n:
-            return
-
-    rows = pid_m * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    cols = pid_n * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    row_mask = rows < n
-    col_mask = cols < n
+    packed_size = n * (n + 1) // 2
+    packed_off = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = packed_off < packed_size
     n64 = tl.full((), n, tl.int64)
-    rows64 = rows.to(tl.int64)
-    cols64 = cols.to(tl.int64)
-    if UPLO == 0:
-        tri_mask = rows[:, None] >= cols[None, :]
-        off = rows64[:, None] + cols64[None, :] * (2 * n64 - cols64[None, :] - 1) // 2
-    else:
-        tri_mask = rows[:, None] <= cols[None, :]
-        off = cols64[None, :] * (cols64[None, :] + 1) // 2 + rows64[:, None]
-    mask = row_mask[:, None] & col_mask[None, :] & tri_mask
+    safe_off = tl.where(mask, packed_off, 0).to(tl.int64)
+    rows, cols = _hpr_row_col(safe_off, n64 * (n64 + 1) // 2, n, UPLO)
 
-    xr = tl.load(x_ptr + rows * INCX * 2, mask=row_mask, other=0.0)
-    xi = tl.load(x_ptr + rows * INCX * 2 + 1, mask=row_mask, other=0.0)
-    xcr = tl.load(x_ptr + cols * INCX * 2, mask=col_mask, other=0.0)
-    xci = tl.load(x_ptr + cols * INCX * 2 + 1, mask=col_mask, other=0.0)
-    update_r = alpha * (xr[:, None] * xcr[None, :] + xi[:, None] * xci[None, :])
-    update_i = alpha * (xi[:, None] * xcr[None, :] - xr[:, None] * xci[None, :])
+    xr = tl.load(x_ptr + rows * INCX * 2, mask=mask, other=0.0)
+    xi = tl.load(x_ptr + rows * INCX * 2 + 1, mask=mask, other=0.0)
+    xcr = tl.load(x_ptr + cols * INCX * 2, mask=mask, other=0.0)
+    xci = tl.load(x_ptr + cols * INCX * 2 + 1, mask=mask, other=0.0)
+    update_r = alpha * (xr * xcr + xi * xci)
+    update_i = alpha * (xi * xcr - xr * xci)
 
-    ap_off = off * 2
+    ap_off = safe_off * 2
     ar = tl.load(ap_ptr + ap_off, mask=mask, other=0.0)
     ai = tl.load(ap_ptr + ap_off + 1, mask=mask, other=0.0)
-    diag = rows[:, None] == cols[None, :]
+    diag = rows == cols
     out_i = tl.where(diag, 0.0, ai + update_i)
     tl.store(ap_ptr + ap_off, ar + update_r, mask=mask)
     tl.store(ap_ptr + ap_off + 1, out_i, mask=mask)
@@ -95,42 +120,25 @@ def zhpr_kernel(
     UPLO: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
-    pid_m = tl.program_id(0)
-    pid_n = tl.program_id(1)
     alpha = alpha_int.to(tl.float64, bitcast=True)
-    if UPLO == 0:
-        if pid_m < pid_n:
-            return
-    else:
-        if pid_m > pid_n:
-            return
-
-    rows = pid_m * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    cols = pid_n * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    row_mask = rows < n
-    col_mask = cols < n
+    packed_size = n * (n + 1) // 2
+    packed_off = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = packed_off < packed_size
     n64 = tl.full((), n, tl.int64)
-    rows64 = rows.to(tl.int64)
-    cols64 = cols.to(tl.int64)
-    if UPLO == 0:
-        tri_mask = rows[:, None] >= cols[None, :]
-        off = rows64[:, None] + cols64[None, :] * (2 * n64 - cols64[None, :] - 1) // 2
-    else:
-        tri_mask = rows[:, None] <= cols[None, :]
-        off = cols64[None, :] * (cols64[None, :] + 1) // 2 + rows64[:, None]
-    mask = row_mask[:, None] & col_mask[None, :] & tri_mask
+    safe_off = tl.where(mask, packed_off, 0).to(tl.int64)
+    rows, cols = _hpr_row_col(safe_off, n64 * (n64 + 1) // 2, n, UPLO)
 
-    xr = tl.load(x_ptr + rows * INCX * 2, mask=row_mask, other=0.0)
-    xi = tl.load(x_ptr + rows * INCX * 2 + 1, mask=row_mask, other=0.0)
-    xcr = tl.load(x_ptr + cols * INCX * 2, mask=col_mask, other=0.0)
-    xci = tl.load(x_ptr + cols * INCX * 2 + 1, mask=col_mask, other=0.0)
-    update_r = alpha * (xr[:, None] * xcr[None, :] + xi[:, None] * xci[None, :])
-    update_i = alpha * (xi[:, None] * xcr[None, :] - xr[:, None] * xci[None, :])
+    xr = tl.load(x_ptr + rows * INCX * 2, mask=mask, other=0.0)
+    xi = tl.load(x_ptr + rows * INCX * 2 + 1, mask=mask, other=0.0)
+    xcr = tl.load(x_ptr + cols * INCX * 2, mask=mask, other=0.0)
+    xci = tl.load(x_ptr + cols * INCX * 2 + 1, mask=mask, other=0.0)
+    update_r = alpha * (xr * xcr + xi * xci)
+    update_i = alpha * (xi * xcr - xr * xci)
 
-    ap_off = off * 2
+    ap_off = safe_off * 2
     ar = tl.load(ap_ptr + ap_off, mask=mask, other=0.0)
     ai = tl.load(ap_ptr + ap_off + 1, mask=mask, other=0.0)
-    diag = rows[:, None] == cols[None, :]
+    diag = rows == cols
     out_i = tl.where(diag, 0.0, ai + update_i)
     tl.store(ap_ptr + ap_off, ar + update_r, mask=mask)
     tl.store(ap_ptr + ap_off + 1, out_i, mask=mask)
@@ -158,12 +166,8 @@ def chpr(
     if alpha == 0.0:
         return
 
-    def grid(meta):
-        blocks = triton.cdiv(n, meta["BLOCK_SIZE"])
-        return (blocks, blocks)
-
     with torch_device_fn.device(AP.device):
-        chpr_kernel[grid](
+        chpr_kernel[_hpr_grid(n)](
             torch.view_as_real(AP),
             torch.view_as_real(x),
             alpha,
@@ -183,12 +187,8 @@ def zhpr(
     if alpha_val == 0.0:
         return
 
-    def grid(meta):
-        blocks = triton.cdiv(n, meta["BLOCK_SIZE"])
-        return (blocks, blocks)
-
     with torch_device_fn.device(AP.device):
-        zhpr_kernel[grid](
+        zhpr_kernel[_hpr_grid(n)](
             torch.view_as_real(AP),
             torch.view_as_real(x),
             _f64_to_i64(alpha_val),

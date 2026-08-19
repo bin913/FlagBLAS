@@ -51,7 +51,6 @@ def load_cublas():
     raise RuntimeError("Unable to find libcublas.so on this system")
 
 
-# multibackend support
 _cublas = None if flag_blas.vendor_name in {"ascend", "hygon"} else load_cublas()
 
 
@@ -63,10 +62,25 @@ class cuDoubleComplex(ctypes.Structure):
     _fields_ = [("x", ctypes.c_double), ("y", ctypes.c_double)]
 
 
+def row_to_column_hbmv(A, n, k, lda, uplo):
+    """Convert row-major Hermitian-band storage to BLAS column-major storage."""
+    column_A = torch.zeros((n, lda), dtype=A.dtype, device=A.device)
+    for d in range(k + 1):
+        count = n - d
+        if count <= 0:
+            continue
+        if uplo == CUBLAS_FILL_MODE_UPPER:
+            column_A[d:, k - d] = A[:count, d]
+        else:
+            column_A[:count, d] = A[d:, k - d]
+    return column_A
+
+
 def hipblas_hbmv_reference(uplo, n, k, alpha, A, lda, x, incx, beta, y, incy):
     if n == 0:
         return y
 
+    column_A = row_to_column_hbmv(A, n, k, lda, uplo)
     alpha = alpha.item() if isinstance(alpha, torch.Tensor) else complex(alpha)
     beta = beta.item() if isinstance(beta, torch.Tensor) else complex(beta)
 
@@ -82,7 +96,7 @@ def hipblas_hbmv_reference(uplo, n, k, alpha, A, lda, x, incx, beta, y, incy):
         raise ValueError(f"Unsupported dtype for hipBLAS HBMV: {A.dtype}")
 
     hip_uplo = 121 if uplo == CUBLAS_FILL_MODE_UPPER else 122
-    library, handle = get_hipblas_context(A)
+    library, handle = get_hipblas_context(column_A)
     function = getattr(library, symbol)
     function.argtypes = [
         ctypes.c_void_p,
@@ -106,7 +120,7 @@ def hipblas_hbmv_reference(uplo, n, k, alpha, A, lda, x, incx, beta, y, incy):
             n,
             k,
             ctypes.byref(alpha_value),
-            ctypes.c_void_p(A.data_ptr()),
+            ctypes.c_void_p(column_A.data_ptr()),
             lda,
             ctypes.c_void_p(x.data_ptr()),
             incx,
@@ -123,6 +137,7 @@ def cublas_hbmv_reference(uplo, n, k, alpha, A, lda, x, incx, beta, y, incy):
     if n == 0:
         return
 
+    column_A = row_to_column_hbmv(A, n, k, lda, uplo)
     handle = cp.cuda.device.get_cublas_handle()
     cublas.setPointerMode(handle, cublas.CUBLAS_POINTER_MODE_HOST)
     dtype = A.dtype
@@ -144,7 +159,7 @@ def cublas_hbmv_reference(uplo, n, k, alpha, A, lda, x, incx, beta, y, incy):
         ctypes.c_int(n),
         ctypes.c_int(k),
         ctypes.byref(alpha_c),
-        ctypes.c_void_p(A.data_ptr()),
+        ctypes.c_void_p(column_A.data_ptr()),
         ctypes.c_int(lda),
         ctypes.c_void_p(x.data_ptr()),
         ctypes.c_int(incx),
@@ -160,7 +175,7 @@ def cpu_hbmv_reference(uplo, n, k, alpha, A, lda, x, incx, beta, y, incy):
     if n == 0:
         return to_cpu_blas_tensor(y)
 
-    ref_A = to_cpu_blas_tensor(A)
+    ref_A = to_cpu_blas_tensor(row_to_column_hbmv(A, n, k, lda, uplo))
     ref_x = to_cpu_blas_tensor(x)
     if beta == 0 and incy == 1:
         ref_y = torch.empty(y.shape, dtype=torch.complex128)
@@ -236,7 +251,7 @@ def hbmv_randn(*shape, dtype, device):
 
 def make_hermitian_banded(n, k, lda, uplo, dtype, device):
     A = hbmv_randn((n, lda), dtype=dtype, device=device)
-    diag_col = k if uplo == CUBLAS_FILL_MODE_UPPER else 0
+    diag_col = 0 if uplo == CUBLAS_FILL_MODE_UPPER else k
     torch.view_as_real(A)[:, diag_col, 1].zero_()
     return A
 

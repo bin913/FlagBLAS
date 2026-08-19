@@ -69,6 +69,7 @@ def hipblas_gbmv_reference(trans, m, n, kl, ku, alpha, AB, lda, x, incx, beta, y
     if m == 0 or n == 0:
         return
 
+    column_AB = row_to_column_band(AB, m, n, kl, ku, lda)
     if AB.dtype == torch.float32:
         symbol = "hipblasSgbmv"
         scalar_type = ctypes.c_float
@@ -97,7 +98,7 @@ def hipblas_gbmv_reference(trans, m, n, kl, ku, alpha, AB, lda, x, incx, beta, y
         CUBLAS_OP_T: 112,
         CUBLAS_OP_C: 113,
     }[trans]
-    library, handle = get_hipblas_context(AB)
+    library, handle = get_hipblas_context(column_AB)
     function = getattr(library, symbol)
     function.argtypes = [
         ctypes.c_void_p,
@@ -125,7 +126,7 @@ def hipblas_gbmv_reference(trans, m, n, kl, ku, alpha, AB, lda, x, incx, beta, y
             kl,
             ku,
             ctypes.byref(alpha_value),
-            ctypes.c_void_p(AB.data_ptr()),
+            ctypes.c_void_p(column_AB.data_ptr()),
             lda,
             ctypes.c_void_p(x.data_ptr()),
             incx,
@@ -141,6 +142,7 @@ def cublas_gbmv_reference(trans, m, n, kl, ku, alpha, AB, lda, x, incx, beta, y,
     if m == 0 or n == 0:
         return
 
+    column_AB = row_to_column_band(AB, m, n, kl, ku, lda)
     handle = cp.cuda.device.get_cublas_handle()
     dtype = AB.dtype
 
@@ -171,7 +173,7 @@ def cublas_gbmv_reference(trans, m, n, kl, ku, alpha, AB, lda, x, incx, beta, y,
         ctypes.c_int(kl),
         ctypes.c_int(ku),
         ctypes.byref(alpha_c),
-        ctypes.c_void_p(AB.data_ptr()),
+        ctypes.c_void_p(column_AB.data_ptr()),
         ctypes.c_int(lda),
         ctypes.c_void_p(x.data_ptr()),
         ctypes.c_int(incx),
@@ -192,7 +194,8 @@ def cpu_gbmv_reference(trans, m, n, kl, ku, alpha, AB, lda, x, incx, beta, y, in
         ref_y = torch.empty(y.shape, dtype=ref_dtype)
     else:
         ref_y = to_cpu_blas_tensor(y)
-    ref_AB = to_cpu_blas_tensor(AB)
+    column_AB = row_to_column_band(AB, m, n, kl, ku, lda)
+    ref_AB = to_cpu_blas_tensor(column_AB)
     ref_x = to_cpu_blas_tensor(x)
     func = cpu_blas.zgbmv if ref_AB.dtype.is_complex else cpu_blas.dgbmv
 
@@ -239,7 +242,7 @@ def cpu_gbmv_band_reference(
             continue
         j_idx = torch.arange(j_min, j_max)
         i_idx = j_idx + d
-        values = ref_AB[j_idx, ku + d]
+        values = ref_AB[i_idx, kl - d]
         if trans == CUBLAS_OP_N:
             logical_y[i_idx] += alpha * values * logical_x[j_idx]
         else:
@@ -273,18 +276,17 @@ def gbmv_reference(trans, m, n, kl, ku, alpha, AB, lda, x, incx, beta, y, incy):
 
 
 GBMV_SHAPES = [
-    (64, 64),
+    (255, 255),
     (256, 256),
+    (1023, 1023),
     (1024, 1024),
-    (63, 63),
-    (127, 127),
     (4095, 4095),
-    (1024, 4096),
-    (4096, 1024),
-    (127, 255),
     (4096, 4096),
-    (1, 65536),
-    (65536, 64),
+    (16384, 16384),
+    (127, 255),
+    (4096, 16384),
+    (16384, 4096),
+    (10000, 10000),
 ]
 
 GBMV_STRIDE_SHAPES = [(64, 128), (128, 64), (256, 256)]
@@ -292,10 +294,11 @@ GBMV_STRIDE_SHAPES = [(64, 128), (128, 64), (256, 256)]
 GBMV_BANDS = [
     (0, 0),
     (1, 1),
-    (2, 5),
-    (10, 0),
-    (0, 10),
+    (2, 2),
+    (3, 7),
     (32, 32),
+    (128, 128),
+    (256, 256),
 ]
 
 STRIDES = [(1, 1), (2, 1), (1, 2), (2, 2)]
@@ -310,38 +313,40 @@ def randn_tensor(shape, dtype, device):
     return torch.randn(shape, dtype=dtype, device=device)
 
 
-def create_banded_data(m, n, kl, ku, lda, dtype, device):
-    if not IS_ASCEND:
-        A_dense = torch.randn(m, n, dtype=dtype, device=device)
+def row_to_column_band(AB, m, n, kl, ku, lda):
+    column_AB = torch.zeros((n, lda), dtype=AB.dtype, device=AB.device)
+    for d in range(-ku, kl + 1):
+        j_min = max(0, -d)
+        j_max = min(n, m - d)
+        if j_min < j_max:
+            j_idx = torch.arange(j_min, j_max, device=AB.device)
+            i_idx = j_idx + d
+            column_AB[j_idx, ku + d] = AB[i_idx, kl - d]
+    return column_AB
 
-        AB = torch.zeros((n, lda), dtype=dtype, device=device)
+
+def create_banded_data(m, n, kl, ku, lda, dtype, device):
+    if dtype == torch.complex64 and IS_ASCEND:
+        AB_real = torch.zeros((m, lda, 2), dtype=torch.float32, device=device)
         for d in range(-ku, kl + 1):
             j_min = max(0, -d)
             j_max = min(n, m - d)
             if j_min < j_max:
                 j_idx = torch.arange(j_min, j_max, device=device)
                 i_idx = j_idx + d
-                AB[j_idx, ku + d] = A_dense[i_idx, j_idx]
-        return AB.contiguous()
-
-    if dtype == torch.complex64:
-        AB_real = torch.zeros((n, lda, 2), dtype=torch.float32, device=device)
-        for d in range(-ku, kl + 1):
-            j_min = max(0, -d)
-            j_max = min(n, m - d)
-            if j_min < j_max:
-                AB_real[j_min:j_max, ku + d] = torch.randn(
+                AB_real[i_idx, kl - d] = torch.randn(
                     (j_max - j_min, 2), dtype=torch.float32, device=device
                 )
         return torch.view_as_complex(AB_real).contiguous()
 
-    AB = torch.zeros((n, lda), dtype=dtype, device=device)
+    AB = torch.zeros((m, lda), dtype=dtype, device=device)
     for d in range(-ku, kl + 1):
         j_min = max(0, -d)
         j_max = min(n, m - d)
         if j_min < j_max:
-            AB[j_min:j_max, ku + d] = randn_tensor(j_max - j_min, dtype, device)
-
+            j_idx = torch.arange(j_min, j_max, device=device)
+            i_idx = j_idx + d
+            AB[i_idx, kl - d] = randn_tensor(j_max - j_min, dtype, device)
     return AB.contiguous()
 
 
@@ -376,7 +381,7 @@ def check_fp64_support():
 )
 def test_cpu_gbmv_band_reference(trans, dtype, alpha, beta):
     m, n, kl, ku, lda = 2, 5, 1, 3, 6
-    AB = torch.zeros((n, lda), dtype=dtype)
+    AB = torch.zeros((m, lda), dtype=dtype)
     dense_dtype = torch.complex128 if dtype.is_complex else torch.float64
     dense = torch.zeros((m, n), dtype=dense_dtype)
     value = 1
@@ -386,7 +391,7 @@ def test_cpu_gbmv_band_reference(trans, dtype, alpha, beta):
         for j in range(j_min, j_max):
             i = j + d
             element = complex(value, -value / 2) if dtype.is_complex else value
-            AB[j, ku + d] = element
+            AB[i, kl - d] = element
             dense[i, j] = element
             value += 1
 

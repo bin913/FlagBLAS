@@ -47,12 +47,26 @@ _ZHBMV_CONFIGS = [
     triton.Config({"BLOCK_SIZE_M": 64, "BAND_TILE": 32}, num_warps=8, num_stages=2),
 ]
 
+_ZHBMV_SMALL_CONFIGS = [
+    triton.Config({"BLOCK_SIZE_M": 64}, num_warps=1, num_stages=1),
+    triton.Config({"BLOCK_SIZE_M": 128}, num_warps=2, num_stages=1),
+    triton.Config({"BLOCK_SIZE_M": 256}, num_warps=4, num_stages=1),
+]
+
 _HBMV_KEY = ["n", "k_bucket", "uplo_key"]
 _RESTORE = ["y_ptr"]
 
 
 def _f64_to_i64(v: float) -> int:
     return struct.unpack("<q", struct.pack("<d", v))[0]
+
+
+def _row_major_uplo(uplo: int) -> int:
+    return (
+        CUBLAS_FILL_MODE_LOWER
+        if uplo == CUBLAS_FILL_MODE_UPPER
+        else CUBLAS_FILL_MODE_UPPER
+    )
 
 
 def _band_bucket(k: int) -> int:
@@ -62,6 +76,117 @@ def _band_bucket(k: int) -> int:
     while b < k and b < 1024:
         b <<= 1
     return b
+
+
+@triton.autotune(configs=_ZHBMV_SMALL_CONFIGS, key=["n"], restore_value=_RESTORE)
+@triton.jit
+def zhbmv_diag_kernel(
+    a_ptr,
+    x_ptr,
+    y_ptr,
+    alpha_r_int: tl.int64,
+    alpha_i_int: tl.int64,
+    beta_r_int: tl.int64,
+    beta_i_int: tl.int64,
+    n,
+    LDA,
+    INCX,
+    INCY,
+    BETA_IS_ZERO: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+):
+    rows = tl.program_id(0) * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    mask = rows < n
+    alpha_r = alpha_r_int.to(tl.float64, bitcast=True)
+    alpha_i = alpha_i_int.to(tl.float64, bitcast=True)
+    beta_r = beta_r_int.to(tl.float64, bitcast=True)
+    beta_i = beta_i_int.to(tl.float64, bitcast=True)
+
+    ar = tl.load(a_ptr + rows * LDA * 2, mask=mask, other=0.0)
+    x_off = rows * INCX * 2
+    xr = tl.load(x_ptr + x_off, mask=mask, other=0.0)
+    xi = tl.load(x_ptr + x_off + 1, mask=mask, other=0.0)
+    acc_r = ar * xr
+    acc_i = ar * xi
+    res_r = alpha_r * acc_r - alpha_i * acc_i
+    res_i = alpha_r * acc_i + alpha_i * acc_r
+
+    y_off = rows * INCY * 2
+    if not BETA_IS_ZERO:
+        yr = tl.load(y_ptr + y_off, mask=mask, other=0.0)
+        yi = tl.load(y_ptr + y_off + 1, mask=mask, other=0.0)
+        res_r += beta_r * yr - beta_i * yi
+        res_i += beta_r * yi + beta_i * yr
+    tl.store(y_ptr + y_off, res_r, mask=mask)
+    tl.store(y_ptr + y_off + 1, res_i, mask=mask)
+
+
+@triton.autotune(configs=_ZHBMV_SMALL_CONFIGS, key=["n", "K"], restore_value=_RESTORE)
+@triton.jit
+def zhbmv_narrow_kernel(
+    a_ptr,
+    x_ptr,
+    y_ptr,
+    alpha_r_int: tl.int64,
+    alpha_i_int: tl.int64,
+    beta_r_int: tl.int64,
+    beta_i_int: tl.int64,
+    n,
+    LDA,
+    INCX,
+    INCY,
+    K: tl.constexpr,
+    UPLO: tl.constexpr,
+    BETA_IS_ZERO: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+):
+    rows = tl.program_id(0) * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    row_mask = rows < n
+    alpha_r = alpha_r_int.to(tl.float64, bitcast=True)
+    alpha_i = alpha_i_int.to(tl.float64, bitcast=True)
+    beta_r = beta_r_int.to(tl.float64, bitcast=True)
+    beta_i = beta_i_int.to(tl.float64, bitcast=True)
+    acc_r = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float64)
+    acc_i = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float64)
+
+    for r in tl.static_range(0, 2 * K + 1):
+        d = r - K
+        abs_d = d if d >= 0 else -d
+        j = rows + d
+        mask = row_mask & (j >= 0) & (j < n)
+        safe_j = tl.where(mask, j, 0)
+        if UPLO == 1:
+            packed_row = K - abs_d
+            packed_col = safe_j if d >= 0 else rows
+            use_conj = d < 0
+        else:
+            packed_row = abs_d
+            packed_col = rows if d >= 0 else safe_j
+            use_conj = d > 0
+        a_off = (packed_row + packed_col * LDA) * 2
+        x_off = safe_j * INCX * 2
+        ar = tl.load(a_ptr + a_off, mask=mask, other=0.0)
+        ai = tl.load(a_ptr + a_off + 1, mask=mask, other=0.0)
+        xr = tl.load(x_ptr + x_off, mask=mask, other=0.0)
+        xi = tl.load(x_ptr + x_off + 1, mask=mask, other=0.0)
+        if use_conj:
+            ai = -ai
+        ai = -ai
+        if d == 0:
+            ai = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float64)
+        acc_r += ar * xr - ai * xi
+        acc_i += ar * xi + ai * xr
+
+    res_r = alpha_r * acc_r - alpha_i * acc_i
+    res_i = alpha_r * acc_i + alpha_i * acc_r
+    y_off = rows * INCY * 2
+    if not BETA_IS_ZERO:
+        yr = tl.load(y_ptr + y_off, mask=row_mask, other=0.0)
+        yi = tl.load(y_ptr + y_off + 1, mask=row_mask, other=0.0)
+        res_r += beta_r * yr - beta_i * yi
+        res_i += beta_r * yi + beta_i * yr
+    tl.store(y_ptr + y_off, res_r, mask=row_mask)
+    tl.store(y_ptr + y_off + 1, res_i, mask=row_mask)
 
 
 @triton.autotune(configs=_CHBMV_CONFIGS, key=_HBMV_KEY, restore_value=_RESTORE)
@@ -118,6 +243,7 @@ def chbmv_kernel(
         xr = tl.load(x_ptr + x_off, mask=mask, other=0.0)
         xi = tl.load(x_ptr + x_off + 1, mask=mask, other=0.0)
         ai = tl.where(use_conj, -ai, ai)
+        ai = -ai
         ai = tl.where(d[None, :] == 0, 0.0, ai)
         acc_r += tl.sum(ar * xr - ai * xi, axis=1)
         acc_i += tl.sum(ar * xi + ai * xr, axis=1)
@@ -192,6 +318,7 @@ def zhbmv_kernel(
         xr = tl.load(x_ptr + x_off, mask=mask, other=0.0)
         xi = tl.load(x_ptr + x_off + 1, mask=mask, other=0.0)
         ai = tl.where(use_conj, -ai, ai)
+        ai = -ai
         ai = tl.where(d[None, :] == 0, 0.0, ai)
         acc_r += tl.sum(ar * xr - ai * xi, axis=1)
         acc_i += tl.sum(ar * xi + ai * xr, axis=1)
@@ -252,6 +379,7 @@ def chbmv(
     _check_common(A, x, y, uplo, n, k, lda, incx, incy)
     if n == 0:
         return
+    uplo = _row_major_uplo(uplo)
 
     ar, ai, br, bi = _complex_scalars(alpha, beta)
     y_view = _strided_y(y, n, incy)
@@ -306,6 +434,7 @@ def zhbmv(
     _check_common(A, x, y, uplo, n, k, lda, incx, incy)
     if n == 0:
         return
+    uplo = _row_major_uplo(uplo)
 
     ar, ai, br, bi = _complex_scalars(alpha, beta)
     y_view = _strided_y(y, n, incy)
@@ -326,6 +455,44 @@ def zhbmv(
     y_real = torch.view_as_real(y)
 
     with torch_device_fn.device(A.device):
+        if k == 0:
+            diag_grid = lambda meta: (triton.cdiv(n, meta["BLOCK_SIZE_M"]),)
+            zhbmv_diag_kernel[diag_grid](
+                A_real,
+                x_real,
+                y_real,
+                ar_i,
+                ai_i,
+                br_i,
+                bi_i,
+                n,
+                lda,
+                incx,
+                incy,
+                BETA_IS_ZERO=beta_is_zero,
+            )
+            return
+
+        if k <= 4:
+            narrow_grid = lambda meta: (triton.cdiv(n, meta["BLOCK_SIZE_M"]),)
+            zhbmv_narrow_kernel[narrow_grid](
+                A_real,
+                x_real,
+                y_real,
+                ar_i,
+                ai_i,
+                br_i,
+                bi_i,
+                n,
+                lda,
+                incx,
+                incy,
+                K=k,
+                UPLO=uplo,
+                BETA_IS_ZERO=beta_is_zero,
+            )
+            return
+
         grid = lambda meta: (triton.cdiv(n, meta["BLOCK_SIZE_M"]),)
         zhbmv_kernel[grid](
             A_real,
