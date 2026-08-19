@@ -552,10 +552,14 @@ def run_accuracy_q(gpu_id, op):
     env = get_env(str(gpu_id))
 
     if op in CFG.skip_cpu_tests:
-        cmd = f'pytest -m "{op}" --record json --output accuracy_{op}.json -vs'
+        cmd = (
+            f'pytest -m "{op}" --record json --output accuracy_{op}.json'
+            " --continue-on-collection-errors -vs"
+        )
     else:
         cmd = (
-            f'pytest -m "{op}" --record json --output accuracy_{op}.json --ref cpu -vs'
+            f'pytest -m "{op}" --record json --output accuracy_{op}.json --ref cpu'
+            " --continue-on-collection-errors -vs"
         )
 
     accuracy_dir = ROOT.joinpath("tests")
@@ -631,6 +635,7 @@ def run_benchmark_q(gpu_id, op):
     cmd = (
         f'pytest -m "{op}" --level core --record log'
         f" --output benchmark_{op}.log --skip_correctness"
+        " --continue-on-collection-errors"
     )
     if ENV_INFO["flag_blas"]["vendor"] == "kunlunxin":
         cmd += " --fg_mode operator"
