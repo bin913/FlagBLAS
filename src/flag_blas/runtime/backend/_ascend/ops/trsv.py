@@ -1,3 +1,17 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import importlib
 
 import torch
@@ -5,7 +19,7 @@ import triton
 import triton.language as tl
 
 from flag_blas import runtime
-from flag_blas.ops.level2._constants import CUBLAS_DIAG_UNIT, CUBLAS_OP_C, CUBLAS_OP_N
+from flag_blas.ops.level2._constants import CUBLAS_DIAG_UNIT
 from flag_blas.runtime import torch_device_fn
 from flag_blas.utils import libentry, libtuner
 
@@ -147,8 +161,8 @@ def strsv(uplo, trans, diag, n, A, lda, x, incx):
     if n == 0:
         return
     unit = 1 if diag == CUBLAS_DIAG_UNIT else 0
-    trans_flag = 0 if trans == CUBLAS_OP_N else 1
-    forward = _common._forward(uplo, trans)
+    uplo, trans_flag, _ = _common._row_major_dispatch(uplo, trans)
+    forward = _common._forward(uplo, trans_flag)
     block_n = 16
     block_m = 128
 
@@ -194,9 +208,8 @@ def ctrsv(uplo, trans, diag, n, A, lda, x, incx):
     if n == 0:
         return
     unit = 1 if diag == CUBLAS_DIAG_UNIT else 0
-    trans_flag = 0 if trans == CUBLAS_OP_N else 1
-    conj = 1 if trans == CUBLAS_OP_C else 0
-    forward = _common._forward(uplo, trans)
+    uplo, trans_flag, conj = _common._row_major_dispatch(uplo, trans)
+    forward = _common._forward(uplo, trans_flag)
     block_n = 8
     block_m = 64
 
