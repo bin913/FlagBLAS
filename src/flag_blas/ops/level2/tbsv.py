@@ -844,6 +844,7 @@ def _complex_tbsv_kernel(
     UPLO: tl.constexpr,
     TRANS: tl.constexpr,
     UNIT: tl.constexpr,
+    CONJ: tl.constexpr,
 ):
     if (UPLO == 0) and (TRANS == 0):
         j = 0
@@ -854,6 +855,8 @@ def _complex_tbsv_kernel(
                 a_off = 2 * j * LDA
                 ar = tl.load(a_ptr + a_off)
                 ai = tl.load(a_ptr + a_off + 1)
+                if CONJ:
+                    ai = -ai
                 den = ar * ar + ai * ai
                 nr = xr * ar + xi * ai
                 ni = xi * ar - xr * ai
@@ -868,6 +871,8 @@ def _complex_tbsv_kernel(
                     a_off = 2 * (d + j * LDA)
                     ar = tl.load(a_ptr + a_off)
                     ai = tl.load(a_ptr + a_off + 1)
+                    if CONJ:
+                        ai = -ai
                     br = tl.load(x_ptr + 2 * i * INCX)
                     bi = tl.load(x_ptr + 2 * i * INCX + 1)
                     br -= ar * xr - ai * xi
@@ -888,6 +893,8 @@ def _complex_tbsv_kernel(
                     a_off = 2 * ((k - d) + i * LDA)
                     ar = tl.load(a_ptr + a_off)
                     ai = tl.load(a_ptr + a_off + 1)
+                    if CONJ:
+                        ai = -ai
                     br = tl.load(x_ptr + 2 * i * INCX)
                     bi = tl.load(x_ptr + 2 * i * INCX + 1)
                     xr -= ar * br - ai * bi
@@ -897,6 +904,8 @@ def _complex_tbsv_kernel(
                 a_off = 2 * (k + j * LDA)
                 ar = tl.load(a_ptr + a_off)
                 ai = tl.load(a_ptr + a_off + 1)
+                if CONJ:
+                    ai = -ai
                 den = ar * ar + ai * ai
                 nr = xr * ar + xi * ai
                 ni = xi * ar - xr * ai
@@ -917,7 +926,7 @@ def _complex_tbsv_kernel(
                     a_off = 2 * ((k - d) + j * LDA)
                     ar = tl.load(a_ptr + a_off)
                     ai = tl.load(a_ptr + a_off + 1)
-                    if TRANS == 2:
+                    if CONJ:
                         ai = -ai
                     br = tl.load(x_ptr + 2 * i * INCX)
                     bi = tl.load(x_ptr + 2 * i * INCX + 1)
@@ -928,7 +937,7 @@ def _complex_tbsv_kernel(
                 a_off = 2 * (k + j * LDA)
                 ar = tl.load(a_ptr + a_off)
                 ai = tl.load(a_ptr + a_off + 1)
-                if TRANS == 2:
+                if CONJ:
                     ai = -ai
                 den = ar * ar + ai * ai
                 nr = xr * ar + xi * ai
@@ -950,7 +959,7 @@ def _complex_tbsv_kernel(
                     a_off = 2 * (d + j * LDA)
                     ar = tl.load(a_ptr + a_off)
                     ai = tl.load(a_ptr + a_off + 1)
-                    if TRANS == 2:
+                    if CONJ:
                         ai = -ai
                     br = tl.load(x_ptr + 2 * i * INCX)
                     bi = tl.load(x_ptr + 2 * i * INCX + 1)
@@ -961,7 +970,7 @@ def _complex_tbsv_kernel(
                 a_off = 2 * j * LDA
                 ar = tl.load(a_ptr + a_off)
                 ai = tl.load(a_ptr + a_off + 1)
-                if TRANS == 2:
+                if CONJ:
                     ai = -ai
                 den = ar * ar + ai * ai
                 nr = xr * ar + xi * ai
@@ -995,6 +1004,16 @@ def _check_tbsv(A, x, uplo, trans, diag, n, k, lda, incx, complex_ok):
         assert A.numel() >= n * lda
 
 
+def _row_major_tbsv_args(uplo, trans):
+    physical_uplo = (
+        CUBLAS_FILL_MODE_LOWER
+        if uplo == CUBLAS_FILL_MODE_UPPER
+        else CUBLAS_FILL_MODE_UPPER
+    )
+    physical_trans = CUBLAS_OP_T if trans == CUBLAS_OP_N else CUBLAS_OP_N
+    return physical_uplo, physical_trans, int(trans == CUBLAS_OP_C)
+
+
 # --------------------------------------------------------------------------
 # Public API
 # --------------------------------------------------------------------------
@@ -1014,6 +1033,7 @@ def stbsv(
     _check_tbsv(A, x, uplo, trans, diag, n, k, lda, incx, complex_ok=False)
     if n == 0:
         return
+    uplo, trans, _ = _row_major_tbsv_args(uplo, trans)
     unit = 1 if diag == CUBLAS_DIAG_UNIT else 0
     trans_flag = 0 if trans == CUBLAS_OP_N else 1
 
@@ -1071,6 +1091,7 @@ def dtbsv(
     _check_tbsv(A, x, uplo, trans, diag, n, k, lda, incx, complex_ok=False)
     if n == 0:
         return
+    uplo, trans, _ = _row_major_tbsv_args(uplo, trans)
     unit = 1 if diag == CUBLAS_DIAG_UNIT else 0
     trans_flag = 0 if trans == CUBLAS_OP_N else 1
 
@@ -1148,6 +1169,7 @@ def _complex_tbsv(
     _check_tbsv(A, x, uplo, trans, diag, n, k, lda, incx, complex_ok=True)
     if n == 0:
         return
+    uplo, trans, conj = _row_major_tbsv_args(uplo, trans)
     unit = 1 if diag == CUBLAS_DIAG_UNIT else 0
     A_real = torch.view_as_real(A)
     x_real = torch.view_as_real(x)
@@ -1167,7 +1189,7 @@ def _complex_tbsv(
                 UPLO=uplo,
                 TRANS=trans_flag,
                 UNIT=unit,
-                CONJ=int(trans == CUBLAS_OP_C),
+                CONJ=conj,
                 FORWARD=lower_eff,
                 BLOCK_N=block_n,
                 num_warps=4,
@@ -1192,7 +1214,7 @@ def _complex_tbsv(
                 UPLO=uplo,
                 TRANS=trans_flag,
                 UNIT=unit,
-                CONJ=int(trans == CUBLAS_OP_C),
+                CONJ=conj,
                 LOWER_EFF=lower_eff,
                 FORWARD=lower_eff,
                 IS_DOUBLE=dtype == torch.complex128,
@@ -1211,6 +1233,7 @@ def _complex_tbsv(
             UPLO=uplo,
             TRANS=trans,
             UNIT=unit,
+            CONJ=conj,
         )
 
 

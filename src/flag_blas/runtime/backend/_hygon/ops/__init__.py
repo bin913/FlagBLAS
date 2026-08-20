@@ -13,6 +13,7 @@ from .spmv import dspmv, sspmv
 from .symv import csymv, zsymv
 from .syr import csyr, dsyr, ssyr, zsyr
 from .syr2 import dsyr2, ssyr2
+from .tbsv import ctbsv, dtbsv, stbsv, ztbsv
 from .trmv import ctrmv, dtrmv, strmv, ztrmv
 from .trsv import ctrsv, dtrsv, strsv, ztrsv
 
@@ -29,6 +30,7 @@ __all__ = [
     "chpmv",
     "csymv",
     "csyr",
+    "ctbsv",
     "ctrmv",
     "ctrsv",
     "dsbmv",
@@ -36,12 +38,14 @@ __all__ = [
     "dspmv",
     "dsyr",
     "dsyr2",
+    "dtbsv",
     "dtrmv",
     "dtrsv",
     "ssbmv",
     "sspmv",
     "ssyr",
     "ssyr2",
+    "stbsv",
     "strmv",
     "strsv",
     "zhemv",
@@ -57,6 +61,7 @@ __all__ = [
     "zhpr2",
     "zsymv",
     "zsyr",
+    "ztbsv",
     "ztrmv",
     "ztrsv",
 ]

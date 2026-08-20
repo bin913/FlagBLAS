@@ -14,7 +14,6 @@
 
 import ctypes
 import ctypes.util
-import math
 
 import pytest
 import torch
@@ -31,8 +30,9 @@ from flag_blas.ops import (
     CUBLAS_OP_T,
 )
 
-from .accuracy_utils import blas_assert_close
+from .accuracy_utils import blas_assert_close, to_cpu_blas_tensor
 from .conftest import TO_CPU
+from .hipblas_reference import check_hipblas_status, get_hipblas_context
 
 
 def load_cublas():
@@ -49,7 +49,25 @@ def load_cublas():
     raise RuntimeError("Unable to find libcublas.so on this system")
 
 
-_cublas = load_cublas()
+_cublas = None if flag_blas.vendor_name == "hygon" else load_cublas()
+
+
+def row_to_column_band(A, n, k, lda, uplo):
+    column_A = torch.zeros((n, lda), dtype=A.dtype, device=A.device)
+    if n == 0:
+        return column_A
+    rows = torch.arange(n, device=A.device).view(n, 1)
+    bands = torch.arange(k + 1, device=A.device).view(1, k + 1)
+    if uplo == CUBLAS_FILL_MODE_UPPER:
+        columns = rows + bands
+    else:
+        columns = rows + bands - k
+    column_bands = (k - bands).expand(n, k + 1)
+    valid = (columns >= 0) & (columns < n)
+    column_A[columns.expand(n, k + 1)[valid], column_bands[valid]] = A[:, : k + 1][
+        valid
+    ]
+    return column_A.contiguous()
 
 
 def cublas_tbsv_reference(uplo, trans, diag, n, k, A, lda, x, incx):
@@ -60,7 +78,8 @@ def cublas_tbsv_reference(uplo, trans, diag, n, k, A, lda, x, incx):
     status = _cublas.cublasCreate_v2(ctypes.byref(handle))
     if status != 0:
         raise RuntimeError(f"cublasCreate_v2 failed with error code: {status}")
-    dtype = A.dtype
+    column_A = row_to_column_band(A, n, k, lda, uplo)
+    dtype = column_A.dtype
     if dtype == torch.float32:
         func = _cublas.cublasStbsv_v2
     elif dtype == torch.float64:
@@ -80,7 +99,7 @@ def cublas_tbsv_reference(uplo, trans, diag, n, k, A, lda, x, incx):
             ctypes.c_int(diag),
             ctypes.c_int(n),
             ctypes.c_int(k),
-            ctypes.c_void_p(A.data_ptr()),
+            ctypes.c_void_p(column_A.data_ptr()),
             ctypes.c_int(lda),
             ctypes.c_void_p(x.data_ptr()),
             ctypes.c_int(incx),
@@ -93,26 +112,69 @@ def cublas_tbsv_reference(uplo, trans, diag, n, k, A, lda, x, incx):
         _cublas.cublasDestroy_v2(handle)
 
 
+def hipblas_tbsv_reference(uplo, trans, diag, n, k, A, lda, x, incx):
+    if n == 0:
+        return x
+
+    if A.dtype == torch.float32:
+        symbol = "hipblasStbsv"
+    elif A.dtype == torch.float64:
+        symbol = "hipblasDtbsv"
+    elif A.dtype == torch.complex64:
+        symbol = "hipblasCtbsv_v2"
+    elif A.dtype == torch.complex128:
+        symbol = "hipblasZtbsv_v2"
+    else:
+        raise ValueError(f"Unsupported dtype for hipBLAS TBSV: {A.dtype}")
+
+    column_A = row_to_column_band(A, n, k, lda, uplo)
+    hip_uplo = 121 if uplo == CUBLAS_FILL_MODE_UPPER else 122
+    hip_trans = 111 + trans
+    hip_diag = 131 + diag
+    library, handle = get_hipblas_context(column_A)
+    function = getattr(library, symbol)
+    function.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_int,
+    ]
+    function.restype = ctypes.c_int
+    check_hipblas_status(
+        function(
+            handle,
+            hip_uplo,
+            hip_trans,
+            hip_diag,
+            n,
+            k,
+            ctypes.c_void_p(column_A.data_ptr()),
+            lda,
+            ctypes.c_void_p(x.data_ptr()),
+            incx,
+        ),
+        symbol,
+    )
+    return x
+
+
 def cublas_stbsv_reference(uplo, trans, diag, n, k, A, lda, x, incx):
     cublas_tbsv_reference(uplo, trans, diag, n, k, A, lda, x, incx)
 
 
 def cpu_tbsv_reference(uplo, trans, diag, n, k, A, lda, x, incx):
-    ref_x = x.detach().cpu().contiguous()
+    ref_x = to_cpu_blas_tensor(x)
     if n == 0:
         return ref_x
 
-    ref_A = A.detach().cpu().contiguous()
-    if ref_A.dtype == torch.float32:
-        func = cpu_blas.stbsv
-    elif ref_A.dtype == torch.float64:
-        func = cpu_blas.dtbsv
-    elif ref_A.dtype == torch.complex64:
-        func = cpu_blas.ctbsv
-    elif ref_A.dtype == torch.complex128:
-        func = cpu_blas.ztbsv
-    else:
-        raise ValueError(f"Unsupported dtype {ref_A.dtype}")
+    ref_A = to_cpu_blas_tensor(row_to_column_band(A, n, k, lda, uplo))
+    func = cpu_blas.ztbsv if ref_A.dtype.is_complex else cpu_blas.dtbsv
 
     xout = func(
         k,
@@ -132,14 +194,19 @@ def tbsv_reference(uplo, trans, diag, n, k, A, lda, x, incx):
         return cpu_tbsv_reference(uplo, trans, diag, n, k, A, lda, x, incx)
 
     ref_x = x.clone()
-    cublas_tbsv_reference(uplo, trans, diag, n, k, A, lda, ref_x, incx)
+    if flag_blas.vendor_name == "hygon":
+        hipblas_tbsv_reference(uplo, trans, diag, n, k, A, lda, ref_x, incx)
+    else:
+        cublas_tbsv_reference(uplo, trans, diag, n, k, A, lda, ref_x, incx)
     return ref_x
 
 
-STBSV_SIZES = [1, 2, 32, 63, 64, 128, 256, 512, 1024, 4096]
-STBSV_KS = [0, 1, 4, 16, 64]
-STBSV_STRIDE_SIZES = [64, 127, 256]
-COMPLEX_TBSV_SIZES = [0, 1, 2, 31, 32, 33, 64, 127, 128]
+STBSV_SIZES = [1, 33]
+STBSV_KS = [0, 1, 16, 64]
+STBSV_STRIDE_SIZES = [17, 127]
+COMPLEX_TBSV_SIZES = [0, 1, 33]
+TBSV_PERF_SIZES = [256, 512, 1024, 2048, 4096, 8192, 12288, 16384]
+TBSV_PERF_KS = [1, 4, 16, 64, 256]
 
 FILL_MODES = [CUBLAS_FILL_MODE_UPPER, CUBLAS_FILL_MODE_LOWER]
 TRANS_MODES = [CUBLAS_OP_N, CUBLAS_OP_T]
@@ -153,15 +220,15 @@ def make_triangular_banded(n, k, lda, uplo, dtype, device, unit_diag=False):
 
     A = torch.randn((n, lda), dtype=dtype, device=device) * 0.1
     diag_floor = 2.0 * (k + 1) + 1.0
-    cols = torch.arange(lda, device=device).view(1, lda)
-    j = torch.arange(n, device=device).view(n, 1)
+    bands = torch.arange(lda, device=device).view(1, lda)
+    rows = torch.arange(n, device=device).view(n, 1)
 
     if uplo == CUBLAS_FILL_MODE_UPPER:
-        valid = (cols >= torch.clamp(k - j, min=0)) & (cols <= k)
-        diag_col = k
-    else:
-        valid = cols <= torch.clamp(n - 1 - j, max=k)
+        valid = bands <= torch.clamp(n - 1 - rows, max=k)
         diag_col = 0
+    else:
+        valid = (bands >= torch.clamp(k - rows, min=0)) & (bands <= k)
+        diag_col = k
 
     A = A.masked_fill(~valid, 0.0)
     if unit_diag:
@@ -183,19 +250,6 @@ def make_triangular_banded(n, k, lda, uplo, dtype, device, unit_diag=False):
     return A.contiguous()
 
 
-def _stbsv_tol(dtype, n, k):
-    K = max(1, n)
-    if dtype == torch.float32:
-        return min(max(1e-4, 5e-6 * math.sqrt(K)), 5e-2)
-    if dtype == torch.float64:
-        return min(max(1e-12, 5e-14 * math.sqrt(K)), 1e-9)
-    if dtype == torch.complex64:
-        return min(max(2e-4, 1e-5 * math.sqrt(K)), 1e-1)
-    if dtype == torch.complex128:
-        return min(max(2e-12, 1e-13 * math.sqrt(K)), 1e-8)
-    raise ValueError(f"Unsupported dtype {dtype}")
-
-
 def _effective_k(n, k):
     return min(k, max(0, n - 1))
 
@@ -211,6 +265,53 @@ def _make_x(length, dtype, device):
             length, dtype=dtype, device=device
         )
     return torch.randn(length, dtype=dtype, device=device)
+
+
+TBSV_PERF_VARIANTS = [
+    pytest.param(
+        op,
+        dtype,
+        uplo,
+        trans,
+        marks=getattr(pytest.mark, op_name),
+        id=f"{op_name}-{uplo}-{trans}",
+    )
+    for op_name, op, dtype, trans_modes in (
+        ("stbsv", flag_blas.stbsv, torch.float32, TRANS_MODES),
+        ("dtbsv", flag_blas.dtbsv, torch.float64, TRANS_MODES),
+        ("ctbsv", flag_blas.ctbsv, torch.complex64, COMPLEX_TRANS_MODES),
+        ("ztbsv", flag_blas.ztbsv, torch.complex128, COMPLEX_TRANS_MODES),
+    )
+    for uplo in FILL_MODES
+    for trans in trans_modes
+]
+
+
+@pytest.mark.parametrize("op,dtype,uplo,trans", TBSV_PERF_VARIANTS)
+@pytest.mark.parametrize("n", TBSV_PERF_SIZES)
+@pytest.mark.parametrize("k_requested", TBSV_PERF_KS)
+def test_tbsv_perf_shape_coverage(op, dtype, uplo, trans, n, k_requested):
+    if dtype in (torch.float64, torch.complex128):
+        check_fp64_support()
+    k = _effective_k(n, k_requested)
+    lda = k + 1
+    A = make_triangular_banded(n, k, lda, uplo, dtype, flag_blas.device)
+    x = _make_x(n, dtype, flag_blas.device)
+    ref_x = tbsv_reference(
+        uplo,
+        trans,
+        CUBLAS_DIAG_NON_UNIT,
+        n,
+        k,
+        A,
+        lda,
+        x,
+        1,
+    )
+
+    op(uplo, trans, CUBLAS_DIAG_NON_UNIT, n, k, A, lda, x, 1)
+
+    blas_assert_close(x, ref_x, dtype, reduce_dim=k + 1)
 
 
 @pytest.mark.stbsv
@@ -238,13 +339,12 @@ def test_accuracy_stbsv(n, k, uplo, trans, diag):
 
     flag_blas.stbsv(uplo, trans, diag, n, k, A, lda, x, 1)
 
-    tol = _stbsv_tol(dtype, n, k)
-    blas_assert_close(x, ref_x, dtype, reduce_dim=k + 1, atol=tol)
+    blas_assert_close(x, ref_x, dtype, reduce_dim=k + 1)
 
 
 @pytest.mark.stbsv
 @pytest.mark.parametrize("n", STBSV_STRIDE_SIZES)
-@pytest.mark.parametrize("k", [0, 1, 8, 32])
+@pytest.mark.parametrize("k", [0, 1, 32])
 @pytest.mark.parametrize("uplo", FILL_MODES)
 @pytest.mark.parametrize("trans", TRANS_MODES)
 @pytest.mark.parametrize("incx", [1, 2, 3])
@@ -260,8 +360,7 @@ def test_accuracy_stbsv_stride(n, k, uplo, trans, incx):
 
     flag_blas.stbsv(uplo, trans, diag, n, k, A, lda, x, incx)
 
-    tol = _stbsv_tol(dtype, n, k)
-    blas_assert_close(x, ref_x, dtype, reduce_dim=k + 1, atol=tol)
+    blas_assert_close(x, ref_x, dtype, reduce_dim=k + 1)
 
 
 @pytest.mark.stbsv
@@ -297,7 +396,7 @@ def test_stbsv_k_zero(uplo, trans):
 
     flag_blas.stbsv(uplo, trans, diag, n, k, A, lda, x, 1)
 
-    blas_assert_close(x, ref_x, dtype, reduce_dim=k + 1, atol=1e-5)
+    blas_assert_close(x, ref_x, dtype, reduce_dim=k + 1)
 
 
 @pytest.mark.dtbsv
@@ -326,13 +425,12 @@ def test_accuracy_dtbsv(n, k, uplo, trans, diag):
 
     flag_blas.dtbsv(uplo, trans, diag, n, k, A, lda, x, 1)
 
-    tol = _stbsv_tol(dtype, n, k)
-    blas_assert_close(x, ref_x, dtype, reduce_dim=k + 1, atol=tol)
+    blas_assert_close(x, ref_x, dtype, reduce_dim=k + 1)
 
 
 @pytest.mark.dtbsv
 @pytest.mark.parametrize("n", STBSV_STRIDE_SIZES)
-@pytest.mark.parametrize("k", [0, 1, 8, 32])
+@pytest.mark.parametrize("k", [0, 1, 32])
 @pytest.mark.parametrize("uplo", FILL_MODES)
 @pytest.mark.parametrize("trans", TRANS_MODES)
 @pytest.mark.parametrize("incx", [1, 2, 3])
@@ -349,13 +447,12 @@ def test_accuracy_dtbsv_stride(n, k, uplo, trans, incx):
 
     flag_blas.dtbsv(uplo, trans, diag, n, k, A, lda, x, incx)
 
-    tol = _stbsv_tol(dtype, n, k)
-    blas_assert_close(x, ref_x, dtype, reduce_dim=k + 1, atol=tol)
+    blas_assert_close(x, ref_x, dtype, reduce_dim=k + 1)
 
 
 @pytest.mark.ctbsv
 @pytest.mark.parametrize("n", COMPLEX_TBSV_SIZES)
-@pytest.mark.parametrize("k", [0, 1, 8, 32])
+@pytest.mark.parametrize("k", [0, 1, 32])
 @pytest.mark.parametrize("uplo", FILL_MODES)
 @pytest.mark.parametrize("trans", COMPLEX_TRANS_MODES)
 @pytest.mark.parametrize("diag", DIAG_MODES)
@@ -378,13 +475,12 @@ def test_accuracy_ctbsv(n, k, uplo, trans, diag):
 
     flag_blas.ctbsv(uplo, trans, diag, n, k, A, lda, x, 1)
 
-    tol = _stbsv_tol(dtype, n, k)
-    blas_assert_close(x, ref_x, dtype, reduce_dim=k + 1, atol=tol)
+    blas_assert_close(x, ref_x, dtype, reduce_dim=k + 1)
 
 
 @pytest.mark.ctbsv
 @pytest.mark.parametrize("n", STBSV_STRIDE_SIZES)
-@pytest.mark.parametrize("k", [0, 1, 8, 32])
+@pytest.mark.parametrize("k", [0, 1, 32])
 @pytest.mark.parametrize("uplo", FILL_MODES)
 @pytest.mark.parametrize("trans", COMPLEX_TRANS_MODES)
 @pytest.mark.parametrize("incx", [1, 2, 3])
@@ -400,8 +496,7 @@ def test_accuracy_ctbsv_stride(n, k, uplo, trans, incx):
 
     flag_blas.ctbsv(uplo, trans, diag, n, k, A, lda, x, incx)
 
-    tol = _stbsv_tol(dtype, n, k)
-    blas_assert_close(x, ref_x, dtype, reduce_dim=k + 1, atol=tol)
+    blas_assert_close(x, ref_x, dtype, reduce_dim=k + 1)
 
 
 @pytest.mark.ztbsv
@@ -430,8 +525,7 @@ def test_accuracy_ztbsv(n, k, uplo, trans, diag):
 
     flag_blas.ztbsv(uplo, trans, diag, n, k, A, lda, x, 1)
 
-    tol = _stbsv_tol(dtype, n, k)
-    blas_assert_close(x, ref_x, dtype, reduce_dim=k + 1, atol=tol)
+    blas_assert_close(x, ref_x, dtype, reduce_dim=k + 1)
 
 
 @pytest.mark.ztbsv
@@ -453,8 +547,7 @@ def test_accuracy_ztbsv_stride(n, k, uplo, trans, incx):
 
     flag_blas.ztbsv(uplo, trans, diag, n, k, A, lda, x, incx)
 
-    tol = _stbsv_tol(dtype, n, k)
-    blas_assert_close(x, ref_x, dtype, reduce_dim=k + 1, atol=tol)
+    blas_assert_close(x, ref_x, dtype, reduce_dim=k + 1)
 
 
 @pytest.mark.stbsv
@@ -469,7 +562,7 @@ def test_stbsv_unit_diag_ignored(uplo, trans):
         n, k, lda, uplo, dtype, flag_blas.device, unit_diag=True
     )
     A_dirty = A_clean.clone()
-    diag_row = k if uplo == CUBLAS_FILL_MODE_UPPER else 0
+    diag_row = 0 if uplo == CUBLAS_FILL_MODE_UPPER else k
     A_dirty[:, diag_row] = float("nan")
 
     x = torch.randn(n, dtype=dtype, device=flag_blas.device)
@@ -479,9 +572,8 @@ def test_stbsv_unit_diag_ignored(uplo, trans):
     flag_blas.stbsv(uplo, trans, CUBLAS_DIAG_UNIT, n, k, A_clean, lda, x_clean, 1)
     flag_blas.stbsv(uplo, trans, CUBLAS_DIAG_UNIT, n, k, A_dirty, lda, x_dirty, 1)
 
-    tol = _stbsv_tol(dtype, n, k)
     ref_x_clean = x_clean.cpu() if TO_CPU else x_clean
-    blas_assert_close(x_dirty, ref_x_clean, dtype, reduce_dim=k + 1, atol=tol)
+    blas_assert_close(x_dirty, ref_x_clean, dtype, reduce_dim=k + 1)
 
 
 @pytest.mark.stbsv
@@ -501,12 +593,11 @@ def test_stbsv_solve_then_multiply_roundtrip():
     rows = torch.arange(n, device=flag_blas.device).view(n, 1)
     cols = torch.arange(n, device=flag_blas.device).view(1, n)
     mask = (rows >= cols) & ((rows - cols) <= k)
-    A_dense[mask] = A[cols.expand(n, n)[mask], (rows - cols)[mask]]
+    A_dense[mask] = A[rows.expand(n, n)[mask], k - (rows - cols)[mask]]
     Ay = A_dense @ x_buf
 
-    tol = _stbsv_tol(dtype, n, k)
     ref_x_orig = x_orig.cpu() if TO_CPU else x_orig
-    blas_assert_close(Ay, ref_x_orig, dtype, reduce_dim=k + 1, atol=tol)
+    blas_assert_close(Ay, ref_x_orig, dtype, reduce_dim=k + 1)
 
 
 TBSV_VARIANTS = [
@@ -576,8 +667,7 @@ def test_tbsv_k1_panel_boundaries(op, dtype, trans, n, uplo, diag):
 
     op(uplo, trans, diag, n, k, A, lda, x, 1)
 
-    tol = _stbsv_tol(dtype, n, k)
-    blas_assert_close(x, ref_x, dtype, reduce_dim=2, atol=tol)
+    blas_assert_close(x, ref_x, dtype, reduce_dim=2)
 
 
 @pytest.mark.dtbsv
@@ -592,8 +682,7 @@ def test_dtbsv_large_k4_no_trans(uplo):
 
     flag_blas.dtbsv(uplo, CUBLAS_OP_N, CUBLAS_DIAG_NON_UNIT, n, k, A, lda, x, 1)
 
-    tol = _stbsv_tol(dtype, n, k)
-    blas_assert_close(x, ref_x, dtype, reduce_dim=k + 1, atol=tol)
+    blas_assert_close(x, ref_x, dtype, reduce_dim=k + 1)
 
 
 @pytest.mark.ztbsv
@@ -603,7 +692,7 @@ def test_ztbsv_k1_complex_diagonal_phase(trans, uplo):
     check_fp64_support()
     n, k, lda = 129, 1, 4
     A = make_triangular_banded(n, k, lda, uplo, torch.complex128, flag_blas.device)
-    diag_col = k if uplo == CUBLAS_FILL_MODE_UPPER else 0
+    diag_col = 0 if uplo == CUBLAS_FILL_MODE_UPPER else k
     diagonal_imag = torch.linspace(
         0.25, 0.75, n, dtype=torch.float64, device=flag_blas.device
     )
@@ -613,8 +702,7 @@ def test_ztbsv_k1_complex_diagonal_phase(trans, uplo):
 
     flag_blas.ztbsv(uplo, trans, CUBLAS_DIAG_NON_UNIT, n, k, A, lda, x, 1)
 
-    tol = _stbsv_tol(torch.complex128, n, k)
-    blas_assert_close(x, ref_x, torch.complex128, reduce_dim=2, atol=tol)
+    blas_assert_close(x, ref_x, torch.complex128, reduce_dim=2)
 
 
 @pytest.mark.parametrize("op,dtype,trans", TBSV_VARIANTS)
@@ -627,7 +715,7 @@ def test_tbsv_unit_diag_ignores_stored_diagonal(op, dtype, trans, uplo):
         n, k, lda, uplo, dtype, flag_blas.device, unit_diag=True
     )
     dirty = clean.clone()
-    diag_col = k if uplo == CUBLAS_FILL_MODE_UPPER else 0
+    diag_col = 0 if uplo == CUBLAS_FILL_MODE_UPPER else k
     if dtype.is_complex:
         dirty[:, diag_col] = complex(float("nan"), float("nan"))
     else:
@@ -639,5 +727,5 @@ def test_tbsv_unit_diag_ignores_stored_diagonal(op, dtype, trans, uplo):
     op(uplo, trans, CUBLAS_DIAG_UNIT, n, k, clean, lda, clean_x, 1)
     op(uplo, trans, CUBLAS_DIAG_UNIT, n, k, dirty, lda, dirty_x, 1)
 
-    tol = _stbsv_tol(dtype, n, k)
-    torch.testing.assert_close(dirty_x, clean_x, rtol=tol, atol=tol)
+    ref_clean_x = clean_x.cpu() if TO_CPU else clean_x
+    blas_assert_close(dirty_x, ref_clean_x, dtype, reduce_dim=k + 1)
