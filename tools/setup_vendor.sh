@@ -75,7 +75,7 @@ case $VENDOR in
     # deps (filelock, sympy, ...).
     UV_INDEX_URL="https://resource.flagos.net/repository/flagos-pypi-hygon/simple"
     UV_EXTRA_INDEX_URL="https://mirrors.aliyun.com/pypi/simple"
-    TORCH_WHEEL_URL="https://download.sourcefind.cn:65024/file/4/torch/DAS1.5/torch-2.4.1+das.opt2.dtk2504-cp310-cp310-manylinux_2_28_x86_64.whl"
+    TORCH_WHEEL_URL="https://download.sourcefind.cn:65024/4/main/pytorch/DAS1.5/torch-2.4.1+das.opt2.dtk2504-cp310-cp310-manylinux_2_28_x86_64.whl"
     TORCH_WHEEL_NAME="${TORCH_WHEEL_URL##*/}"
 
     wget --content-disposition "${TORCH_WHEEL_URL}" -O "${TORCH_WHEEL_NAME}" || {
