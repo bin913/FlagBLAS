@@ -55,6 +55,17 @@ def load_cublas():
 _cublas = None if flag_blas.vendor_name in {"ascend", "hygon"} else load_cublas()
 
 
+def row_to_column_band(A, n, k, lda, uplo):
+    column_A = torch.zeros((n, lda), dtype=A.dtype, device=A.device)
+    for d in range(k + 1):
+        count = n - d
+        if uplo == CUBLAS_FILL_MODE_UPPER:
+            column_A[d:, k - d] = A[:count, d]
+        else:
+            column_A[:count, d] = A[d:, k - d]
+    return column_A
+
+
 def hipblas_tbmv_reference(uplo, trans, diag, n, k, A, lda, x, incx):
     if n == 0:
         return x
@@ -70,10 +81,11 @@ def hipblas_tbmv_reference(uplo, trans, diag, n, k, A, lda, x, incx):
     else:
         raise ValueError(f"Unsupported dtype for hipBLAS TBMV: {A.dtype}")
 
+    column_A = row_to_column_band(A, n, k, lda, uplo)
     hip_uplo = 121 if uplo == CUBLAS_FILL_MODE_UPPER else 122
     hip_trans = 111 + trans
     hip_diag = 131 + diag
-    library, handle = get_hipblas_context(A)
+    library, handle = get_hipblas_context(column_A)
     function = getattr(library, symbol)
     function.argtypes = [
         ctypes.c_void_p,
@@ -96,7 +108,7 @@ def hipblas_tbmv_reference(uplo, trans, diag, n, k, A, lda, x, incx):
             hip_diag,
             n,
             k,
-            ctypes.c_void_p(A.data_ptr()),
+            ctypes.c_void_p(column_A.data_ptr()),
             lda,
             ctypes.c_void_p(x.data_ptr()),
             incx,
@@ -109,6 +121,7 @@ def hipblas_tbmv_reference(uplo, trans, diag, n, k, A, lda, x, incx):
 def cublas_tbmv_reference(uplo, trans, diag, n, k, A, lda, x, incx):
     if n == 0:
         return
+    column_A = row_to_column_band(A, n, k, lda, uplo)
     handle = cp.cuda.device.get_cublas_handle()
     dtype = A.dtype
     if dtype == torch.float32:
@@ -129,7 +142,7 @@ def cublas_tbmv_reference(uplo, trans, diag, n, k, A, lda, x, incx):
         ctypes.c_int(diag),
         ctypes.c_int(n),
         ctypes.c_int(k),
-        ctypes.c_void_p(A.data_ptr()),
+        ctypes.c_void_p(column_A.data_ptr()),
         ctypes.c_int(lda),
         ctypes.c_void_p(x.data_ptr()),
         ctypes.c_int(incx),
@@ -143,7 +156,7 @@ def cpu_tbmv_reference(uplo, trans, diag, n, k, A, lda, x, incx):
     if n == 0:
         return ref_x
 
-    ref_A = to_cpu_blas_tensor(A)
+    ref_A = to_cpu_blas_tensor(row_to_column_band(A, n, k, lda, uplo))
     func = cpu_blas.ztbmv if ref_A.dtype.is_complex else cpu_blas.dtbmv
     xout = func(
         k,
@@ -168,21 +181,21 @@ def npu_tbmv_dense_matrix(uplo, diag, n, k, A):
             torch.view_as_complex(dense_values) if A.dtype.is_complex else dense_values
         )
 
-    columns = torch.arange(n, device=A.device).view(n, 1)
-    band_rows = torch.arange(k + 1, device=A.device).view(1, k + 1)
+    rows = torch.arange(n, device=A.device).view(n, 1)
+    band_cols = torch.arange(k + 1, device=A.device).view(1, k + 1)
     if uplo == CUBLAS_FILL_MODE_UPPER:
-        rows = columns + band_rows - k
-        diagonal_band_row = k
+        columns = rows + band_cols
+        diagonal_band_col = 0
     else:
-        rows = columns + band_rows
-        diagonal_band_row = 0
+        columns = rows + band_cols - k
+        diagonal_band_col = k
 
-    valid = (rows >= 0) & (rows < n)
+    valid = (columns >= 0) & (columns < n)
     if diag == CUBLAS_DIAG_UNIT:
-        valid &= band_rows != diagonal_band_row
+        valid &= band_cols != diagonal_band_col
 
-    column_indices = columns.expand(-1, k + 1)[valid]
-    row_indices = rows[valid]
+    row_indices = rows.expand(-1, k + 1)[valid]
+    column_indices = columns[valid]
     if A.dtype.is_complex:
         band_values = torch.view_as_real(A)[:, : k + 1]
         dense_values[row_indices, column_indices, 0] = band_values[..., 0][valid]
@@ -251,6 +264,11 @@ TBMV_SIZES = [
 ]
 TBMV_STRIDE_SIZES = [64, 256]
 TBMV_KS = [0, 1, 16, 256]
+TBMV_PERF_CASES = [
+    (n, min(k, n - 1))
+    for n in [64, 127, 128, 255, 256, 1024, 4096, 8192, 16384]
+    for k in [1, 4, 32, 48, 128, 512]
+]
 INCS = [1, 2]
 LDA_EXTRAS = [0, 2]
 LDA_EXTRAS_STRIDE = [0, 1]
@@ -268,18 +286,16 @@ def make_triangular_banded(n, k, lda, uplo, diag, dtype, device):
         return torch.zeros((n, lda), dtype=dtype, device=device).contiguous()
 
     A = tbmv_randn((n, lda), dtype, device)
-    cols = torch.arange(lda, device=device).view(1, lda)
-    j = torch.arange(n, device=device).view(n, 1)
-    unit = diag == CUBLAS_DIAG_UNIT
-
+    bands = torch.arange(lda, device=device).view(1, lda)
+    rows = torch.arange(n, device=device).view(n, 1)
     if uplo == CUBLAS_FILL_MODE_UPPER:
-        valid = (cols >= torch.clamp(k - j, min=0)) & (cols <= k)
-        if unit:
-            valid &= cols != k
+        valid = bands <= torch.clamp(n - 1 - rows, max=k)
+        diagonal_band = 0
     else:
-        valid = cols <= torch.clamp(n - 1 - j, max=k)
-        if unit:
-            valid &= cols != 0
+        valid = (bands >= torch.clamp(k - rows, min=0)) & (bands <= k)
+        diagonal_band = k
+    if diag == CUBLAS_DIAG_UNIT:
+        valid &= bands != diagonal_band
 
     if dtype.is_complex:
         torch.view_as_real(A).masked_fill_(~valid.unsqueeze(-1), float("nan"))
@@ -308,6 +324,30 @@ COMPLEX_TRANS = [CUBLAS_OP_N, CUBLAS_OP_T, CUBLAS_OP_C]
 
 def _effective_k(n, k):
     return min(k, max(0, n - 1))
+
+
+@pytest.mark.parametrize(
+    "op,dtype",
+    [
+        (flag_blas.stbmv, torch.float32),
+        (flag_blas.dtbmv, torch.float64),
+        (flag_blas.ctbmv, torch.complex64),
+        (flag_blas.ztbmv, torch.complex128),
+    ],
+)
+@pytest.mark.parametrize("n,k", TBMV_PERF_CASES)
+def test_tbmv_perf_shape_coverage(op, dtype, n, k):
+    if dtype in (torch.float64, torch.complex128):
+        check_fp64_support()
+    uplo = CUBLAS_FILL_MODE_LOWER
+    trans = CUBLAS_OP_N
+    diag = CUBLAS_DIAG_NON_UNIT
+    lda = k + 1
+    A = make_triangular_banded(n, k, lda, uplo, diag, dtype, flag_blas.device)
+    x = tbmv_randn((n,), dtype, flag_blas.device)
+    ref_x = tbmv_reference(uplo, trans, diag, n, k, A, lda, x, 1)
+    op(uplo, trans, diag, n, k, A, lda, x, 1)
+    tbmv_assert_close(x, ref_x, dtype, reduce_dim=k + 1)
 
 
 @pytest.mark.stbmv

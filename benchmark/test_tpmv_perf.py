@@ -193,23 +193,17 @@ if IS_HYGON:
         incx,
         handle,
         c_func,
+        reference_AP,
+        reference_x,
+        reference_result,
         hip_uplo,
         hip_trans,
         hip_diag,
         **kwargs,
     ):
-        status = c_func(
-            handle,
-            hip_uplo,
-            hip_trans,
-            hip_diag,
-            n,
-            ctypes.c_void_p(AP.data_ptr()),
-            ctypes.c_void_p(x.data_ptr()),
-            incx,
-        )
+        status = c_func(*kwargs["vendor_args"])
         _check_hipblas_status(status, "hipBLAS TPMV")
-        return x
+        return reference_result
 
 else:
 
@@ -223,25 +217,21 @@ else:
         incx,
         handle,
         c_func,
+        reference_AP,
+        reference_x,
+        reference_result,
+        reference_uplo,
+        reference_trans,
         **kwargs,
     ):
-        status = c_func(
-            ctypes.c_void_p(handle),
-            ctypes.c_int(uplo),
-            ctypes.c_int(trans),
-            ctypes.c_int(diag),
-            ctypes.c_int(n),
-            ctypes.c_void_p(AP.data_ptr()),
-            ctypes.c_void_p(x.data_ptr()),
-            ctypes.c_int(incx),
-        )
+        status = c_func(*kwargs["vendor_args"])
         if status != 0:
             raise RuntimeError(f"cublasXtpmv_v2 failed with status code: {status}")
-        return x
+        return reference_result
 
 
 def _gems_wrapper(op):
-    def _impl(AP, x, uplo, trans, diag, n, incx, handle, **kwargs):
+    def _impl(AP, x, uplo, trans, diag, n, incx, handle=None, **kwargs):
         op(uplo, trans, diag, n, AP, x, incx)
         return x
 
@@ -283,15 +273,17 @@ class TpmvBenchmark(Benchmark):
         return None
 
     def get_input_iter(self, cur_dtype) -> Generator:
+        reference_uplo = (
+            CUBLAS_FILL_MODE_LOWER
+            if self.uplo == CUBLAS_FILL_MODE_UPPER
+            else CUBLAS_FILL_MODE_UPPER
+        )
+        reference_trans = CUBLAS_OP_T if self.trans == CUBLAS_OP_N else CUBLAS_OP_N
         if IS_HYGON:
             library, handle = _prepare_hipblas(self.device)
             c_func = _resolve_hipblas_tpmv(library, cur_dtype)
-            hip_uplo = 121 if self.uplo == CUBLAS_FILL_MODE_UPPER else 122
-            hip_trans = {
-                CUBLAS_OP_N: 111,
-                CUBLAS_OP_T: 112,
-                CUBLAS_OP_C: 113,
-            }[self.trans]
+            hip_uplo = 121 if reference_uplo == CUBLAS_FILL_MODE_UPPER else 122
+            hip_trans = {CUBLAS_OP_N: 111, CUBLAS_OP_T: 112}[reference_trans]
             hip_diag = 132 if self.diag == CUBLAS_DIAG_UNIT else 131
         else:
             handle = cp.cuda.device.get_cublas_handle()
@@ -304,6 +296,35 @@ class TpmvBenchmark(Benchmark):
             n = shape[0] if isinstance(shape, (tuple, list)) else shape
             AP = _generate_packed_triangular(n, cur_dtype, self.device)
             x = torch.randn(n, dtype=cur_dtype, device=self.device)
+            reference_x = x.clone()
+            if self.trans == CUBLAS_OP_C:
+                reference_x.copy_(reference_x.conj())
+                reference_result = reference_x.conj()
+            else:
+                reference_result = reference_x
+            vendor_args = (
+                (
+                    handle,
+                    hip_uplo,
+                    hip_trans,
+                    hip_diag,
+                    n,
+                    ctypes.c_void_p(AP.data_ptr()),
+                    ctypes.c_void_p(reference_x.data_ptr()),
+                    1,
+                )
+                if IS_HYGON
+                else (
+                    ctypes.c_void_p(handle),
+                    ctypes.c_int(reference_uplo),
+                    ctypes.c_int(reference_trans),
+                    ctypes.c_int(self.diag),
+                    ctypes.c_int(n),
+                    ctypes.c_void_p(AP.data_ptr()),
+                    ctypes.c_void_p(reference_x.data_ptr()),
+                    ctypes.c_int(1),
+                )
+            )
             kwargs = {
                 "uplo": self.uplo,
                 "trans": self.trans,
@@ -312,6 +333,12 @@ class TpmvBenchmark(Benchmark):
                 "incx": 1,
                 "handle": handle,
                 "c_func": c_func,
+                "reference_AP": AP,
+                "reference_x": reference_x,
+                "reference_result": reference_result,
+                "vendor_args": vendor_args,
+                "reference_uplo": reference_uplo,
+                "reference_trans": reference_trans,
             }
             if IS_HYGON:
                 kwargs.update(
@@ -339,9 +366,23 @@ class TpmvBenchmark(Benchmark):
 
     def clone_correctness_inputs(self, args, kwargs):
         AP, x = args
+        reference_x = x.clone()
+        if kwargs["trans"] == CUBLAS_OP_C:
+            reference_x.copy_(reference_x.conj())
+            reference_result = reference_x.conj()
+        else:
+            reference_result = reference_x
+        ref_kwargs = kwargs.copy()
+        ref_kwargs.update(
+            reference_x=reference_x,
+            reference_result=reference_result,
+        )
+        vendor_args = list(kwargs["vendor_args"])
+        vendor_args[6] = ctypes.c_void_p(reference_x.data_ptr())
+        ref_kwargs["vendor_args"] = tuple(vendor_args)
         ref_args = (AP, x.clone())
         blas_args = (AP, x.clone())
-        return ref_args, kwargs, blas_args, kwargs
+        return ref_args, ref_kwargs, blas_args, kwargs
 
 
 @pytest.mark.stpmv

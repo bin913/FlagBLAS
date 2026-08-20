@@ -2054,3 +2054,104 @@ zhpr2_hygon:
   - META: {BLOCK_SIZE: 128}
     num_warps: 2
     num_stages: 2
+
+real_trmv_trans_gemv_hygon:
+  - META: {BLOCK_M: 4, BLOCK_K: 128}
+    num_warps: 2
+    num_stages: 1
+  - META: {BLOCK_M: 4, BLOCK_K: 256}
+    num_warps: 4
+    num_stages: 1
+  - META: {BLOCK_M: 4, BLOCK_K: 512}
+    num_warps: 4
+    num_stages: 1
+  - META: {BLOCK_M: 8, BLOCK_K: 256}
+    num_warps: 4
+    num_stages: 1
+  - META: {BLOCK_M: 8, BLOCK_K: 64}
+    num_warps: 2
+    num_stages: 1
+  - META: {BLOCK_M: 8, BLOCK_K: 128}
+    num_warps: 2
+    num_stages: 1
+  - META: {BLOCK_M: 16, BLOCK_K: 64}
+    num_warps: 4
+    num_stages: 1
+  - META: {BLOCK_M: 16, BLOCK_K: 128}
+    num_warps: 4
+    num_stages: 1
+  - META: {BLOCK_M: 32, BLOCK_K: 64}
+    num_warps: 4
+    num_stages: 1
+  - META: {BLOCK_M: 32, BLOCK_K: 128}
+    num_warps: 4
+    num_stages: 1
+
+complex_trmv_trans_gemv_hygon:
+  - META: {BLOCK_M: 8, BLOCK_K: 32}
+    num_warps: 4
+    num_stages: 1
+  - META: {BLOCK_M: 8, BLOCK_K: 64}
+    num_warps: 4
+    num_stages: 1
+  - META: {BLOCK_M: 8, BLOCK_K: 128}
+    num_warps: 4
+    num_stages: 1
+  - META: {BLOCK_M: 16, BLOCK_K: 32}
+    num_warps: 4
+    num_stages: 1
+  - META: {BLOCK_M: 16, BLOCK_K: 64}
+    num_warps: 4
+    num_stages: 1
+  - META: {BLOCK_M: 16, BLOCK_K: 128}
+    num_warps: 8
+    num_stages: 1
+  - META: {BLOCK_M: 32, BLOCK_K: 32}
+    num_warps: 4
+    num_stages: 1
+  - META: {BLOCK_M: 32, BLOCK_K: 64}
+    num_warps: 8
+    num_stages: 1
+  - META: {BLOCK_M: 64, BLOCK_K: 64}
+    num_warps: 4
+    num_stages: 1
+
+complex_trmv_n_gemv_hygon:
+  - META: {ROWS_PER_CTA: 1, BLOCK_K: 256}
+    num_warps: 4
+    num_stages: 1
+  - META: {ROWS_PER_CTA: 1, BLOCK_K: 512}
+    num_warps: 8
+    num_stages: 1
+  - META: {ROWS_PER_CTA: 2, BLOCK_K: 128}
+    num_warps: 4
+    num_stages: 1
+  - META: {ROWS_PER_CTA: 2, BLOCK_K: 256}
+    num_warps: 8
+    num_stages: 1
+  - META: {ROWS_PER_CTA: 2, BLOCK_K: 512}
+    num_warps: 8
+    num_stages: 1
+  - META: {ROWS_PER_CTA: 4, BLOCK_K: 128}
+    num_warps: 4
+    num_stages: 1
+
+ctrmv_trans_packed_hygon:
+  - META: {BLOCK_M: 16, BLOCK_K: 32}
+    num_warps: 4
+    num_stages: 1
+  - META: {BLOCK_M: 16, BLOCK_K: 64}
+    num_warps: 4
+    num_stages: 1
+  - META: {BLOCK_M: 16, BLOCK_K: 128}
+    num_warps: 8
+    num_stages: 1
+  - META: {BLOCK_M: 32, BLOCK_K: 32}
+    num_warps: 4
+    num_stages: 1
+  - META: {BLOCK_M: 32, BLOCK_K: 64}
+    num_warps: 8
+    num_stages: 1
+  - META: {BLOCK_M: 64, BLOCK_K: 64}
+    num_warps: 8
+    num_stages: 1
