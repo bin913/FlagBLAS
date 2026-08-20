@@ -442,7 +442,7 @@ def test_perf_sspr2():
 @pytest.mark.sspr2
 def test_perf_sspr2_upper():
     bench = Spr2Benchmark(
-        op_name="sspr2_upper",
+        op_name="sspr2",
         torch_op=hipblas_spr2_baseline if IS_HYGON else cublas_spr2_baseline,
         gems_op=gems_sspr2_wrapper,
         dtypes=[torch.float32],
@@ -470,7 +470,7 @@ def test_perf_dspr2_upper():
     if not flag_blas.runtime.device.support_fp64:
         pytest.skip("Device does not support float64")
     bench = Spr2Benchmark(
-        op_name="dspr2_upper",
+        op_name="dspr2",
         torch_op=hipblas_spr2_baseline if IS_HYGON else cublas_spr2_baseline,
         gems_op=gems_dspr2_wrapper,
         dtypes=[torch.float64],

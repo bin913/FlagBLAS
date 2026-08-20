@@ -216,25 +216,11 @@ if IS_HYGON:
         alpha_ptr,
         beta_ptr,
         c_func,
+        vendor_args,
         hip_trans,
         **kwargs,
     ):
-        status = c_func(
-            handle,
-            hip_trans,
-            m,
-            n,
-            kl,
-            ku,
-            alpha_ptr,
-            ctypes.c_void_p(AB.data_ptr()),
-            lda,
-            ctypes.c_void_p(x.data_ptr()),
-            incx,
-            beta_ptr,
-            ctypes.c_void_p(y.data_ptr()),
-            incy,
-        )
+        status = c_func(*vendor_args)
         _check_hipblas_status(status, "hipBLAS GBMV")
         return y
 
@@ -258,6 +244,7 @@ else:
         alpha_ptr,
         beta_ptr,
         c_func,
+        vendor_args,
         alpha_c,
         beta_c,
         **kwargs,
@@ -265,22 +252,7 @@ else:
         if m == 0 or n == 0:
             return y
 
-        status = c_func(
-            ctypes.c_void_p(handle),
-            ctypes.c_int(trans),
-            ctypes.c_int(m),
-            ctypes.c_int(n),
-            ctypes.c_int(kl),
-            ctypes.c_int(ku),
-            ctypes.byref(alpha_c),
-            ctypes.c_void_p(AB.data_ptr()),
-            ctypes.c_int(lda),
-            ctypes.c_void_p(x.data_ptr()),
-            ctypes.c_int(incx),
-            ctypes.byref(beta_c),
-            ctypes.c_void_p(y.data_ptr()),
-            ctypes.c_int(incy),
-        )
+        status = c_func(*vendor_args)
         if status != 0:
             raise RuntimeError(f"cublasXgbmv_v2 failed with status code: {status}")
         return y
@@ -319,19 +291,22 @@ gems_zgbmv_wrapper = _gems_wrapper(flag_blas.zgbmv)
 
 
 def _generate_banded_AB(m, n, kl, ku, lda, dtype, device):
-    """Generate an AB tensor directly in band-storage format."""
-    AB = torch.zeros((n, lda), dtype=dtype, device=device)
+    """Generate equivalent row-major and column-major band storage."""
+    row_AB = torch.zeros((m, lda), dtype=dtype, device=device)
+    column_AB = torch.zeros((n, lda), dtype=dtype, device=device)
     for d in range(-ku, kl + 1):
         j_min = max(0, -d)
         j_max = min(n, m - d)
         if j_min < j_max:
             j_idx = torch.arange(j_min, j_max, device=device)
+            i_idx = j_idx + d
             if dtype.is_complex:
                 vals = torch.randn(len(j_idx), dtype=dtype, device=device)
             else:
                 vals = torch.randn(len(j_idx), dtype=dtype, device=device) * 0.1
-            AB[j_idx, ku + d] = vals
-    return AB.contiguous()
+            row_AB[i_idx, kl - d] = vals
+            column_AB[j_idx, ku + d] = vals
+    return row_AB.contiguous(), column_AB.contiguous()
 
 
 class GbmvBenchmark(Benchmark):
@@ -409,13 +384,49 @@ class GbmvBenchmark(Benchmark):
                 seen_configs.add(config_key)
 
                 lda = actual_kl + actual_ku + 1
-                AB = _generate_banded_AB(
+                AB, column_AB = _generate_banded_AB(
                     m, n, actual_kl, actual_ku, lda, cur_dtype, self.device
                 )
 
                 x_len, y_len = (n, m) if self.trans == CUBLAS_OP_N else (m, n)
                 x = torch.randn(x_len, dtype=cur_dtype, device=self.device)
                 y = torch.randn(y_len, dtype=cur_dtype, device=self.device)
+                output = y.clone()
+
+                if IS_HYGON:
+                    vendor_args = (
+                        handle,
+                        ctypes.c_int(hip_trans),
+                        ctypes.c_int(m),
+                        ctypes.c_int(n),
+                        ctypes.c_int(actual_kl),
+                        ctypes.c_int(actual_ku),
+                        alpha_ptr,
+                        ctypes.c_void_p(column_AB.data_ptr()),
+                        ctypes.c_int(lda),
+                        ctypes.c_void_p(x.data_ptr()),
+                        ctypes.c_int(1),
+                        beta_ptr,
+                        ctypes.c_void_p(output.data_ptr()),
+                        ctypes.c_int(1),
+                    )
+                else:
+                    vendor_args = (
+                        ctypes.c_void_p(handle),
+                        ctypes.c_int(self.trans),
+                        ctypes.c_int(m),
+                        ctypes.c_int(n),
+                        ctypes.c_int(actual_kl),
+                        ctypes.c_int(actual_ku),
+                        ctypes.byref(alpha_c),
+                        ctypes.c_void_p(column_AB.data_ptr()),
+                        ctypes.c_int(lda),
+                        ctypes.c_void_p(x.data_ptr()),
+                        ctypes.c_int(1),
+                        ctypes.byref(beta_c),
+                        ctypes.c_void_p(output.data_ptr()),
+                        ctypes.c_int(1),
+                    )
 
                 call_kwargs = {
                     "trans": self.trans,
@@ -432,13 +443,15 @@ class GbmvBenchmark(Benchmark):
                     "alpha_ptr": alpha_ptr,
                     "beta_ptr": beta_ptr,
                     "c_func": c_func,
+                    "vendor_args": vendor_args,
+                    "column_AB": column_AB,
                 }
                 if IS_HYGON:
                     call_kwargs["hip_trans"] = hip_trans
                 else:
                     call_kwargs["alpha_c"] = alpha_c
                     call_kwargs["beta_c"] = beta_c
-                yield AB, x, y.clone(), call_kwargs
+                yield AB, x, output, call_kwargs
 
     def get_tflops(self, op, *args, **kwargs):
         m = kwargs.get("m", 0)
@@ -470,9 +483,14 @@ class GbmvBenchmark(Benchmark):
 
     def clone_correctness_inputs(self, args, kwargs):
         AB, x, y = args
-        ref_args = (AB, x, y.clone())
+        ref_y = y.clone()
+        ref_args = (AB, x, ref_y)
         blas_args = (AB, x, y.clone())
-        return ref_args, kwargs, blas_args, kwargs
+        ref_kwargs = kwargs.copy()
+        vendor_args = list(kwargs["vendor_args"])
+        vendor_args[12] = ctypes.c_void_p(ref_y.data_ptr())
+        ref_kwargs["vendor_args"] = tuple(vendor_args)
+        return ref_args, ref_kwargs, blas_args, kwargs
 
 
 @pytest.mark.sgbmv

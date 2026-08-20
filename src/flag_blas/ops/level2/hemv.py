@@ -34,9 +34,17 @@ ScalarType = Union[float, int, complex, torch.Tensor]
 _CHEMV_CONFIGS = [
     triton.Config({"BLOCK_SIZE": 16}, num_warps=1, num_stages=1),
     triton.Config({"BLOCK_SIZE": 32}, num_warps=1, num_stages=1),
+    triton.Config({"BLOCK_SIZE": 32}, num_warps=1, num_stages=2),
     triton.Config({"BLOCK_SIZE": 32}, num_warps=2, num_stages=2),
     triton.Config({"BLOCK_SIZE": 64}, num_warps=2, num_stages=2),
     triton.Config({"BLOCK_SIZE": 64}, num_warps=4, num_stages=2),
+]
+
+_CHEMV_SMALL_CONFIGS = [
+    triton.Config({"BLOCK_M": 16}, num_warps=4, num_stages=1),
+    triton.Config({"BLOCK_M": 16}, num_warps=4, num_stages=2),
+    triton.Config({"BLOCK_M": 16}, num_warps=8, num_stages=1),
+    triton.Config({"BLOCK_M": 16}, num_warps=8, num_stages=2),
 ]
 
 _ZHEMV_CONFIGS = [
@@ -58,6 +66,64 @@ _RESTORE = ["y_ptr"]
 
 def _f64_to_i64(v: float) -> int:
     return struct.unpack("<q", struct.pack("<d", v))[0]
+
+
+@triton.autotune(configs=_CHEMV_SMALL_CONFIGS, key=_HEMV_KEY, restore_value=_RESTORE)
+@triton.jit
+def chemv_small_kernel(
+    a_ptr,
+    x_ptr,
+    y_ptr,
+    alpha_r: tl.float32,
+    alpha_i: tl.float32,
+    beta_r: tl.float32,
+    beta_i: tl.float32,
+    n,
+    LDA,
+    INCX,
+    INCY,
+    UPLO: tl.constexpr,
+    BETA_IS_ZERO: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    rows = pid * BLOCK_M + tl.arange(0, BLOCK_M)
+    cols = tl.arange(0, BLOCK_N)
+    row_mask = rows < n
+    col_mask = cols < n
+    i = rows[None, :]
+    j = cols[:, None]
+    mask2d = col_mask[:, None] & row_mask[None, :]
+
+    if UPLO == 0:
+        use_direct = j <= i
+    else:
+        use_direct = j >= i
+    elem_off = tl.where(use_direct, i * LDA + j, j * LDA + i)
+    a_off = elem_off * 2
+    ar = tl.load(a_ptr + a_off, mask=mask2d, other=0.0)
+    ai = tl.load(a_ptr + a_off + 1, mask=mask2d, other=0.0)
+    ai = tl.where(use_direct, ai, -ai)
+    ai = tl.where(i == j, 0.0, ai)
+
+    x_off = cols * INCX * 2
+    xr = tl.load(x_ptr + x_off, mask=col_mask, other=0.0)
+    xi = tl.load(x_ptr + x_off + 1, mask=col_mask, other=0.0)
+    acc_r = tl.sum(ar * xr[:, None] - ai * xi[:, None], axis=0)
+    acc_i = tl.sum(ar * xi[:, None] + ai * xr[:, None], axis=0)
+
+    y_off = rows * INCY * 2
+    if BETA_IS_ZERO:
+        yr = tl.zeros((BLOCK_M,), dtype=tl.float32)
+        yi = tl.zeros((BLOCK_M,), dtype=tl.float32)
+    else:
+        yr = tl.load(y_ptr + y_off, mask=row_mask, other=0.0)
+        yi = tl.load(y_ptr + y_off + 1, mask=row_mask, other=0.0)
+    out_r = alpha_r * acc_r - alpha_i * acc_i + beta_r * yr - beta_i * yi
+    out_i = alpha_r * acc_i + alpha_i * acc_r + beta_r * yi + beta_i * yr
+    tl.store(y_ptr + y_off, out_r, mask=row_mask)
+    tl.store(y_ptr + y_off + 1, out_i, mask=row_mask)
 
 
 @triton.autotune(configs=_CHEMV_CONFIGS, key=_HEMV_KEY, restore_value=_RESTORE)
@@ -89,7 +155,7 @@ def chemv_kernel(
     cols = pid_n * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     row_mask = rows < n
     col_mask = cols < n
-    mask2d = row_mask[:, None] & col_mask[None, :]
+    mask2d = col_mask[:, None] & row_mask[None, :]
     y_rows_off = rows * INCY * 2
     y_cols_off = cols * INCY * 2
 
@@ -101,35 +167,35 @@ def chemv_kernel(
     xci = tl.load(x_ptr + x_cols_off + 1, mask=col_mask, other=0.0)
 
     if pid_m == pid_n:
-        i = rows[:, None]
-        j = cols[None, :]
+        i = rows[None, :]
+        j = cols[:, None]
         if UPLO == 0:
             use_direct = j <= i
         else:
             use_direct = j >= i
-        elem_off = tl.where(use_direct, i + j * LDA, j + i * LDA)
+        elem_off = tl.where(use_direct, i * LDA + j, j * LDA + i)
         a_off = elem_off * 2
         ar = tl.load(a_ptr + a_off, mask=mask2d, other=0.0)
         ai = tl.load(a_ptr + a_off + 1, mask=mask2d, other=0.0)
         ai = tl.where(use_direct, ai, -ai)
         ai = tl.where(i == j, 0.0, ai)
-        acc_r = tl.sum(ar * xcr[None, :] - ai * xci[None, :], axis=1)
-        acc_i = tl.sum(ar * xci[None, :] + ai * xcr[None, :], axis=1)
+        acc_r = tl.sum(ar * xcr[:, None] - ai * xci[:, None], axis=0)
+        acc_i = tl.sum(ar * xci[:, None] + ai * xcr[:, None], axis=0)
         res_r = alpha_r * acc_r - alpha_i * acc_i
         res_i = alpha_r * acc_i + alpha_i * acc_r
         tl.atomic_add(y_ptr + y_rows_off, res_r, mask=row_mask, sem="relaxed")
         tl.atomic_add(y_ptr + y_rows_off + 1, res_i, mask=row_mask, sem="relaxed")
         return
 
-    elem_off = rows[:, None] + cols[None, :] * LDA
+    elem_off = rows[None, :] * LDA + cols[:, None]
     a_off = elem_off * 2
     ar = tl.load(a_ptr + a_off, mask=mask2d, other=0.0)
     ai = tl.load(a_ptr + a_off + 1, mask=mask2d, other=0.0)
 
-    acc_rows_r = tl.sum(ar * xcr[None, :] - ai * xci[None, :], axis=1)
-    acc_rows_i = tl.sum(ar * xci[None, :] + ai * xcr[None, :], axis=1)
-    acc_cols_r = tl.sum(ar * xrr[:, None] + ai * xri[:, None], axis=0)
-    acc_cols_i = tl.sum(ar * xri[:, None] - ai * xrr[:, None], axis=0)
+    acc_rows_r = tl.sum(ar * xcr[:, None] - ai * xci[:, None], axis=0)
+    acc_rows_i = tl.sum(ar * xci[:, None] + ai * xcr[:, None], axis=0)
+    acc_cols_r = tl.sum(ar * xrr[None, :] + ai * xri[None, :], axis=1)
+    acc_cols_i = tl.sum(ar * xri[None, :] - ai * xrr[None, :], axis=1)
 
     row_res_r = alpha_r * acc_rows_r - alpha_i * acc_rows_i
     row_res_i = alpha_r * acc_rows_i + alpha_i * acc_rows_r
@@ -184,7 +250,7 @@ def zhemv_kernel(
     cols = pid_n * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     row_mask = rows < n
     col_mask = cols < n
-    mask2d = row_mask[:, None] & col_mask[None, :]
+    mask2d = col_mask[:, None] & row_mask[None, :]
 
     y_rows_off = rows * INCY * 2
     y_cols_off = cols * INCY * 2
@@ -197,35 +263,35 @@ def zhemv_kernel(
     xci = tl.load(x_ptr + x_cols_off + 1, mask=col_mask, other=0.0)
 
     if pid_m == pid_n:
-        i = rows[:, None]
-        j = cols[None, :]
+        i = rows[None, :]
+        j = cols[:, None]
         if UPLO == 0:
             use_direct = j <= i
         else:
             use_direct = j >= i
-        elem_off = tl.where(use_direct, i + j * LDA, j + i * LDA)
+        elem_off = tl.where(use_direct, i * LDA + j, j * LDA + i)
         a_off = elem_off * 2
         ar = tl.load(a_ptr + a_off, mask=mask2d, other=0.0)
         ai = tl.load(a_ptr + a_off + 1, mask=mask2d, other=0.0)
         ai = tl.where(use_direct, ai, -ai)
         ai = tl.where(i == j, 0.0, ai)
-        acc_r = tl.sum(ar * xcr[None, :] - ai * xci[None, :], axis=1)
-        acc_i = tl.sum(ar * xci[None, :] + ai * xcr[None, :], axis=1)
+        acc_r = tl.sum(ar * xcr[:, None] - ai * xci[:, None], axis=0)
+        acc_i = tl.sum(ar * xci[:, None] + ai * xcr[:, None], axis=0)
         res_r = alpha_r * acc_r - alpha_i * acc_i
         res_i = alpha_r * acc_i + alpha_i * acc_r
         tl.atomic_add(y_ptr + y_rows_off, res_r, mask=row_mask, sem="relaxed")
         tl.atomic_add(y_ptr + y_rows_off + 1, res_i, mask=row_mask, sem="relaxed")
         return
 
-    elem_off = rows[:, None] + cols[None, :] * LDA
+    elem_off = rows[None, :] * LDA + cols[:, None]
     a_off = elem_off * 2
     ar = tl.load(a_ptr + a_off, mask=mask2d, other=0.0)
     ai = tl.load(a_ptr + a_off + 1, mask=mask2d, other=0.0)
 
-    acc_rows_r = tl.sum(ar * xcr[None, :] - ai * xci[None, :], axis=1)
-    acc_rows_i = tl.sum(ar * xci[None, :] + ai * xcr[None, :], axis=1)
-    acc_cols_r = tl.sum(ar * xrr[:, None] + ai * xri[:, None], axis=0)
-    acc_cols_i = tl.sum(ar * xri[:, None] - ai * xrr[:, None], axis=0)
+    acc_rows_r = tl.sum(ar * xcr[:, None] - ai * xci[:, None], axis=0)
+    acc_rows_i = tl.sum(ar * xci[:, None] + ai * xcr[:, None], axis=0)
+    acc_cols_r = tl.sum(ar * xrr[None, :] + ai * xri[None, :], axis=1)
+    acc_cols_i = tl.sum(ar * xri[None, :] - ai * xrr[None, :], axis=1)
 
     row_res_r = alpha_r * acc_rows_r - alpha_i * acc_rows_i
     row_res_i = alpha_r * acc_rows_i + alpha_i * acc_rows_r
@@ -296,6 +362,29 @@ def chemv(
     y_real = torch.view_as_real(y)
 
     with torch_device_fn.device(A.device):
+        if uplo == CUBLAS_FILL_MODE_LOWER and n <= 192 and incx == 1 and incy == 1:
+
+            def small_grid(meta):
+                return (triton.cdiv(n, meta["BLOCK_M"]),)
+
+            chemv_small_kernel[small_grid](
+                A_real,
+                x_real,
+                y_real,
+                ar,
+                ai,
+                br,
+                bi,
+                n,
+                lda,
+                incx,
+                incy,
+                UPLO=uplo,
+                BETA_IS_ZERO=br == 0.0 and bi == 0.0,
+                BLOCK_N=triton.next_power_of_2(n),
+            )
+            return
+
         if br == 0.0 and bi == 0.0:
             y_view.zero_()
         elif br != 1.0 or bi != 0.0:

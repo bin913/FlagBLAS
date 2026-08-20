@@ -154,14 +154,30 @@ def cpu_tpmv_reference(uplo, trans, diag, n, AP, x, incx):
 
 
 def tpmv_reference(uplo, trans, diag, n, AP, x, incx):
-    if TO_CPU:
-        return cpu_tpmv_reference(uplo, trans, diag, n, AP, x, incx)
+    uplo = (
+        CUBLAS_FILL_MODE_LOWER
+        if uplo == CUBLAS_FILL_MODE_UPPER
+        else CUBLAS_FILL_MODE_UPPER
+    )
+    conjugate_vector = trans == CUBLAS_OP_C
+    trans = CUBLAS_OP_T if trans == CUBLAS_OP_N else CUBLAS_OP_N
 
     ref_x = x.clone()
+    if conjugate_vector:
+        ref_x.copy_(ref_x.conj())
+
+    if TO_CPU:
+        result = cpu_tpmv_reference(uplo, trans, diag, n, AP, ref_x, incx)
+        if conjugate_vector:
+            result.copy_(result.conj())
+        return result
+
     if flag_blas.vendor_name == "hygon":
         hipblas_tpmv_reference(uplo, trans, diag, n, AP, ref_x, incx)
     else:
         cublas_tpmv_reference(uplo, trans, diag, n, AP, ref_x, incx)
+    if conjugate_vector:
+        ref_x.copy_(ref_x.conj())
     return ref_x
 
 

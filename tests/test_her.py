@@ -1,3 +1,17 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import ctypes
 import ctypes.util
 
@@ -7,6 +21,10 @@ import torch
 from scipy.linalg import blas as cpu_blas
 
 import flag_blas
+
+if flag_blas.vendor_name == "hygon":
+    from .hipblas_reference import check_hipblas_status, get_hipblas_context
+
 from flag_blas.ops import CUBLAS_FILL_MODE_LOWER, CUBLAS_FILL_MODE_UPPER
 
 from .accuracy_utils import blas_assert_close
@@ -117,7 +135,20 @@ def _make_her_inputs(dtype, n, incx, seed):
     return alpha, x, A.contiguous()
 
 
+def _row_to_column_full(A, n, lda):
+    column_A = torch.zeros((n, lda), dtype=A.dtype, device=A.device)
+    column_A[:, :n] = A[:n, :n].T
+    return column_A
+
+
+def _column_to_row_full(A, column_A, n):
+    result = A.clone()
+    result[:n, :n] = column_A[:, :n].T
+    return result
+
+
 def _cublas_her_reference(name, uplo, n, alpha, x, incx, A, lda):
+    column_A = _row_to_column_full(A, n, lda)
     handle = _get_cublas_handle()
     _ensure_cublas()
     func, ctor = _CUBLAS_HER_FUNCS[name]
@@ -129,20 +160,56 @@ def _cublas_her_reference(name, uplo, n, alpha, x, incx, A, lda):
         ctypes.byref(alpha_c),
         ctypes.c_void_p(x.data_ptr()),
         ctypes.c_int(incx),
-        ctypes.c_void_p(A.data_ptr()),
+        ctypes.c_void_p(column_A.data_ptr()),
         ctypes.c_int(lda),
     )
     if status != 0:
         raise RuntimeError(f"cublasXher_v2 execution failed with error code: {status}")
-    torch.cuda.synchronize(A.device)
-    return A
+    return _column_to_row_full(A, column_A, n)
+
+
+def _hipblas_her_reference(name, uplo, n, alpha, x, incx, A, lda):
+    if n == 0:
+        return A
+    column_A = _row_to_column_full(A, n, lda)
+    library, handle = get_hipblas_context(column_A)
+    symbol = "hipblasCher_v2" if name == "cher" else "hipblasZher_v2"
+    alpha_type = ctypes.c_float if name == "cher" else ctypes.c_double
+    function = getattr(library, symbol)
+    function.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_int,
+    ]
+    function.restype = ctypes.c_int
+    alpha_value = alpha_type(alpha.item() if isinstance(alpha, torch.Tensor) else alpha)
+    hip_uplo = 121 if uplo == CUBLAS_FILL_MODE_UPPER else 122
+    check_hipblas_status(
+        function(
+            handle,
+            hip_uplo,
+            n,
+            ctypes.byref(alpha_value),
+            ctypes.c_void_p(x.data_ptr()),
+            incx,
+            ctypes.c_void_p(column_A.data_ptr()),
+            lda,
+        ),
+        symbol,
+    )
+    return _column_to_row_full(A, column_A, n)
 
 
 def _scipy_her(name, uplo, n, alpha, x, incx, A):
     lower = int(uplo == CUBLAS_FILL_MODE_LOWER)
     x_cpu = x.detach().cpu().contiguous()
     ref = A.detach().cpu().contiguous()
-    logical_A = ref[:n, :n].T.numpy().copy(order="F")
+    logical_A = ref[:n, :n].numpy().copy(order="F")
     x_view = x_cpu.numpy()[::incx][:n]
     if name == "cher":
         out = cpu_blas.cher(
@@ -152,7 +219,7 @@ def _scipy_her(name, uplo, n, alpha, x, incx, A):
         out = cpu_blas.zher(
             float(alpha.cpu()), x_view, a=logical_A, lower=lower, overwrite_a=1
         )
-    ref[:n, :n] = torch.from_numpy(np.array(out.T, copy=True))
+    ref[:n, :n] = torch.from_numpy(np.array(out, order="C", copy=True))
     return ref
 
 
@@ -160,6 +227,8 @@ def _reference(name, uplo, n, alpha, x, incx, A, lda):
     ref = A.clone()
     if TO_CPU:
         return _scipy_her(name, uplo, n, alpha, x, incx, ref)
+    if flag_blas.vendor_name == "hygon":
+        return _hipblas_her_reference(name, uplo, n, alpha, x, incx, ref, lda)
     return _cublas_her_reference(name, uplo, n, alpha, x, incx, ref, lda)
 
 
@@ -167,10 +236,10 @@ def _run_her(name, dtype, uplo, n, incx, seed):
     alpha, x, A = _make_her_inputs(dtype, n, incx, seed)
     ref = _reference(name, uplo, n, alpha, x, incx, A, n)
     if name == "cher":
-        flag_blas.ops.cher(uplo, n, alpha, x, incx, A, n)
+        flag_blas.cher(uplo, n, alpha, x, incx, A, n)
     else:
-        flag_blas.ops.zher(uplo, n, alpha, x, incx, A, n)
-    blas_assert_close(A, ref, dtype, reduce_dim=n)
+        flag_blas.zher(uplo, n, alpha, x, incx, A, n)
+    blas_assert_close(A, ref, dtype, reduce_dim=1)
 
 
 @pytest.mark.parametrize("n", HER_SIZES)
@@ -224,7 +293,7 @@ def test_her_padded_lda(name, dtype, alpha_dtype):
 
     getattr(flag_blas, name)(CUBLAS_FILL_MODE_LOWER, n, alpha, x, 1, A, lda)
 
-    blas_assert_close(A, ref, dtype, reduce_dim=n)
+    blas_assert_close(A, ref, dtype, reduce_dim=1)
 
 
 def test_her_n_zero_is_noop():
@@ -252,11 +321,11 @@ def test_zher_preserves_double_scalar_precision():
         1,
         A.clone(),
         n,
-    ).to(A.device)
+    )
 
     flag_blas.zher(CUBLAS_FILL_MODE_UPPER, n, alpha, x, 1, A, n)
 
-    torch.testing.assert_close(A, ref, rtol=2e-13, atol=2e-13)
+    blas_assert_close(A, ref, torch.complex128, reduce_dim=1)
 
 
 def test_her_rejects_noncontiguous_matrix():
@@ -301,5 +370,5 @@ def test_accuracy_her_balanced(
 
     getattr(flag_blas, name)(uplo, n, alpha, x, incx, A, lda)
 
-    blas_assert_close(A, ref, dtype, reduce_dim=n)
+    blas_assert_close(A, ref, dtype, reduce_dim=1)
     torch.testing.assert_close(x, x_before)

@@ -1,3 +1,17 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Ascend-specific complex64 TPMV kernel.
 
 The algorithm matches the public implementation while masking packed-matrix
@@ -9,11 +23,12 @@ import triton
 import triton.language as tl
 
 from flag_blas import runtime
-from flag_blas.ops.level2._constants import CUBLAS_DIAG_UNIT, CUBLAS_OP_C, CUBLAS_OP_N
+from flag_blas.ops.level2._constants import CUBLAS_DIAG_UNIT, CUBLAS_OP_N
 from flag_blas.ops.level2.tpmv import (
     _check_tpmv,
     _mode_key,
     _prune_tpmv_configs,
+    _row_major_tpmv_args,
     _stpmv_split_k,
     stpmv_kernel,
     stpmv_reduce_kernel,
@@ -40,6 +55,7 @@ def stpmv(
     if n == 0:
         return
     unit = 1 if diag == CUBLAS_DIAG_UNIT else 0
+    uplo, trans, conj = _row_major_tpmv_args(uplo, trans)
     trans_flag = 0 if trans == CUBLAS_OP_N else 1
     split_k = _stpmv_split_k(n)
 
@@ -498,8 +514,8 @@ def ctpmv(
     if n == 0:
         return
     unit = 1 if diag == CUBLAS_DIAG_UNIT else 0
+    uplo, trans, conj = _row_major_tpmv_args(uplo, trans)
     trans_flag = 0 if trans == CUBLAS_OP_N else 1
-    conj = 1 if trans == CUBLAS_OP_C else 0
     split_k = _ctpmv_split_k(n, trans_flag)
 
     with torch_device_fn.device(AP.device):

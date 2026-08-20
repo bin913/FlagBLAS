@@ -86,13 +86,33 @@ _CTBMV_T_CONFIGS = [
     triton.Config({"BLOCK_SIZE_M": 128, "BAND_TILE": 16}, num_warps=8, num_stages=2),
 ]
 
-_ZTBMV_CONFIGS = [
+_ZTBMV_N_CONFIGS = [
     triton.Config({"BLOCK_SIZE_M": 32, "BAND_TILE": 2}, num_warps=1, num_stages=1),
+    triton.Config({"BLOCK_SIZE_M": 64, "BAND_TILE": 2}, num_warps=1, num_stages=1),
     triton.Config({"BLOCK_SIZE_M": 32, "BAND_TILE": 4}, num_warps=1, num_stages=1),
     triton.Config({"BLOCK_SIZE_M": 64, "BAND_TILE": 8}, num_warps=1, num_stages=1),
     triton.Config({"BLOCK_SIZE_M": 16, "BAND_TILE": 16}, num_warps=2, num_stages=1),
     triton.Config({"BLOCK_SIZE_M": 32, "BAND_TILE": 16}, num_warps=2, num_stages=2),
+    triton.Config({"BLOCK_SIZE_M": 16, "BAND_TILE": 32}, num_warps=2, num_stages=1),
     triton.Config({"BLOCK_SIZE_M": 32, "BAND_TILE": 32}, num_warps=4, num_stages=2),
+    triton.Config({"BLOCK_SIZE_M": 16, "BAND_TILE": 64}, num_warps=4, num_stages=2),
+    triton.Config({"BLOCK_SIZE_M": 32, "BAND_TILE": 64}, num_warps=4, num_stages=2),
+    triton.Config({"BLOCK_SIZE_M": 64, "BAND_TILE": 16}, num_warps=8, num_stages=2),
+]
+
+_ZTBMV_T_CONFIGS = [
+    triton.Config({"BLOCK_SIZE_M": 32, "BAND_TILE": 2}, num_warps=1, num_stages=1),
+    triton.Config({"BLOCK_SIZE_M": 64, "BAND_TILE": 2}, num_warps=1, num_stages=1),
+    triton.Config({"BLOCK_SIZE_M": 128, "BAND_TILE": 2}, num_warps=1, num_stages=1),
+    triton.Config({"BLOCK_SIZE_M": 32, "BAND_TILE": 4}, num_warps=1, num_stages=1),
+    triton.Config({"BLOCK_SIZE_M": 64, "BAND_TILE": 4}, num_warps=1, num_stages=1),
+    triton.Config({"BLOCK_SIZE_M": 64, "BAND_TILE": 8}, num_warps=1, num_stages=1),
+    triton.Config({"BLOCK_SIZE_M": 16, "BAND_TILE": 16}, num_warps=2, num_stages=1),
+    triton.Config({"BLOCK_SIZE_M": 32, "BAND_TILE": 16}, num_warps=2, num_stages=2),
+    triton.Config({"BLOCK_SIZE_M": 16, "BAND_TILE": 32}, num_warps=2, num_stages=1),
+    triton.Config({"BLOCK_SIZE_M": 32, "BAND_TILE": 32}, num_warps=4, num_stages=2),
+    triton.Config({"BLOCK_SIZE_M": 16, "BAND_TILE": 64}, num_warps=4, num_stages=2),
+    triton.Config({"BLOCK_SIZE_M": 32, "BAND_TILE": 64}, num_warps=4, num_stages=2),
     triton.Config({"BLOCK_SIZE_M": 64, "BAND_TILE": 16}, num_warps=8, num_stages=2),
 ]
 
@@ -101,6 +121,13 @@ _TBMV_RESTORE = ["x_ptr"]
 _TBMV_SMALL_N = 256
 _TBMV_SMALL_K = 8
 _STBMV_SMALL_K = 48
+_CTBMV_SMALL_K = 32
+_CTBMV_NARROW_N = 1024
+_CTBMV_NARROW_K = 4
+_ZTBMV_TINY_N = 128
+_ZTBMV_SMALL_K = 32
+_ZTBMV_NARROW_N = 1024
+_ZTBMV_NARROW_K = 4
 
 
 def _tbmv_grid(n):
@@ -721,7 +748,7 @@ def ctbmv_t_kernel(
     tl.store(x_ptr + x_off_out + 1, acc_i, mask=row_mask)
 
 
-@triton.autotune(configs=_ZTBMV_CONFIGS, key=_TBMV_KEY, restore_value=_TBMV_RESTORE)
+@triton.autotune(configs=_ZTBMV_N_CONFIGS, key=_TBMV_KEY, restore_value=_TBMV_RESTORE)
 @triton.jit
 def ztbmv_n_kernel(
     a_ptr,
@@ -785,7 +812,7 @@ def ztbmv_n_kernel(
     tl.store(x_ptr + x_off_out + 1, acc_i, mask=row_mask)
 
 
-@triton.autotune(configs=_ZTBMV_CONFIGS, key=_TBMV_KEY, restore_value=_TBMV_RESTORE)
+@triton.autotune(configs=_ZTBMV_T_CONFIGS, key=_TBMV_KEY, restore_value=_TBMV_RESTORE)
 @triton.jit
 def ztbmv_t_kernel(
     a_ptr,
@@ -869,6 +896,16 @@ def _check_tbmv(A, x, uplo, trans, diag, n, k, lda, incx, complex_ok):
         assert A.numel() >= n * lda
 
 
+def _row_major_tbmv_args(uplo, trans):
+    physical_uplo = (
+        CUBLAS_FILL_MODE_LOWER
+        if uplo == CUBLAS_FILL_MODE_UPPER
+        else CUBLAS_FILL_MODE_UPPER
+    )
+    physical_trans = CUBLAS_OP_T if trans == CUBLAS_OP_N else CUBLAS_OP_N
+    return physical_uplo, physical_trans, int(trans == CUBLAS_OP_C)
+
+
 def _mode_key(uplo, trans, unit):
     return (uplo << 4) | (trans << 2) | unit
 
@@ -907,6 +944,7 @@ def stbmv(
     if n == 0:
         return
     unit = 1 if diag == CUBLAS_DIAG_UNIT else 0
+    uplo, trans, conj = _row_major_tbmv_args(uplo, trans)
     trans_flag = 0 if trans == CUBLAS_OP_N else 1
 
     with torch_device_fn.device(A.device):
@@ -961,6 +999,7 @@ def dtbmv(
     if n == 0:
         return
     unit = 1 if diag == CUBLAS_DIAG_UNIT else 0
+    uplo, trans, conj = _row_major_tbmv_args(uplo, trans)
     trans_flag = 0 if trans == CUBLAS_OP_N else 1
 
     with torch_device_fn.device(A.device):
@@ -1013,8 +1052,8 @@ def ctbmv(
     if n == 0:
         return
     unit = 1 if diag == CUBLAS_DIAG_UNIT else 0
+    uplo, trans, conj = _row_major_tbmv_args(uplo, trans)
     trans_flag = 0 if trans == CUBLAS_OP_N else 1
-    conj = 1 if trans == CUBLAS_OP_C else 0
 
     with torch_device_fn.device(A.device):
         if n <= _TBMV_SMALL_N and k <= _TBMV_SMALL_K:
@@ -1033,6 +1072,27 @@ def ctbmv(
                 CONJ=conj,
                 BLOCK_SIZE_N=_TBMV_SMALL_N,
                 BAND_TILE=_small_band_tile(k + 1),
+            )
+            return
+        if (n <= _TBMV_SMALL_N and k <= _CTBMV_SMALL_K) or (
+            n <= _CTBMV_NARROW_N and k <= _CTBMV_NARROW_K
+        ):
+            A_real = torch.view_as_real(A)
+            x_real = torch.view_as_real(x)
+            ctbmv_small_kernel[(1,)](
+                A_real,
+                x_real,
+                n,
+                k,
+                lda,
+                incx,
+                UPLO=uplo,
+                TRANS=trans_flag,
+                UNIT=unit,
+                CONJ=conj,
+                BLOCK_SIZE_N=triton.next_power_of_2(n),
+                BAND_TILE=_small_band_tile(k + 1),
+                num_warps=8,
             )
             return
         xin = x.as_strided((n,), (incx,)).clone()
@@ -1073,8 +1133,8 @@ def ztbmv(
     if n == 0:
         return
     unit = 1 if diag == CUBLAS_DIAG_UNIT else 0
+    uplo, trans, conj = _row_major_tbmv_args(uplo, trans)
     trans_flag = 0 if trans == CUBLAS_OP_N else 1
-    conj = 1 if trans == CUBLAS_OP_C else 0
 
     with torch_device_fn.device(A.device):
         if n <= _TBMV_SMALL_N and k <= _TBMV_SMALL_K:
@@ -1093,6 +1153,44 @@ def ztbmv(
                 CONJ=conj,
                 BLOCK_SIZE_N=_TBMV_SMALL_N,
                 BAND_TILE=_small_band_tile(k + 1),
+            )
+            return
+        if n <= _TBMV_SMALL_N and k <= _ZTBMV_SMALL_K:
+            A_real = torch.view_as_real(A)
+            x_real = torch.view_as_real(x)
+            ztbmv_small_kernel[(1,)](
+                A_real,
+                x_real,
+                n,
+                k,
+                lda,
+                incx,
+                UPLO=uplo,
+                TRANS=trans_flag,
+                UNIT=unit,
+                CONJ=conj,
+                BLOCK_SIZE_N=triton.next_power_of_2(n),
+                BAND_TILE=16 if n <= _ZTBMV_TINY_N else 8,
+                num_warps=8,
+            )
+            return
+        if n <= _ZTBMV_NARROW_N and k <= _ZTBMV_NARROW_K:
+            A_real = torch.view_as_real(A)
+            x_real = torch.view_as_real(x)
+            ztbmv_small_kernel[(1,)](
+                A_real,
+                x_real,
+                n,
+                k,
+                lda,
+                incx,
+                UPLO=uplo,
+                TRANS=trans_flag,
+                UNIT=unit,
+                CONJ=conj,
+                BLOCK_SIZE_N=triton.next_power_of_2(n),
+                BAND_TILE=4,
+                num_warps=8,
             )
             return
         xin = x.as_strided((n,), (incx,)).clone()

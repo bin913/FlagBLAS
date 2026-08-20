@@ -1,4 +1,18 @@
 # DEBUG: hygon 平台 symv 算子实现，当前处于调试（debug）阶段，尚未稳定收敛
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import copy
 
 import torch
@@ -11,6 +25,7 @@ from flag_blas.ops.level2.symv import (
     _check_common,
     _complex_scalars,
     _f64_to_i64,
+    _row_major_uplo,
     _strided_y,
 )
 from flag_blas.runtime import torch_device_fn
@@ -333,7 +348,7 @@ def csymv(
             lda,
             incx,
             incy,
-            UPLO=uplo,
+            UPLO=_row_major_uplo(uplo),
         )
 
 
@@ -384,7 +399,7 @@ def zsymv(
                 lda,
                 incx,
                 incy,
-                UPLO=uplo,
+                UPLO=_row_major_uplo(uplo),
                 BETA_IS_ZERO=br == 0.0 and bi == 0.0,
             )
             return
@@ -415,5 +430,5 @@ def zsymv(
             lda,
             incx,
             incy,
-            UPLO=uplo,
+            UPLO=_row_major_uplo(uplo),
         )

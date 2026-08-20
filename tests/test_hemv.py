@@ -62,6 +62,12 @@ class cuDoubleComplex(ctypes.Structure):
     _fields_ = [("x", ctypes.c_double), ("y", ctypes.c_double)]
 
 
+def row_to_column_full(A, n, lda):
+    column_A = torch.zeros((n, lda), dtype=A.dtype, device=A.device)
+    column_A[:, :n] = A[:n, :n].T
+    return column_A
+
+
 def hipblas_hemv_reference(uplo, n, alpha, A, lda, x, incx, beta, y, incy):
     if n == 0:
         return y
@@ -80,8 +86,9 @@ def hipblas_hemv_reference(uplo, n, alpha, A, lda, x, incx, beta, y, incy):
     else:
         raise ValueError(f"Unsupported dtype for hipBLAS HEMV: {A.dtype}")
 
+    column_A = row_to_column_full(A, n, lda)
     hip_uplo = 121 if uplo == CUBLAS_FILL_MODE_UPPER else 122
-    library, handle = get_hipblas_context(A)
+    library, handle = get_hipblas_context(column_A)
     function = getattr(library, symbol)
     function.argtypes = [
         ctypes.c_void_p,
@@ -103,7 +110,7 @@ def hipblas_hemv_reference(uplo, n, alpha, A, lda, x, incx, beta, y, incy):
             hip_uplo,
             n,
             ctypes.byref(alpha_value),
-            ctypes.c_void_p(A.data_ptr()),
+            ctypes.c_void_p(column_A.data_ptr()),
             lda,
             ctypes.c_void_p(x.data_ptr()),
             incx,
@@ -120,6 +127,7 @@ def cublas_hemv_reference(uplo, n, alpha, A, lda, x, incx, beta, y, incy):
     if n == 0:
         return
 
+    column_A = row_to_column_full(A, n, lda)
     handle = cp.cuda.device.get_cublas_handle()
     dtype = A.dtype
 
@@ -139,7 +147,7 @@ def cublas_hemv_reference(uplo, n, alpha, A, lda, x, incx, beta, y, incy):
         ctypes.c_int(uplo),
         ctypes.c_int(n),
         ctypes.byref(alpha_c),
-        ctypes.c_void_p(A.data_ptr()),
+        ctypes.c_void_p(column_A.data_ptr()),
         ctypes.c_int(lda),
         ctypes.c_void_p(x.data_ptr()),
         ctypes.c_int(incx),
@@ -163,7 +171,7 @@ def cpu_hemv_reference(uplo, n, alpha, A, lda, x, incx, beta, y, incy):
         ref_y = to_cpu_blas_tensor(y)
     yout = cpu_blas.zhemv(
         alpha,
-        ref_A[:n, :n].T.numpy(),
+        ref_A[:n, :n].numpy(),
         ref_x.numpy(),
         beta=beta,
         y=ref_y.numpy(),
@@ -452,7 +460,7 @@ def test_hemv_ignored_triangle(dtype, op, alpha, beta, uplo):
 
     tri_upper = torch.triu_indices(n, n, offset=1, device=flag_blas.device)
     tri_lower = torch.tril_indices(n, n, offset=-1, device=flag_blas.device)
-    dirty_index = tri_upper if uplo == CUBLAS_FILL_MODE_UPPER else tri_lower
+    dirty_index = tri_lower if uplo == CUBLAS_FILL_MODE_UPPER else tri_upper
     if flag_blas.vendor_name == "ascend" and dtype == torch.complex64:
         dirty_parts = torch.view_as_real(A_dirty)
         dirty_parts[dirty_index[0], dirty_index[1], 0] = float("nan")

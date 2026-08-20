@@ -592,6 +592,49 @@ SyrBenchmark:
   <<: *level2_dense_shapes
 HerBenchmark:
   <<: *level2_dense_shapes
+spr2_hpr2_shapes: &spr2_hpr2_shapes
+  shapes:
+    - [64]
+    - [127]
+    - [129]
+    - [191]
+    - [193]
+    - [255]
+    - [257]
+    - [383]
+    - [385]
+    - [511]
+    - [513]
+    - [767]
+    - [769]
+    - [1023]
+    - [1025]
+    - [1535]
+    - [1537]
+    - [2047]
+    - [2049]
+    - [2559]
+    - [2561]
+    - [3071]
+    - [3073]
+    - [3583]
+    - [3585]
+    - [4095]
+    - [4607]
+    - [4609]
+    - [5120]
+    - [5632]
+    - [6144]
+    - [7167]
+    - [7169]
+    - [8192]
+  shape_desc: "N"
+
+Hpr2Benchmark:
+  <<: *spr2_hpr2_shapes
+Spr2Benchmark:
+  <<: *spr2_hpr2_shapes
+
 # TBSV operations base shapes (N)
 # These shapes are used for stbsv benchmarks
 StbsvBenchmark:
