@@ -1,3 +1,4 @@
+import atexit
 import ctypes
 import ctypes.util
 from typing import Generator
@@ -16,6 +17,8 @@ from flag_blas.ops import (
     CUBLAS_OP_T,
 )
 from flag_blas.utils import shape_utils
+
+IS_HYGON = flag_blas.vendor_name == "hygon"
 
 TPSV_SIZES = [
     64,
@@ -56,14 +59,18 @@ def _load_cublas():
     raise RuntimeError("Unable to find libcublas.so")
 
 
-_cublas = _load_cublas()
+_cublas = None if IS_HYGON else _load_cublas()
 _cublas_handle = None
-_CUBLAS_TPSV_FUNCS = {
-    torch.float32: _cublas.cublasStpsv_v2,
-    torch.float64: _cublas.cublasDtpsv_v2,
-    torch.complex64: _cublas.cublasCtpsv_v2,
-    torch.complex128: _cublas.cublasZtpsv_v2,
-}
+_CUBLAS_TPSV_FUNCS = (
+    {}
+    if IS_HYGON
+    else {
+        torch.float32: _cublas.cublasStpsv_v2,
+        torch.float64: _cublas.cublasDtpsv_v2,
+        torch.complex64: _cublas.cublasCtpsv_v2,
+        torch.complex128: _cublas.cublasZtpsv_v2,
+    }
+)
 
 
 def _get_cublas_handle():
@@ -83,22 +90,118 @@ def _get_cublas_handle():
     return _cublas_handle
 
 
-def cublas_tpsv_baseline(AP, x, uplo, trans, diag, n, incx, handle, c_func, **kwargs):
-    if n == 0:
-        return x
-    status = c_func(
-        ctypes.c_void_p(handle),
-        ctypes.c_int(uplo),
-        ctypes.c_int(trans),
-        ctypes.c_int(diag),
-        ctypes.c_int(n),
-        ctypes.c_void_p(AP.data_ptr()),
-        ctypes.c_void_p(x.data_ptr()),
-        ctypes.c_int(incx),
-    )
+_HIPBLAS_LIBRARY = None
+_HIPBLAS_HANDLES = {}
+_HIPBLAS_TPSV_FUNCS = {
+    torch.float32: "hipblasStpsv",
+    torch.float64: "hipblasDtpsv",
+    torch.complex64: "hipblasCtpsv_v2",
+    torch.complex128: "hipblasZtpsv_v2",
+}
+
+
+def _check_hipblas_status(status, operation):
     if status != 0:
-        raise RuntimeError(f"cublasXtpsv_v2 failed with status code: {status}")
-    return x
+        raise RuntimeError(f"{operation} failed with hipBLAS status {status}")
+
+
+def _load_hipblas():
+    global _HIPBLAS_LIBRARY
+    if _HIPBLAS_LIBRARY is None:
+        library_name = ctypes.util.find_library("hipblas")
+        if library_name is None:
+            raise RuntimeError("Unable to find the hipBLAS shared library")
+        library = ctypes.CDLL(library_name)
+        library.hipblasCreate.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
+        library.hipblasCreate.restype = ctypes.c_int
+        library.hipblasDestroy.argtypes = [ctypes.c_void_p]
+        library.hipblasDestroy.restype = ctypes.c_int
+        library.hipblasSetStream.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        library.hipblasSetStream.restype = ctypes.c_int
+        library.hipblasSetPointerMode.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        library.hipblasSetPointerMode.restype = ctypes.c_int
+        _HIPBLAS_LIBRARY = library
+    return _HIPBLAS_LIBRARY
+
+
+def _prepare_hipblas(device):
+    library = _load_hipblas()
+    torch_device = torch.device(device)
+    device_index = torch_device.index
+    if device_index is None:
+        device_index = torch.cuda.current_device()
+    handle = _HIPBLAS_HANDLES.get(device_index)
+    if handle is None:
+        with torch.cuda.device(device_index):
+            handle = ctypes.c_void_p()
+            _check_hipblas_status(
+                library.hipblasCreate(ctypes.byref(handle)), "hipblasCreate"
+            )
+            _check_hipblas_status(
+                library.hipblasSetPointerMode(handle, 0), "hipblasSetPointerMode"
+            )
+        _HIPBLAS_HANDLES[device_index] = handle
+    stream = torch.cuda.current_stream(device).cuda_stream
+    _check_hipblas_status(
+        library.hipblasSetStream(handle, ctypes.c_void_p(stream)),
+        "hipblasSetStream",
+    )
+    return library, handle
+
+
+def _resolve_hipblas_tpsv(library, dtype):
+    function = getattr(library, _HIPBLAS_TPSV_FUNCS[dtype])
+    function.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_int,
+    ]
+    function.restype = ctypes.c_int
+    return function
+
+
+def _destroy_hipblas_handles():
+    if _HIPBLAS_LIBRARY is None:
+        return
+    for handle in tuple(_HIPBLAS_HANDLES.values()):
+        try:
+            _HIPBLAS_LIBRARY.hipblasDestroy(handle)
+        except Exception:
+            pass
+    _HIPBLAS_HANDLES.clear()
+
+
+if IS_HYGON:
+    atexit.register(_destroy_hipblas_handles)
+
+
+def cublas_tpsv_baseline(
+    AP,
+    x,
+    uplo,
+    trans,
+    diag,
+    n,
+    incx,
+    handle,
+    c_func,
+    reference_x,
+    reference_result,
+    **kwargs,
+):
+    if n == 0:
+        return reference_result
+    status = c_func(*kwargs["vendor_args"])
+    if IS_HYGON:
+        _check_hipblas_status(status, "hipBLAS TPSV")
+    elif status != 0:
+        raise RuntimeError(f"cuBLAS TPSV failed with status code: {status}")
+    return reference_result
 
 
 def _gems_wrapper(op):
@@ -117,23 +220,21 @@ GEMS_TPSV_WRAPPERS = {
 }
 
 
-def _pack_triangular(A, uplo):
-    n = A.shape[0]
-    values = []
-    for col in range(n):
-        rows = range(col + 1) if uplo == CUBLAS_FILL_MODE_UPPER else range(col, n)
-        values.extend(A[row, col] for row in rows)
-    return torch.stack(values).contiguous()
+def _row_major_diag_offsets(n, uplo, device):
+    rows = torch.arange(n, dtype=torch.int64, device=device)
+    if uplo == CUBLAS_FILL_MODE_UPPER:
+        return rows * n - rows * (rows - 1) // 2
+    return rows * (rows + 3) // 2
 
 
 def _make_case(n, dtype, uplo, diag, device):
-    A = torch.randn((n, n), dtype=dtype, device=device) * 0.02
-    A = torch.triu(A) if uplo == CUBLAS_FILL_MODE_UPPER else torch.tril(A)
+    AP = torch.randn(n * (n + 1) // 2, dtype=dtype, device=device) * 0.02
     if diag == CUBLAS_DIAG_NON_UNIT:
-        idx = torch.arange(n, device=device)
-        A[idx, idx] += (2.0 + 0.25j) if dtype.is_complex else 2.0
+        AP[_row_major_diag_offsets(n, uplo, device)] = (
+            (2.0 + 0.25j) if dtype.is_complex else 2.0
+        )
     x = torch.randn(n, dtype=dtype, device=device)
-    return _pack_triangular(A, uplo), x.contiguous()
+    return AP.contiguous(), x.contiguous()
 
 
 class TpsvBenchmark(Benchmark):
@@ -161,12 +262,50 @@ class TpsvBenchmark(Benchmark):
         return None
 
     def get_input_iter(self, cur_dtype) -> Generator:
-        handle = _get_cublas_handle()
-        c_func = _CUBLAS_TPSV_FUNCS[cur_dtype]
+        if IS_HYGON:
+            library, handle = _prepare_hipblas(self.device)
+            c_func = _resolve_hipblas_tpsv(library, cur_dtype)
+        else:
+            handle = _get_cublas_handle()
+            c_func = _CUBLAS_TPSV_FUNCS[cur_dtype]
         for shape in self.shapes:
             n = shape[0]
             AP, x = _make_case(n, cur_dtype, self.uplo, self.diag, self.device)
-            yield AP, x, {
+            reference_uplo = (
+                CUBLAS_FILL_MODE_LOWER
+                if self.uplo == CUBLAS_FILL_MODE_UPPER
+                else CUBLAS_FILL_MODE_UPPER
+            )
+            reference_trans = CUBLAS_OP_T if self.trans == CUBLAS_OP_N else CUBLAS_OP_N
+            reference_x = x.clone()
+            if self.trans == CUBLAS_OP_C:
+                reference_x.copy_(reference_x.conj())
+                reference_result = reference_x.conj()
+            else:
+                reference_result = reference_x
+            if IS_HYGON:
+                vendor_args = (
+                    handle,
+                    121 if reference_uplo == CUBLAS_FILL_MODE_UPPER else 122,
+                    111 + reference_trans,
+                    131 + self.diag,
+                    n,
+                    ctypes.c_void_p(AP.data_ptr()),
+                    ctypes.c_void_p(reference_x.data_ptr()),
+                    1,
+                )
+            else:
+                vendor_args = (
+                    ctypes.c_void_p(handle),
+                    ctypes.c_int(reference_uplo),
+                    ctypes.c_int(reference_trans),
+                    ctypes.c_int(self.diag),
+                    ctypes.c_int(n),
+                    ctypes.c_void_p(AP.data_ptr()),
+                    ctypes.c_void_p(reference_x.data_ptr()),
+                    ctypes.c_int(1),
+                )
+            yield AP, x.clone(), {
                 "uplo": self.uplo,
                 "trans": self.trans,
                 "diag": self.diag,
@@ -174,10 +313,31 @@ class TpsvBenchmark(Benchmark):
                 "incx": 1,
                 "handle": handle,
                 "c_func": c_func,
+                "reference_x": reference_x,
+                "reference_result": reference_result,
+                "vendor_args": vendor_args,
             }
 
     def get_correctness_reduce_dim(self, args, kwargs):
         return max(1, kwargs["n"])
+
+    def clone_correctness_inputs(self, args, kwargs):
+        AP, x = args
+        reference_x = x.clone()
+        if kwargs["trans"] == CUBLAS_OP_C:
+            reference_x.copy_(reference_x.conj())
+            reference_result = reference_x.conj()
+        else:
+            reference_result = reference_x
+        ref_kwargs = kwargs.copy()
+        ref_kwargs.update(
+            reference_x=reference_x,
+            reference_result=reference_result,
+        )
+        vendor_args = list(kwargs["vendor_args"])
+        vendor_args[6] = ctypes.c_void_p(reference_x.data_ptr())
+        ref_kwargs["vendor_args"] = tuple(vendor_args)
+        return (AP, x.clone()), ref_kwargs, (AP, x.clone()), kwargs
 
     def get_tflops(self, op, *args, **kwargs):
         n = kwargs.get("n", 0)

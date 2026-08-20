@@ -731,6 +731,7 @@ def _complex_tpsv_kernel(
     AP,
     x,
     incx: tl.constexpr,
+    CONJ: tl.constexpr,
 ):
     if trans == 0:
         if uplo == 1:
@@ -743,6 +744,8 @@ def _complex_tpsv_kernel(
                     a_off = 2 * _tpsv_packed_offset(jj, kk, n, uplo)
                     ar = tl.load(AP + a_off)
                     ai = tl.load(AP + a_off + 1)
+                    if CONJ:
+                        ai = -ai
                     br = tl.load(x + 2 * kk * incx)
                     bi = tl.load(x + 2 * kk * incx + 1)
                     xr -= ar * br - ai * bi
@@ -752,6 +755,8 @@ def _complex_tpsv_kernel(
                     a_diag = 2 * _tpsv_packed_offset(jj, jj, n, uplo)
                     ar = tl.load(AP + a_diag)
                     ai = tl.load(AP + a_diag + 1)
+                    if CONJ:
+                        ai = -ai
                     den = ar * ar + ai * ai
                     nr = xr * ar + xi * ai
                     ni = xi * ar - xr * ai
@@ -770,6 +775,8 @@ def _complex_tpsv_kernel(
                     a_off = 2 * _tpsv_packed_offset(jj, kk, n, uplo)
                     ar = tl.load(AP + a_off)
                     ai = tl.load(AP + a_off + 1)
+                    if CONJ:
+                        ai = -ai
                     br = tl.load(x + 2 * kk * incx)
                     bi = tl.load(x + 2 * kk * incx + 1)
                     xr -= ar * br - ai * bi
@@ -779,6 +786,8 @@ def _complex_tpsv_kernel(
                     a_diag = 2 * _tpsv_packed_offset(jj, jj, n, uplo)
                     ar = tl.load(AP + a_diag)
                     ai = tl.load(AP + a_diag + 1)
+                    if CONJ:
+                        ai = -ai
                     den = ar * ar + ai * ai
                     nr = xr * ar + xi * ai
                     ni = xi * ar - xr * ai
@@ -798,7 +807,7 @@ def _complex_tpsv_kernel(
                     a_off = 2 * _tpsv_packed_offset(kk, jj, n, uplo)
                     ar = tl.load(AP + a_off)
                     ai = tl.load(AP + a_off + 1)
-                    if trans == 2:
+                    if CONJ:
                         ai = -ai
                     br = tl.load(x + 2 * kk * incx)
                     bi = tl.load(x + 2 * kk * incx + 1)
@@ -809,7 +818,7 @@ def _complex_tpsv_kernel(
                     a_diag = 2 * _tpsv_packed_offset(jj, jj, n, uplo)
                     ar = tl.load(AP + a_diag)
                     ai = tl.load(AP + a_diag + 1)
-                    if trans == 2:
+                    if CONJ:
                         ai = -ai
                     den = ar * ar + ai * ai
                     nr = xr * ar + xi * ai
@@ -829,7 +838,7 @@ def _complex_tpsv_kernel(
                     a_off = 2 * _tpsv_packed_offset(kk, jj, n, uplo)
                     ar = tl.load(AP + a_off)
                     ai = tl.load(AP + a_off + 1)
-                    if trans == 2:
+                    if CONJ:
                         ai = -ai
                     br = tl.load(x + 2 * kk * incx)
                     bi = tl.load(x + 2 * kk * incx + 1)
@@ -840,7 +849,7 @@ def _complex_tpsv_kernel(
                     a_diag = 2 * _tpsv_packed_offset(jj, jj, n, uplo)
                     ar = tl.load(AP + a_diag)
                     ai = tl.load(AP + a_diag + 1)
-                    if trans == 2:
+                    if CONJ:
                         ai = -ai
                     den = ar * ar + ai * ai
                     nr = xr * ar + xi * ai
@@ -865,11 +874,22 @@ def _check_common(uplo, trans, diag, n, AP, x, incx):
     assert x.numel() >= 1 + (n - 1) * incx if n > 0 else True
 
 
+def _row_major_tpsv_args(uplo, trans):
+    physical_uplo = (
+        CUBLAS_FILL_MODE_LOWER
+        if uplo == CUBLAS_FILL_MODE_UPPER
+        else CUBLAS_FILL_MODE_UPPER
+    )
+    physical_trans = CUBLAS_OP_T if trans == CUBLAS_OP_N else CUBLAS_OP_N
+    return physical_uplo, physical_trans, int(trans == CUBLAS_OP_C)
+
+
 def _real_tpsv(uplo, trans, diag, n, AP, x, incx, dtype):
     _check_common(uplo, trans, diag, n, AP, x, incx)
     assert AP.dtype is dtype and x.dtype is dtype
     if n == 0:
         return x
+    uplo, trans, _ = _row_major_tpsv_args(uplo, trans)
     with torch_device_fn.device(AP.device):
         if (
             incx == 1
@@ -943,6 +963,7 @@ def _complex_tpsv(uplo, trans, diag, n, AP, x, incx, dtype):
     assert AP.dtype is dtype and x.dtype is dtype
     if n == 0:
         return x
+    uplo, trans, conj = _row_major_tpsv_args(uplo, trans)
     AP_real = torch.view_as_real(AP)
     x_real = torch.view_as_real(x)
     with torch_device_fn.device(AP.device):
@@ -968,7 +989,7 @@ def _complex_tpsv(uplo, trans, diag, n, AP, x, incx, dtype):
                 UPLO=uplo,
                 TRANS=trans_flag,
                 UNIT=int(diag == CUBLAS_DIAG_UNIT),
-                CONJ=int(trans == CUBLAS_OP_C),
+                CONJ=conj,
                 LOWER_EFF=lower_eff,
                 FORWARD=forward,
                 IS_DOUBLE=dtype == torch.complex128,
@@ -977,7 +998,16 @@ def _complex_tpsv(uplo, trans, diag, n, AP, x, incx, dtype):
                 num_warps=num_warps,
             )
         else:
-            _complex_tpsv_kernel[(1,)](uplo, trans, diag, n, AP_real, x_real, incx)
+            _complex_tpsv_kernel[(1,)](
+                uplo,
+                trans,
+                diag,
+                n,
+                AP_real,
+                x_real,
+                incx,
+                CONJ=conj,
+            )
     return x
 
 
