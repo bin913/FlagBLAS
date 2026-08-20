@@ -1,3 +1,17 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import logging
 from typing import Union
 
@@ -27,7 +41,7 @@ _TRSV_KEY = ["n", "mode_key"]
 _TRSV_RESTORE = ["x_ptr", "flag_ptr"]
 
 _STRSV_INV_MIN_N = 256
-_STRSV_INV_BB64_MIN_N = 2048
+_STRSV_INV_BB64_MIN_N = 4096
 _STRSV_FUSE_MAX_N = 512
 _DTRSV_INV_BB64_MIN_N = 1 << 30
 _DTRSV_FUSE_MAX_N = 8192
@@ -485,7 +499,16 @@ def dtrsv_lu_neu64_kernel(
 
 
 @triton.jit
-def ctrsv_lu256_scalar_kernel(a_ptr, x_ptr, flag_ptr, CHUNK: tl.constexpr):
+def _ctrsv_scalar_offset(row, col, LDA, TRANS: tl.constexpr):
+    if TRANS == 0:
+        return row + col * LDA
+    return col + row * LDA
+
+
+@triton.jit
+def ctrsv_lu_scalar_kernel(
+    a_ptr, x_ptr, flag_ptr, LDA, TRANS: tl.constexpr, CHUNK: tl.constexpr
+):
     BLOCK_N: tl.constexpr = 32
     G: tl.constexpr = 16
     pid = tl.program_id(0)
@@ -503,7 +526,9 @@ def ctrsv_lu256_scalar_kernel(a_ptr, x_ptr, flag_ptr, CHUNK: tl.constexpr):
     accr = tl.where(goffs == 1, 1.0, 0.0)
     acci = tl.zeros((G,), tl.float32)
     m = tl.load(
-        a_ptr + ((row_start + 1) + (row_start + 0) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 1, row_start + 0, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
@@ -514,14 +539,18 @@ def ctrsv_lu256_scalar_kernel(a_ptr, x_ptr, flag_ptr, CHUNK: tl.constexpr):
     accr = tl.where(goffs == 2, 1.0, 0.0)
     acci = tl.zeros((G,), tl.float32)
     m = tl.load(
-        a_ptr + ((row_start + 2) + (row_start + 0) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 2, row_start + 0, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_0 - li * xi_0_0
     acci -= lr * xi_0_0 + li * xr_0_0
     m = tl.load(
-        a_ptr + ((row_start + 2) + (row_start + 1) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 2, row_start + 1, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
@@ -532,21 +561,27 @@ def ctrsv_lu256_scalar_kernel(a_ptr, x_ptr, flag_ptr, CHUNK: tl.constexpr):
     accr = tl.where(goffs == 3, 1.0, 0.0)
     acci = tl.zeros((G,), tl.float32)
     m = tl.load(
-        a_ptr + ((row_start + 3) + (row_start + 0) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 3, row_start + 0, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_0 - li * xi_0_0
     acci -= lr * xi_0_0 + li * xr_0_0
     m = tl.load(
-        a_ptr + ((row_start + 3) + (row_start + 1) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 3, row_start + 1, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_1 - li * xi_0_1
     acci -= lr * xi_0_1 + li * xr_0_1
     m = tl.load(
-        a_ptr + ((row_start + 3) + (row_start + 2) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 3, row_start + 2, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
@@ -557,28 +592,36 @@ def ctrsv_lu256_scalar_kernel(a_ptr, x_ptr, flag_ptr, CHUNK: tl.constexpr):
     accr = tl.where(goffs == 4, 1.0, 0.0)
     acci = tl.zeros((G,), tl.float32)
     m = tl.load(
-        a_ptr + ((row_start + 4) + (row_start + 0) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 4, row_start + 0, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_0 - li * xi_0_0
     acci -= lr * xi_0_0 + li * xr_0_0
     m = tl.load(
-        a_ptr + ((row_start + 4) + (row_start + 1) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 4, row_start + 1, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_1 - li * xi_0_1
     acci -= lr * xi_0_1 + li * xr_0_1
     m = tl.load(
-        a_ptr + ((row_start + 4) + (row_start + 2) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 4, row_start + 2, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_2 - li * xi_0_2
     acci -= lr * xi_0_2 + li * xr_0_2
     m = tl.load(
-        a_ptr + ((row_start + 4) + (row_start + 3) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 4, row_start + 3, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
@@ -589,35 +632,45 @@ def ctrsv_lu256_scalar_kernel(a_ptr, x_ptr, flag_ptr, CHUNK: tl.constexpr):
     accr = tl.where(goffs == 5, 1.0, 0.0)
     acci = tl.zeros((G,), tl.float32)
     m = tl.load(
-        a_ptr + ((row_start + 5) + (row_start + 0) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 5, row_start + 0, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_0 - li * xi_0_0
     acci -= lr * xi_0_0 + li * xr_0_0
     m = tl.load(
-        a_ptr + ((row_start + 5) + (row_start + 1) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 5, row_start + 1, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_1 - li * xi_0_1
     acci -= lr * xi_0_1 + li * xr_0_1
     m = tl.load(
-        a_ptr + ((row_start + 5) + (row_start + 2) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 5, row_start + 2, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_2 - li * xi_0_2
     acci -= lr * xi_0_2 + li * xr_0_2
     m = tl.load(
-        a_ptr + ((row_start + 5) + (row_start + 3) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 5, row_start + 3, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_3 - li * xi_0_3
     acci -= lr * xi_0_3 + li * xr_0_3
     m = tl.load(
-        a_ptr + ((row_start + 5) + (row_start + 4) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 5, row_start + 4, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
@@ -628,42 +681,54 @@ def ctrsv_lu256_scalar_kernel(a_ptr, x_ptr, flag_ptr, CHUNK: tl.constexpr):
     accr = tl.where(goffs == 6, 1.0, 0.0)
     acci = tl.zeros((G,), tl.float32)
     m = tl.load(
-        a_ptr + ((row_start + 6) + (row_start + 0) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 6, row_start + 0, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_0 - li * xi_0_0
     acci -= lr * xi_0_0 + li * xr_0_0
     m = tl.load(
-        a_ptr + ((row_start + 6) + (row_start + 1) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 6, row_start + 1, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_1 - li * xi_0_1
     acci -= lr * xi_0_1 + li * xr_0_1
     m = tl.load(
-        a_ptr + ((row_start + 6) + (row_start + 2) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 6, row_start + 2, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_2 - li * xi_0_2
     acci -= lr * xi_0_2 + li * xr_0_2
     m = tl.load(
-        a_ptr + ((row_start + 6) + (row_start + 3) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 6, row_start + 3, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_3 - li * xi_0_3
     acci -= lr * xi_0_3 + li * xr_0_3
     m = tl.load(
-        a_ptr + ((row_start + 6) + (row_start + 4) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 6, row_start + 4, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_4 - li * xi_0_4
     acci -= lr * xi_0_4 + li * xr_0_4
     m = tl.load(
-        a_ptr + ((row_start + 6) + (row_start + 5) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 6, row_start + 5, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
@@ -674,49 +739,63 @@ def ctrsv_lu256_scalar_kernel(a_ptr, x_ptr, flag_ptr, CHUNK: tl.constexpr):
     accr = tl.where(goffs == 7, 1.0, 0.0)
     acci = tl.zeros((G,), tl.float32)
     m = tl.load(
-        a_ptr + ((row_start + 7) + (row_start + 0) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 7, row_start + 0, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_0 - li * xi_0_0
     acci -= lr * xi_0_0 + li * xr_0_0
     m = tl.load(
-        a_ptr + ((row_start + 7) + (row_start + 1) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 7, row_start + 1, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_1 - li * xi_0_1
     acci -= lr * xi_0_1 + li * xr_0_1
     m = tl.load(
-        a_ptr + ((row_start + 7) + (row_start + 2) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 7, row_start + 2, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_2 - li * xi_0_2
     acci -= lr * xi_0_2 + li * xr_0_2
     m = tl.load(
-        a_ptr + ((row_start + 7) + (row_start + 3) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 7, row_start + 3, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_3 - li * xi_0_3
     acci -= lr * xi_0_3 + li * xr_0_3
     m = tl.load(
-        a_ptr + ((row_start + 7) + (row_start + 4) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 7, row_start + 4, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_4 - li * xi_0_4
     acci -= lr * xi_0_4 + li * xr_0_4
     m = tl.load(
-        a_ptr + ((row_start + 7) + (row_start + 5) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 7, row_start + 5, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_5 - li * xi_0_5
     acci -= lr * xi_0_5 + li * xr_0_5
     m = tl.load(
-        a_ptr + ((row_start + 7) + (row_start + 6) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 7, row_start + 6, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
@@ -727,56 +806,72 @@ def ctrsv_lu256_scalar_kernel(a_ptr, x_ptr, flag_ptr, CHUNK: tl.constexpr):
     accr = tl.where(goffs == 8, 1.0, 0.0)
     acci = tl.zeros((G,), tl.float32)
     m = tl.load(
-        a_ptr + ((row_start + 8) + (row_start + 0) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 8, row_start + 0, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_0 - li * xi_0_0
     acci -= lr * xi_0_0 + li * xr_0_0
     m = tl.load(
-        a_ptr + ((row_start + 8) + (row_start + 1) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 8, row_start + 1, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_1 - li * xi_0_1
     acci -= lr * xi_0_1 + li * xr_0_1
     m = tl.load(
-        a_ptr + ((row_start + 8) + (row_start + 2) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 8, row_start + 2, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_2 - li * xi_0_2
     acci -= lr * xi_0_2 + li * xr_0_2
     m = tl.load(
-        a_ptr + ((row_start + 8) + (row_start + 3) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 8, row_start + 3, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_3 - li * xi_0_3
     acci -= lr * xi_0_3 + li * xr_0_3
     m = tl.load(
-        a_ptr + ((row_start + 8) + (row_start + 4) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 8, row_start + 4, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_4 - li * xi_0_4
     acci -= lr * xi_0_4 + li * xr_0_4
     m = tl.load(
-        a_ptr + ((row_start + 8) + (row_start + 5) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 8, row_start + 5, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_5 - li * xi_0_5
     acci -= lr * xi_0_5 + li * xr_0_5
     m = tl.load(
-        a_ptr + ((row_start + 8) + (row_start + 6) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 8, row_start + 6, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_6 - li * xi_0_6
     acci -= lr * xi_0_6 + li * xr_0_6
     m = tl.load(
-        a_ptr + ((row_start + 8) + (row_start + 7) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 8, row_start + 7, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
@@ -787,63 +882,81 @@ def ctrsv_lu256_scalar_kernel(a_ptr, x_ptr, flag_ptr, CHUNK: tl.constexpr):
     accr = tl.where(goffs == 9, 1.0, 0.0)
     acci = tl.zeros((G,), tl.float32)
     m = tl.load(
-        a_ptr + ((row_start + 9) + (row_start + 0) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 9, row_start + 0, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_0 - li * xi_0_0
     acci -= lr * xi_0_0 + li * xr_0_0
     m = tl.load(
-        a_ptr + ((row_start + 9) + (row_start + 1) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 9, row_start + 1, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_1 - li * xi_0_1
     acci -= lr * xi_0_1 + li * xr_0_1
     m = tl.load(
-        a_ptr + ((row_start + 9) + (row_start + 2) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 9, row_start + 2, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_2 - li * xi_0_2
     acci -= lr * xi_0_2 + li * xr_0_2
     m = tl.load(
-        a_ptr + ((row_start + 9) + (row_start + 3) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 9, row_start + 3, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_3 - li * xi_0_3
     acci -= lr * xi_0_3 + li * xr_0_3
     m = tl.load(
-        a_ptr + ((row_start + 9) + (row_start + 4) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 9, row_start + 4, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_4 - li * xi_0_4
     acci -= lr * xi_0_4 + li * xr_0_4
     m = tl.load(
-        a_ptr + ((row_start + 9) + (row_start + 5) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 9, row_start + 5, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_5 - li * xi_0_5
     acci -= lr * xi_0_5 + li * xr_0_5
     m = tl.load(
-        a_ptr + ((row_start + 9) + (row_start + 6) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 9, row_start + 6, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_6 - li * xi_0_6
     acci -= lr * xi_0_6 + li * xr_0_6
     m = tl.load(
-        a_ptr + ((row_start + 9) + (row_start + 7) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 9, row_start + 7, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_7 - li * xi_0_7
     acci -= lr * xi_0_7 + li * xr_0_7
     m = tl.load(
-        a_ptr + ((row_start + 9) + (row_start + 8) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 9, row_start + 8, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
@@ -854,70 +967,90 @@ def ctrsv_lu256_scalar_kernel(a_ptr, x_ptr, flag_ptr, CHUNK: tl.constexpr):
     accr = tl.where(goffs == 10, 1.0, 0.0)
     acci = tl.zeros((G,), tl.float32)
     m = tl.load(
-        a_ptr + ((row_start + 10) + (row_start + 0) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 10, row_start + 0, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_0 - li * xi_0_0
     acci -= lr * xi_0_0 + li * xr_0_0
     m = tl.load(
-        a_ptr + ((row_start + 10) + (row_start + 1) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 10, row_start + 1, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_1 - li * xi_0_1
     acci -= lr * xi_0_1 + li * xr_0_1
     m = tl.load(
-        a_ptr + ((row_start + 10) + (row_start + 2) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 10, row_start + 2, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_2 - li * xi_0_2
     acci -= lr * xi_0_2 + li * xr_0_2
     m = tl.load(
-        a_ptr + ((row_start + 10) + (row_start + 3) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 10, row_start + 3, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_3 - li * xi_0_3
     acci -= lr * xi_0_3 + li * xr_0_3
     m = tl.load(
-        a_ptr + ((row_start + 10) + (row_start + 4) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 10, row_start + 4, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_4 - li * xi_0_4
     acci -= lr * xi_0_4 + li * xr_0_4
     m = tl.load(
-        a_ptr + ((row_start + 10) + (row_start + 5) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 10, row_start + 5, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_5 - li * xi_0_5
     acci -= lr * xi_0_5 + li * xr_0_5
     m = tl.load(
-        a_ptr + ((row_start + 10) + (row_start + 6) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 10, row_start + 6, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_6 - li * xi_0_6
     acci -= lr * xi_0_6 + li * xr_0_6
     m = tl.load(
-        a_ptr + ((row_start + 10) + (row_start + 7) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 10, row_start + 7, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_7 - li * xi_0_7
     acci -= lr * xi_0_7 + li * xr_0_7
     m = tl.load(
-        a_ptr + ((row_start + 10) + (row_start + 8) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 10, row_start + 8, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_8 - li * xi_0_8
     acci -= lr * xi_0_8 + li * xr_0_8
     m = tl.load(
-        a_ptr + ((row_start + 10) + (row_start + 9) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 10, row_start + 9, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
@@ -928,77 +1061,99 @@ def ctrsv_lu256_scalar_kernel(a_ptr, x_ptr, flag_ptr, CHUNK: tl.constexpr):
     accr = tl.where(goffs == 11, 1.0, 0.0)
     acci = tl.zeros((G,), tl.float32)
     m = tl.load(
-        a_ptr + ((row_start + 11) + (row_start + 0) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 11, row_start + 0, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_0 - li * xi_0_0
     acci -= lr * xi_0_0 + li * xr_0_0
     m = tl.load(
-        a_ptr + ((row_start + 11) + (row_start + 1) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 11, row_start + 1, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_1 - li * xi_0_1
     acci -= lr * xi_0_1 + li * xr_0_1
     m = tl.load(
-        a_ptr + ((row_start + 11) + (row_start + 2) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 11, row_start + 2, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_2 - li * xi_0_2
     acci -= lr * xi_0_2 + li * xr_0_2
     m = tl.load(
-        a_ptr + ((row_start + 11) + (row_start + 3) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 11, row_start + 3, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_3 - li * xi_0_3
     acci -= lr * xi_0_3 + li * xr_0_3
     m = tl.load(
-        a_ptr + ((row_start + 11) + (row_start + 4) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 11, row_start + 4, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_4 - li * xi_0_4
     acci -= lr * xi_0_4 + li * xr_0_4
     m = tl.load(
-        a_ptr + ((row_start + 11) + (row_start + 5) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 11, row_start + 5, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_5 - li * xi_0_5
     acci -= lr * xi_0_5 + li * xr_0_5
     m = tl.load(
-        a_ptr + ((row_start + 11) + (row_start + 6) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 11, row_start + 6, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_6 - li * xi_0_6
     acci -= lr * xi_0_6 + li * xr_0_6
     m = tl.load(
-        a_ptr + ((row_start + 11) + (row_start + 7) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 11, row_start + 7, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_7 - li * xi_0_7
     acci -= lr * xi_0_7 + li * xr_0_7
     m = tl.load(
-        a_ptr + ((row_start + 11) + (row_start + 8) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 11, row_start + 8, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_8 - li * xi_0_8
     acci -= lr * xi_0_8 + li * xr_0_8
     m = tl.load(
-        a_ptr + ((row_start + 11) + (row_start + 9) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 11, row_start + 9, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_9 - li * xi_0_9
     acci -= lr * xi_0_9 + li * xr_0_9
     m = tl.load(
-        a_ptr + ((row_start + 11) + (row_start + 10) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 11, row_start + 10, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
@@ -1009,84 +1164,108 @@ def ctrsv_lu256_scalar_kernel(a_ptr, x_ptr, flag_ptr, CHUNK: tl.constexpr):
     accr = tl.where(goffs == 12, 1.0, 0.0)
     acci = tl.zeros((G,), tl.float32)
     m = tl.load(
-        a_ptr + ((row_start + 12) + (row_start + 0) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 12, row_start + 0, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_0 - li * xi_0_0
     acci -= lr * xi_0_0 + li * xr_0_0
     m = tl.load(
-        a_ptr + ((row_start + 12) + (row_start + 1) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 12, row_start + 1, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_1 - li * xi_0_1
     acci -= lr * xi_0_1 + li * xr_0_1
     m = tl.load(
-        a_ptr + ((row_start + 12) + (row_start + 2) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 12, row_start + 2, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_2 - li * xi_0_2
     acci -= lr * xi_0_2 + li * xr_0_2
     m = tl.load(
-        a_ptr + ((row_start + 12) + (row_start + 3) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 12, row_start + 3, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_3 - li * xi_0_3
     acci -= lr * xi_0_3 + li * xr_0_3
     m = tl.load(
-        a_ptr + ((row_start + 12) + (row_start + 4) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 12, row_start + 4, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_4 - li * xi_0_4
     acci -= lr * xi_0_4 + li * xr_0_4
     m = tl.load(
-        a_ptr + ((row_start + 12) + (row_start + 5) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 12, row_start + 5, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_5 - li * xi_0_5
     acci -= lr * xi_0_5 + li * xr_0_5
     m = tl.load(
-        a_ptr + ((row_start + 12) + (row_start + 6) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 12, row_start + 6, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_6 - li * xi_0_6
     acci -= lr * xi_0_6 + li * xr_0_6
     m = tl.load(
-        a_ptr + ((row_start + 12) + (row_start + 7) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 12, row_start + 7, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_7 - li * xi_0_7
     acci -= lr * xi_0_7 + li * xr_0_7
     m = tl.load(
-        a_ptr + ((row_start + 12) + (row_start + 8) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 12, row_start + 8, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_8 - li * xi_0_8
     acci -= lr * xi_0_8 + li * xr_0_8
     m = tl.load(
-        a_ptr + ((row_start + 12) + (row_start + 9) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 12, row_start + 9, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_9 - li * xi_0_9
     acci -= lr * xi_0_9 + li * xr_0_9
     m = tl.load(
-        a_ptr + ((row_start + 12) + (row_start + 10) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 12, row_start + 10, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_10 - li * xi_0_10
     acci -= lr * xi_0_10 + li * xr_0_10
     m = tl.load(
-        a_ptr + ((row_start + 12) + (row_start + 11) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 12, row_start + 11, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
@@ -1097,91 +1276,117 @@ def ctrsv_lu256_scalar_kernel(a_ptr, x_ptr, flag_ptr, CHUNK: tl.constexpr):
     accr = tl.where(goffs == 13, 1.0, 0.0)
     acci = tl.zeros((G,), tl.float32)
     m = tl.load(
-        a_ptr + ((row_start + 13) + (row_start + 0) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 13, row_start + 0, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_0 - li * xi_0_0
     acci -= lr * xi_0_0 + li * xr_0_0
     m = tl.load(
-        a_ptr + ((row_start + 13) + (row_start + 1) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 13, row_start + 1, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_1 - li * xi_0_1
     acci -= lr * xi_0_1 + li * xr_0_1
     m = tl.load(
-        a_ptr + ((row_start + 13) + (row_start + 2) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 13, row_start + 2, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_2 - li * xi_0_2
     acci -= lr * xi_0_2 + li * xr_0_2
     m = tl.load(
-        a_ptr + ((row_start + 13) + (row_start + 3) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 13, row_start + 3, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_3 - li * xi_0_3
     acci -= lr * xi_0_3 + li * xr_0_3
     m = tl.load(
-        a_ptr + ((row_start + 13) + (row_start + 4) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 13, row_start + 4, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_4 - li * xi_0_4
     acci -= lr * xi_0_4 + li * xr_0_4
     m = tl.load(
-        a_ptr + ((row_start + 13) + (row_start + 5) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 13, row_start + 5, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_5 - li * xi_0_5
     acci -= lr * xi_0_5 + li * xr_0_5
     m = tl.load(
-        a_ptr + ((row_start + 13) + (row_start + 6) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 13, row_start + 6, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_6 - li * xi_0_6
     acci -= lr * xi_0_6 + li * xr_0_6
     m = tl.load(
-        a_ptr + ((row_start + 13) + (row_start + 7) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 13, row_start + 7, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_7 - li * xi_0_7
     acci -= lr * xi_0_7 + li * xr_0_7
     m = tl.load(
-        a_ptr + ((row_start + 13) + (row_start + 8) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 13, row_start + 8, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_8 - li * xi_0_8
     acci -= lr * xi_0_8 + li * xr_0_8
     m = tl.load(
-        a_ptr + ((row_start + 13) + (row_start + 9) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 13, row_start + 9, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_9 - li * xi_0_9
     acci -= lr * xi_0_9 + li * xr_0_9
     m = tl.load(
-        a_ptr + ((row_start + 13) + (row_start + 10) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 13, row_start + 10, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_10 - li * xi_0_10
     acci -= lr * xi_0_10 + li * xr_0_10
     m = tl.load(
-        a_ptr + ((row_start + 13) + (row_start + 11) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 13, row_start + 11, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_11 - li * xi_0_11
     acci -= lr * xi_0_11 + li * xr_0_11
     m = tl.load(
-        a_ptr + ((row_start + 13) + (row_start + 12) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 13, row_start + 12, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
@@ -1192,98 +1397,126 @@ def ctrsv_lu256_scalar_kernel(a_ptr, x_ptr, flag_ptr, CHUNK: tl.constexpr):
     accr = tl.where(goffs == 14, 1.0, 0.0)
     acci = tl.zeros((G,), tl.float32)
     m = tl.load(
-        a_ptr + ((row_start + 14) + (row_start + 0) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 14, row_start + 0, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_0 - li * xi_0_0
     acci -= lr * xi_0_0 + li * xr_0_0
     m = tl.load(
-        a_ptr + ((row_start + 14) + (row_start + 1) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 14, row_start + 1, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_1 - li * xi_0_1
     acci -= lr * xi_0_1 + li * xr_0_1
     m = tl.load(
-        a_ptr + ((row_start + 14) + (row_start + 2) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 14, row_start + 2, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_2 - li * xi_0_2
     acci -= lr * xi_0_2 + li * xr_0_2
     m = tl.load(
-        a_ptr + ((row_start + 14) + (row_start + 3) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 14, row_start + 3, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_3 - li * xi_0_3
     acci -= lr * xi_0_3 + li * xr_0_3
     m = tl.load(
-        a_ptr + ((row_start + 14) + (row_start + 4) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 14, row_start + 4, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_4 - li * xi_0_4
     acci -= lr * xi_0_4 + li * xr_0_4
     m = tl.load(
-        a_ptr + ((row_start + 14) + (row_start + 5) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 14, row_start + 5, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_5 - li * xi_0_5
     acci -= lr * xi_0_5 + li * xr_0_5
     m = tl.load(
-        a_ptr + ((row_start + 14) + (row_start + 6) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 14, row_start + 6, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_6 - li * xi_0_6
     acci -= lr * xi_0_6 + li * xr_0_6
     m = tl.load(
-        a_ptr + ((row_start + 14) + (row_start + 7) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 14, row_start + 7, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_7 - li * xi_0_7
     acci -= lr * xi_0_7 + li * xr_0_7
     m = tl.load(
-        a_ptr + ((row_start + 14) + (row_start + 8) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 14, row_start + 8, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_8 - li * xi_0_8
     acci -= lr * xi_0_8 + li * xr_0_8
     m = tl.load(
-        a_ptr + ((row_start + 14) + (row_start + 9) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 14, row_start + 9, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_9 - li * xi_0_9
     acci -= lr * xi_0_9 + li * xr_0_9
     m = tl.load(
-        a_ptr + ((row_start + 14) + (row_start + 10) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 14, row_start + 10, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_10 - li * xi_0_10
     acci -= lr * xi_0_10 + li * xr_0_10
     m = tl.load(
-        a_ptr + ((row_start + 14) + (row_start + 11) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 14, row_start + 11, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_11 - li * xi_0_11
     acci -= lr * xi_0_11 + li * xr_0_11
     m = tl.load(
-        a_ptr + ((row_start + 14) + (row_start + 12) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 14, row_start + 12, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_12 - li * xi_0_12
     acci -= lr * xi_0_12 + li * xr_0_12
     m = tl.load(
-        a_ptr + ((row_start + 14) + (row_start + 13) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 14, row_start + 13, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
@@ -1294,105 +1527,135 @@ def ctrsv_lu256_scalar_kernel(a_ptr, x_ptr, flag_ptr, CHUNK: tl.constexpr):
     accr = tl.where(goffs == 15, 1.0, 0.0)
     acci = tl.zeros((G,), tl.float32)
     m = tl.load(
-        a_ptr + ((row_start + 15) + (row_start + 0) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 15, row_start + 0, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_0 - li * xi_0_0
     acci -= lr * xi_0_0 + li * xr_0_0
     m = tl.load(
-        a_ptr + ((row_start + 15) + (row_start + 1) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 15, row_start + 1, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_1 - li * xi_0_1
     acci -= lr * xi_0_1 + li * xr_0_1
     m = tl.load(
-        a_ptr + ((row_start + 15) + (row_start + 2) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 15, row_start + 2, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_2 - li * xi_0_2
     acci -= lr * xi_0_2 + li * xr_0_2
     m = tl.load(
-        a_ptr + ((row_start + 15) + (row_start + 3) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 15, row_start + 3, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_3 - li * xi_0_3
     acci -= lr * xi_0_3 + li * xr_0_3
     m = tl.load(
-        a_ptr + ((row_start + 15) + (row_start + 4) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 15, row_start + 4, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_4 - li * xi_0_4
     acci -= lr * xi_0_4 + li * xr_0_4
     m = tl.load(
-        a_ptr + ((row_start + 15) + (row_start + 5) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 15, row_start + 5, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_5 - li * xi_0_5
     acci -= lr * xi_0_5 + li * xr_0_5
     m = tl.load(
-        a_ptr + ((row_start + 15) + (row_start + 6) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 15, row_start + 6, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_6 - li * xi_0_6
     acci -= lr * xi_0_6 + li * xr_0_6
     m = tl.load(
-        a_ptr + ((row_start + 15) + (row_start + 7) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 15, row_start + 7, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_7 - li * xi_0_7
     acci -= lr * xi_0_7 + li * xr_0_7
     m = tl.load(
-        a_ptr + ((row_start + 15) + (row_start + 8) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 15, row_start + 8, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_8 - li * xi_0_8
     acci -= lr * xi_0_8 + li * xr_0_8
     m = tl.load(
-        a_ptr + ((row_start + 15) + (row_start + 9) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 15, row_start + 9, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_9 - li * xi_0_9
     acci -= lr * xi_0_9 + li * xr_0_9
     m = tl.load(
-        a_ptr + ((row_start + 15) + (row_start + 10) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 15, row_start + 10, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_10 - li * xi_0_10
     acci -= lr * xi_0_10 + li * xr_0_10
     m = tl.load(
-        a_ptr + ((row_start + 15) + (row_start + 11) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 15, row_start + 11, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_11 - li * xi_0_11
     acci -= lr * xi_0_11 + li * xr_0_11
     m = tl.load(
-        a_ptr + ((row_start + 15) + (row_start + 12) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 15, row_start + 12, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_12 - li * xi_0_12
     acci -= lr * xi_0_12 + li * xr_0_12
     m = tl.load(
-        a_ptr + ((row_start + 15) + (row_start + 13) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 15, row_start + 13, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_0_13 - li * xi_0_13
     acci -= lr * xi_0_13 + li * xr_0_13
     m = tl.load(
-        a_ptr + ((row_start + 15) + (row_start + 14) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 15, row_start + 14, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
@@ -1405,7 +1668,9 @@ def ctrsv_lu256_scalar_kernel(a_ptr, x_ptr, flag_ptr, CHUNK: tl.constexpr):
     accr = tl.where(goffs == 1, 1.0, 0.0)
     acci = tl.zeros((G,), tl.float32)
     m = tl.load(
-        a_ptr + ((row_start + 17) + (row_start + 16) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 17, row_start + 16, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
@@ -1416,14 +1681,18 @@ def ctrsv_lu256_scalar_kernel(a_ptr, x_ptr, flag_ptr, CHUNK: tl.constexpr):
     accr = tl.where(goffs == 2, 1.0, 0.0)
     acci = tl.zeros((G,), tl.float32)
     m = tl.load(
-        a_ptr + ((row_start + 18) + (row_start + 16) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 18, row_start + 16, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_0 - li * xi_1_0
     acci -= lr * xi_1_0 + li * xr_1_0
     m = tl.load(
-        a_ptr + ((row_start + 18) + (row_start + 17) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 18, row_start + 17, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
@@ -1434,21 +1703,27 @@ def ctrsv_lu256_scalar_kernel(a_ptr, x_ptr, flag_ptr, CHUNK: tl.constexpr):
     accr = tl.where(goffs == 3, 1.0, 0.0)
     acci = tl.zeros((G,), tl.float32)
     m = tl.load(
-        a_ptr + ((row_start + 19) + (row_start + 16) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 19, row_start + 16, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_0 - li * xi_1_0
     acci -= lr * xi_1_0 + li * xr_1_0
     m = tl.load(
-        a_ptr + ((row_start + 19) + (row_start + 17) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 19, row_start + 17, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_1 - li * xi_1_1
     acci -= lr * xi_1_1 + li * xr_1_1
     m = tl.load(
-        a_ptr + ((row_start + 19) + (row_start + 18) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 19, row_start + 18, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
@@ -1459,28 +1734,36 @@ def ctrsv_lu256_scalar_kernel(a_ptr, x_ptr, flag_ptr, CHUNK: tl.constexpr):
     accr = tl.where(goffs == 4, 1.0, 0.0)
     acci = tl.zeros((G,), tl.float32)
     m = tl.load(
-        a_ptr + ((row_start + 20) + (row_start + 16) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 20, row_start + 16, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_0 - li * xi_1_0
     acci -= lr * xi_1_0 + li * xr_1_0
     m = tl.load(
-        a_ptr + ((row_start + 20) + (row_start + 17) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 20, row_start + 17, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_1 - li * xi_1_1
     acci -= lr * xi_1_1 + li * xr_1_1
     m = tl.load(
-        a_ptr + ((row_start + 20) + (row_start + 18) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 20, row_start + 18, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_2 - li * xi_1_2
     acci -= lr * xi_1_2 + li * xr_1_2
     m = tl.load(
-        a_ptr + ((row_start + 20) + (row_start + 19) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 20, row_start + 19, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
@@ -1491,35 +1774,45 @@ def ctrsv_lu256_scalar_kernel(a_ptr, x_ptr, flag_ptr, CHUNK: tl.constexpr):
     accr = tl.where(goffs == 5, 1.0, 0.0)
     acci = tl.zeros((G,), tl.float32)
     m = tl.load(
-        a_ptr + ((row_start + 21) + (row_start + 16) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 21, row_start + 16, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_0 - li * xi_1_0
     acci -= lr * xi_1_0 + li * xr_1_0
     m = tl.load(
-        a_ptr + ((row_start + 21) + (row_start + 17) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 21, row_start + 17, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_1 - li * xi_1_1
     acci -= lr * xi_1_1 + li * xr_1_1
     m = tl.load(
-        a_ptr + ((row_start + 21) + (row_start + 18) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 21, row_start + 18, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_2 - li * xi_1_2
     acci -= lr * xi_1_2 + li * xr_1_2
     m = tl.load(
-        a_ptr + ((row_start + 21) + (row_start + 19) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 21, row_start + 19, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_3 - li * xi_1_3
     acci -= lr * xi_1_3 + li * xr_1_3
     m = tl.load(
-        a_ptr + ((row_start + 21) + (row_start + 20) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 21, row_start + 20, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
@@ -1530,42 +1823,54 @@ def ctrsv_lu256_scalar_kernel(a_ptr, x_ptr, flag_ptr, CHUNK: tl.constexpr):
     accr = tl.where(goffs == 6, 1.0, 0.0)
     acci = tl.zeros((G,), tl.float32)
     m = tl.load(
-        a_ptr + ((row_start + 22) + (row_start + 16) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 22, row_start + 16, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_0 - li * xi_1_0
     acci -= lr * xi_1_0 + li * xr_1_0
     m = tl.load(
-        a_ptr + ((row_start + 22) + (row_start + 17) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 22, row_start + 17, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_1 - li * xi_1_1
     acci -= lr * xi_1_1 + li * xr_1_1
     m = tl.load(
-        a_ptr + ((row_start + 22) + (row_start + 18) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 22, row_start + 18, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_2 - li * xi_1_2
     acci -= lr * xi_1_2 + li * xr_1_2
     m = tl.load(
-        a_ptr + ((row_start + 22) + (row_start + 19) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 22, row_start + 19, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_3 - li * xi_1_3
     acci -= lr * xi_1_3 + li * xr_1_3
     m = tl.load(
-        a_ptr + ((row_start + 22) + (row_start + 20) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 22, row_start + 20, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_4 - li * xi_1_4
     acci -= lr * xi_1_4 + li * xr_1_4
     m = tl.load(
-        a_ptr + ((row_start + 22) + (row_start + 21) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 22, row_start + 21, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
@@ -1576,49 +1881,63 @@ def ctrsv_lu256_scalar_kernel(a_ptr, x_ptr, flag_ptr, CHUNK: tl.constexpr):
     accr = tl.where(goffs == 7, 1.0, 0.0)
     acci = tl.zeros((G,), tl.float32)
     m = tl.load(
-        a_ptr + ((row_start + 23) + (row_start + 16) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 23, row_start + 16, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_0 - li * xi_1_0
     acci -= lr * xi_1_0 + li * xr_1_0
     m = tl.load(
-        a_ptr + ((row_start + 23) + (row_start + 17) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 23, row_start + 17, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_1 - li * xi_1_1
     acci -= lr * xi_1_1 + li * xr_1_1
     m = tl.load(
-        a_ptr + ((row_start + 23) + (row_start + 18) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 23, row_start + 18, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_2 - li * xi_1_2
     acci -= lr * xi_1_2 + li * xr_1_2
     m = tl.load(
-        a_ptr + ((row_start + 23) + (row_start + 19) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 23, row_start + 19, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_3 - li * xi_1_3
     acci -= lr * xi_1_3 + li * xr_1_3
     m = tl.load(
-        a_ptr + ((row_start + 23) + (row_start + 20) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 23, row_start + 20, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_4 - li * xi_1_4
     acci -= lr * xi_1_4 + li * xr_1_4
     m = tl.load(
-        a_ptr + ((row_start + 23) + (row_start + 21) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 23, row_start + 21, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_5 - li * xi_1_5
     acci -= lr * xi_1_5 + li * xr_1_5
     m = tl.load(
-        a_ptr + ((row_start + 23) + (row_start + 22) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 23, row_start + 22, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
@@ -1629,56 +1948,72 @@ def ctrsv_lu256_scalar_kernel(a_ptr, x_ptr, flag_ptr, CHUNK: tl.constexpr):
     accr = tl.where(goffs == 8, 1.0, 0.0)
     acci = tl.zeros((G,), tl.float32)
     m = tl.load(
-        a_ptr + ((row_start + 24) + (row_start + 16) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 24, row_start + 16, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_0 - li * xi_1_0
     acci -= lr * xi_1_0 + li * xr_1_0
     m = tl.load(
-        a_ptr + ((row_start + 24) + (row_start + 17) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 24, row_start + 17, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_1 - li * xi_1_1
     acci -= lr * xi_1_1 + li * xr_1_1
     m = tl.load(
-        a_ptr + ((row_start + 24) + (row_start + 18) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 24, row_start + 18, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_2 - li * xi_1_2
     acci -= lr * xi_1_2 + li * xr_1_2
     m = tl.load(
-        a_ptr + ((row_start + 24) + (row_start + 19) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 24, row_start + 19, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_3 - li * xi_1_3
     acci -= lr * xi_1_3 + li * xr_1_3
     m = tl.load(
-        a_ptr + ((row_start + 24) + (row_start + 20) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 24, row_start + 20, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_4 - li * xi_1_4
     acci -= lr * xi_1_4 + li * xr_1_4
     m = tl.load(
-        a_ptr + ((row_start + 24) + (row_start + 21) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 24, row_start + 21, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_5 - li * xi_1_5
     acci -= lr * xi_1_5 + li * xr_1_5
     m = tl.load(
-        a_ptr + ((row_start + 24) + (row_start + 22) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 24, row_start + 22, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_6 - li * xi_1_6
     acci -= lr * xi_1_6 + li * xr_1_6
     m = tl.load(
-        a_ptr + ((row_start + 24) + (row_start + 23) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 24, row_start + 23, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
@@ -1689,63 +2024,81 @@ def ctrsv_lu256_scalar_kernel(a_ptr, x_ptr, flag_ptr, CHUNK: tl.constexpr):
     accr = tl.where(goffs == 9, 1.0, 0.0)
     acci = tl.zeros((G,), tl.float32)
     m = tl.load(
-        a_ptr + ((row_start + 25) + (row_start + 16) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 25, row_start + 16, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_0 - li * xi_1_0
     acci -= lr * xi_1_0 + li * xr_1_0
     m = tl.load(
-        a_ptr + ((row_start + 25) + (row_start + 17) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 25, row_start + 17, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_1 - li * xi_1_1
     acci -= lr * xi_1_1 + li * xr_1_1
     m = tl.load(
-        a_ptr + ((row_start + 25) + (row_start + 18) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 25, row_start + 18, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_2 - li * xi_1_2
     acci -= lr * xi_1_2 + li * xr_1_2
     m = tl.load(
-        a_ptr + ((row_start + 25) + (row_start + 19) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 25, row_start + 19, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_3 - li * xi_1_3
     acci -= lr * xi_1_3 + li * xr_1_3
     m = tl.load(
-        a_ptr + ((row_start + 25) + (row_start + 20) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 25, row_start + 20, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_4 - li * xi_1_4
     acci -= lr * xi_1_4 + li * xr_1_4
     m = tl.load(
-        a_ptr + ((row_start + 25) + (row_start + 21) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 25, row_start + 21, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_5 - li * xi_1_5
     acci -= lr * xi_1_5 + li * xr_1_5
     m = tl.load(
-        a_ptr + ((row_start + 25) + (row_start + 22) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 25, row_start + 22, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_6 - li * xi_1_6
     acci -= lr * xi_1_6 + li * xr_1_6
     m = tl.load(
-        a_ptr + ((row_start + 25) + (row_start + 23) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 25, row_start + 23, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_7 - li * xi_1_7
     acci -= lr * xi_1_7 + li * xr_1_7
     m = tl.load(
-        a_ptr + ((row_start + 25) + (row_start + 24) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 25, row_start + 24, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
@@ -1756,70 +2109,90 @@ def ctrsv_lu256_scalar_kernel(a_ptr, x_ptr, flag_ptr, CHUNK: tl.constexpr):
     accr = tl.where(goffs == 10, 1.0, 0.0)
     acci = tl.zeros((G,), tl.float32)
     m = tl.load(
-        a_ptr + ((row_start + 26) + (row_start + 16) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 26, row_start + 16, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_0 - li * xi_1_0
     acci -= lr * xi_1_0 + li * xr_1_0
     m = tl.load(
-        a_ptr + ((row_start + 26) + (row_start + 17) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 26, row_start + 17, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_1 - li * xi_1_1
     acci -= lr * xi_1_1 + li * xr_1_1
     m = tl.load(
-        a_ptr + ((row_start + 26) + (row_start + 18) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 26, row_start + 18, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_2 - li * xi_1_2
     acci -= lr * xi_1_2 + li * xr_1_2
     m = tl.load(
-        a_ptr + ((row_start + 26) + (row_start + 19) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 26, row_start + 19, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_3 - li * xi_1_3
     acci -= lr * xi_1_3 + li * xr_1_3
     m = tl.load(
-        a_ptr + ((row_start + 26) + (row_start + 20) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 26, row_start + 20, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_4 - li * xi_1_4
     acci -= lr * xi_1_4 + li * xr_1_4
     m = tl.load(
-        a_ptr + ((row_start + 26) + (row_start + 21) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 26, row_start + 21, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_5 - li * xi_1_5
     acci -= lr * xi_1_5 + li * xr_1_5
     m = tl.load(
-        a_ptr + ((row_start + 26) + (row_start + 22) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 26, row_start + 22, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_6 - li * xi_1_6
     acci -= lr * xi_1_6 + li * xr_1_6
     m = tl.load(
-        a_ptr + ((row_start + 26) + (row_start + 23) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 26, row_start + 23, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_7 - li * xi_1_7
     acci -= lr * xi_1_7 + li * xr_1_7
     m = tl.load(
-        a_ptr + ((row_start + 26) + (row_start + 24) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 26, row_start + 24, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_8 - li * xi_1_8
     acci -= lr * xi_1_8 + li * xr_1_8
     m = tl.load(
-        a_ptr + ((row_start + 26) + (row_start + 25) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 26, row_start + 25, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
@@ -1830,77 +2203,99 @@ def ctrsv_lu256_scalar_kernel(a_ptr, x_ptr, flag_ptr, CHUNK: tl.constexpr):
     accr = tl.where(goffs == 11, 1.0, 0.0)
     acci = tl.zeros((G,), tl.float32)
     m = tl.load(
-        a_ptr + ((row_start + 27) + (row_start + 16) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 27, row_start + 16, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_0 - li * xi_1_0
     acci -= lr * xi_1_0 + li * xr_1_0
     m = tl.load(
-        a_ptr + ((row_start + 27) + (row_start + 17) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 27, row_start + 17, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_1 - li * xi_1_1
     acci -= lr * xi_1_1 + li * xr_1_1
     m = tl.load(
-        a_ptr + ((row_start + 27) + (row_start + 18) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 27, row_start + 18, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_2 - li * xi_1_2
     acci -= lr * xi_1_2 + li * xr_1_2
     m = tl.load(
-        a_ptr + ((row_start + 27) + (row_start + 19) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 27, row_start + 19, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_3 - li * xi_1_3
     acci -= lr * xi_1_3 + li * xr_1_3
     m = tl.load(
-        a_ptr + ((row_start + 27) + (row_start + 20) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 27, row_start + 20, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_4 - li * xi_1_4
     acci -= lr * xi_1_4 + li * xr_1_4
     m = tl.load(
-        a_ptr + ((row_start + 27) + (row_start + 21) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 27, row_start + 21, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_5 - li * xi_1_5
     acci -= lr * xi_1_5 + li * xr_1_5
     m = tl.load(
-        a_ptr + ((row_start + 27) + (row_start + 22) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 27, row_start + 22, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_6 - li * xi_1_6
     acci -= lr * xi_1_6 + li * xr_1_6
     m = tl.load(
-        a_ptr + ((row_start + 27) + (row_start + 23) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 27, row_start + 23, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_7 - li * xi_1_7
     acci -= lr * xi_1_7 + li * xr_1_7
     m = tl.load(
-        a_ptr + ((row_start + 27) + (row_start + 24) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 27, row_start + 24, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_8 - li * xi_1_8
     acci -= lr * xi_1_8 + li * xr_1_8
     m = tl.load(
-        a_ptr + ((row_start + 27) + (row_start + 25) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 27, row_start + 25, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_9 - li * xi_1_9
     acci -= lr * xi_1_9 + li * xr_1_9
     m = tl.load(
-        a_ptr + ((row_start + 27) + (row_start + 26) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 27, row_start + 26, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
@@ -1911,84 +2306,108 @@ def ctrsv_lu256_scalar_kernel(a_ptr, x_ptr, flag_ptr, CHUNK: tl.constexpr):
     accr = tl.where(goffs == 12, 1.0, 0.0)
     acci = tl.zeros((G,), tl.float32)
     m = tl.load(
-        a_ptr + ((row_start + 28) + (row_start + 16) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 28, row_start + 16, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_0 - li * xi_1_0
     acci -= lr * xi_1_0 + li * xr_1_0
     m = tl.load(
-        a_ptr + ((row_start + 28) + (row_start + 17) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 28, row_start + 17, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_1 - li * xi_1_1
     acci -= lr * xi_1_1 + li * xr_1_1
     m = tl.load(
-        a_ptr + ((row_start + 28) + (row_start + 18) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 28, row_start + 18, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_2 - li * xi_1_2
     acci -= lr * xi_1_2 + li * xr_1_2
     m = tl.load(
-        a_ptr + ((row_start + 28) + (row_start + 19) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 28, row_start + 19, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_3 - li * xi_1_3
     acci -= lr * xi_1_3 + li * xr_1_3
     m = tl.load(
-        a_ptr + ((row_start + 28) + (row_start + 20) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 28, row_start + 20, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_4 - li * xi_1_4
     acci -= lr * xi_1_4 + li * xr_1_4
     m = tl.load(
-        a_ptr + ((row_start + 28) + (row_start + 21) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 28, row_start + 21, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_5 - li * xi_1_5
     acci -= lr * xi_1_5 + li * xr_1_5
     m = tl.load(
-        a_ptr + ((row_start + 28) + (row_start + 22) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 28, row_start + 22, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_6 - li * xi_1_6
     acci -= lr * xi_1_6 + li * xr_1_6
     m = tl.load(
-        a_ptr + ((row_start + 28) + (row_start + 23) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 28, row_start + 23, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_7 - li * xi_1_7
     acci -= lr * xi_1_7 + li * xr_1_7
     m = tl.load(
-        a_ptr + ((row_start + 28) + (row_start + 24) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 28, row_start + 24, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_8 - li * xi_1_8
     acci -= lr * xi_1_8 + li * xr_1_8
     m = tl.load(
-        a_ptr + ((row_start + 28) + (row_start + 25) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 28, row_start + 25, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_9 - li * xi_1_9
     acci -= lr * xi_1_9 + li * xr_1_9
     m = tl.load(
-        a_ptr + ((row_start + 28) + (row_start + 26) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 28, row_start + 26, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_10 - li * xi_1_10
     acci -= lr * xi_1_10 + li * xr_1_10
     m = tl.load(
-        a_ptr + ((row_start + 28) + (row_start + 27) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 28, row_start + 27, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
@@ -1999,91 +2418,117 @@ def ctrsv_lu256_scalar_kernel(a_ptr, x_ptr, flag_ptr, CHUNK: tl.constexpr):
     accr = tl.where(goffs == 13, 1.0, 0.0)
     acci = tl.zeros((G,), tl.float32)
     m = tl.load(
-        a_ptr + ((row_start + 29) + (row_start + 16) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 29, row_start + 16, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_0 - li * xi_1_0
     acci -= lr * xi_1_0 + li * xr_1_0
     m = tl.load(
-        a_ptr + ((row_start + 29) + (row_start + 17) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 29, row_start + 17, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_1 - li * xi_1_1
     acci -= lr * xi_1_1 + li * xr_1_1
     m = tl.load(
-        a_ptr + ((row_start + 29) + (row_start + 18) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 29, row_start + 18, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_2 - li * xi_1_2
     acci -= lr * xi_1_2 + li * xr_1_2
     m = tl.load(
-        a_ptr + ((row_start + 29) + (row_start + 19) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 29, row_start + 19, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_3 - li * xi_1_3
     acci -= lr * xi_1_3 + li * xr_1_3
     m = tl.load(
-        a_ptr + ((row_start + 29) + (row_start + 20) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 29, row_start + 20, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_4 - li * xi_1_4
     acci -= lr * xi_1_4 + li * xr_1_4
     m = tl.load(
-        a_ptr + ((row_start + 29) + (row_start + 21) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 29, row_start + 21, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_5 - li * xi_1_5
     acci -= lr * xi_1_5 + li * xr_1_5
     m = tl.load(
-        a_ptr + ((row_start + 29) + (row_start + 22) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 29, row_start + 22, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_6 - li * xi_1_6
     acci -= lr * xi_1_6 + li * xr_1_6
     m = tl.load(
-        a_ptr + ((row_start + 29) + (row_start + 23) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 29, row_start + 23, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_7 - li * xi_1_7
     acci -= lr * xi_1_7 + li * xr_1_7
     m = tl.load(
-        a_ptr + ((row_start + 29) + (row_start + 24) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 29, row_start + 24, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_8 - li * xi_1_8
     acci -= lr * xi_1_8 + li * xr_1_8
     m = tl.load(
-        a_ptr + ((row_start + 29) + (row_start + 25) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 29, row_start + 25, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_9 - li * xi_1_9
     acci -= lr * xi_1_9 + li * xr_1_9
     m = tl.load(
-        a_ptr + ((row_start + 29) + (row_start + 26) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 29, row_start + 26, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_10 - li * xi_1_10
     acci -= lr * xi_1_10 + li * xr_1_10
     m = tl.load(
-        a_ptr + ((row_start + 29) + (row_start + 27) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 29, row_start + 27, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_11 - li * xi_1_11
     acci -= lr * xi_1_11 + li * xr_1_11
     m = tl.load(
-        a_ptr + ((row_start + 29) + (row_start + 28) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 29, row_start + 28, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
@@ -2094,98 +2539,126 @@ def ctrsv_lu256_scalar_kernel(a_ptr, x_ptr, flag_ptr, CHUNK: tl.constexpr):
     accr = tl.where(goffs == 14, 1.0, 0.0)
     acci = tl.zeros((G,), tl.float32)
     m = tl.load(
-        a_ptr + ((row_start + 30) + (row_start + 16) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 30, row_start + 16, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_0 - li * xi_1_0
     acci -= lr * xi_1_0 + li * xr_1_0
     m = tl.load(
-        a_ptr + ((row_start + 30) + (row_start + 17) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 30, row_start + 17, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_1 - li * xi_1_1
     acci -= lr * xi_1_1 + li * xr_1_1
     m = tl.load(
-        a_ptr + ((row_start + 30) + (row_start + 18) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 30, row_start + 18, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_2 - li * xi_1_2
     acci -= lr * xi_1_2 + li * xr_1_2
     m = tl.load(
-        a_ptr + ((row_start + 30) + (row_start + 19) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 30, row_start + 19, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_3 - li * xi_1_3
     acci -= lr * xi_1_3 + li * xr_1_3
     m = tl.load(
-        a_ptr + ((row_start + 30) + (row_start + 20) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 30, row_start + 20, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_4 - li * xi_1_4
     acci -= lr * xi_1_4 + li * xr_1_4
     m = tl.load(
-        a_ptr + ((row_start + 30) + (row_start + 21) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 30, row_start + 21, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_5 - li * xi_1_5
     acci -= lr * xi_1_5 + li * xr_1_5
     m = tl.load(
-        a_ptr + ((row_start + 30) + (row_start + 22) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 30, row_start + 22, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_6 - li * xi_1_6
     acci -= lr * xi_1_6 + li * xr_1_6
     m = tl.load(
-        a_ptr + ((row_start + 30) + (row_start + 23) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 30, row_start + 23, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_7 - li * xi_1_7
     acci -= lr * xi_1_7 + li * xr_1_7
     m = tl.load(
-        a_ptr + ((row_start + 30) + (row_start + 24) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 30, row_start + 24, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_8 - li * xi_1_8
     acci -= lr * xi_1_8 + li * xr_1_8
     m = tl.load(
-        a_ptr + ((row_start + 30) + (row_start + 25) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 30, row_start + 25, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_9 - li * xi_1_9
     acci -= lr * xi_1_9 + li * xr_1_9
     m = tl.load(
-        a_ptr + ((row_start + 30) + (row_start + 26) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 30, row_start + 26, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_10 - li * xi_1_10
     acci -= lr * xi_1_10 + li * xr_1_10
     m = tl.load(
-        a_ptr + ((row_start + 30) + (row_start + 27) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 30, row_start + 27, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_11 - li * xi_1_11
     acci -= lr * xi_1_11 + li * xr_1_11
     m = tl.load(
-        a_ptr + ((row_start + 30) + (row_start + 28) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 30, row_start + 28, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_12 - li * xi_1_12
     acci -= lr * xi_1_12 + li * xr_1_12
     m = tl.load(
-        a_ptr + ((row_start + 30) + (row_start + 29) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 30, row_start + 29, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
@@ -2196,105 +2669,135 @@ def ctrsv_lu256_scalar_kernel(a_ptr, x_ptr, flag_ptr, CHUNK: tl.constexpr):
     accr = tl.where(goffs == 15, 1.0, 0.0)
     acci = tl.zeros((G,), tl.float32)
     m = tl.load(
-        a_ptr + ((row_start + 31) + (row_start + 16) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 31, row_start + 16, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_0 - li * xi_1_0
     acci -= lr * xi_1_0 + li * xr_1_0
     m = tl.load(
-        a_ptr + ((row_start + 31) + (row_start + 17) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 31, row_start + 17, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_1 - li * xi_1_1
     acci -= lr * xi_1_1 + li * xr_1_1
     m = tl.load(
-        a_ptr + ((row_start + 31) + (row_start + 18) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 31, row_start + 18, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_2 - li * xi_1_2
     acci -= lr * xi_1_2 + li * xr_1_2
     m = tl.load(
-        a_ptr + ((row_start + 31) + (row_start + 19) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 31, row_start + 19, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_3 - li * xi_1_3
     acci -= lr * xi_1_3 + li * xr_1_3
     m = tl.load(
-        a_ptr + ((row_start + 31) + (row_start + 20) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 31, row_start + 20, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_4 - li * xi_1_4
     acci -= lr * xi_1_4 + li * xr_1_4
     m = tl.load(
-        a_ptr + ((row_start + 31) + (row_start + 21) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 31, row_start + 21, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_5 - li * xi_1_5
     acci -= lr * xi_1_5 + li * xr_1_5
     m = tl.load(
-        a_ptr + ((row_start + 31) + (row_start + 22) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 31, row_start + 22, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_6 - li * xi_1_6
     acci -= lr * xi_1_6 + li * xr_1_6
     m = tl.load(
-        a_ptr + ((row_start + 31) + (row_start + 23) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 31, row_start + 23, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_7 - li * xi_1_7
     acci -= lr * xi_1_7 + li * xr_1_7
     m = tl.load(
-        a_ptr + ((row_start + 31) + (row_start + 24) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 31, row_start + 24, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_8 - li * xi_1_8
     acci -= lr * xi_1_8 + li * xr_1_8
     m = tl.load(
-        a_ptr + ((row_start + 31) + (row_start + 25) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 31, row_start + 25, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_9 - li * xi_1_9
     acci -= lr * xi_1_9 + li * xr_1_9
     m = tl.load(
-        a_ptr + ((row_start + 31) + (row_start + 26) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 31, row_start + 26, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_10 - li * xi_1_10
     acci -= lr * xi_1_10 + li * xr_1_10
     m = tl.load(
-        a_ptr + ((row_start + 31) + (row_start + 27) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 31, row_start + 27, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_11 - li * xi_1_11
     acci -= lr * xi_1_11 + li * xr_1_11
     m = tl.load(
-        a_ptr + ((row_start + 31) + (row_start + 28) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 31, row_start + 28, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_12 - li * xi_1_12
     acci -= lr * xi_1_12 + li * xr_1_12
     m = tl.load(
-        a_ptr + ((row_start + 31) + (row_start + 29) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 31, row_start + 29, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
     accr -= lr * xr_1_13 - li * xi_1_13
     acci -= lr * xi_1_13 + li * xr_1_13
     m = tl.load(
-        a_ptr + ((row_start + 31) + (row_start + 30) * 256) * 2 + two,
+        a_ptr
+        + _ctrsv_scalar_offset(row_start + 31, row_start + 30, LDA, TRANS) * 2
+        + two,
         eviction_policy="evict_last",
     )
     lr, li = tl.split(m)
@@ -2370,7 +2873,7 @@ def ctrsv_lu256_scalar_kernel(a_ptr, x_ptr, flag_ptr, CHUNK: tl.constexpr):
     XAi = tl.where(goffs[:, None] == 15, xi_0_15[None, :], XAi)
     XCr = tl.where(goffs[:, None] == 15, xr_1_15[None, :], XCr)
     XCi = tl.where(goffs[:, None] == 15, xi_1_15[None, :], XCi)
-    b_off = (rows_b[:, None] + rows_t[None, :] * 256) * 2
+    b_off = _ctrsv_scalar_offset(rows_b[:, None], rows_t[None, :], LDA, TRANS) * 2
     Br = tl.load(a_ptr + b_off, eviction_policy="evict_last")
     Bi = tl.load(a_ptr + b_off + 1, eviction_policy="evict_last")
     T1r = tl.dot(Br, XAr, input_precision="tf32x3") - tl.dot(
@@ -2425,7 +2928,7 @@ def ctrsv_lu256_scalar_kernel(a_ptr, x_ptr, flag_ptr, CHUNK: tl.constexpr):
             eviction_policy="evict_last",
         )
         xpr, xpi = tl.split(x2)
-        a_off = (rows[:, None] + kcols[None, :] * 256) * 2
+        a_off = _ctrsv_scalar_offset(rows[:, None], kcols[None, :], LDA, TRANS) * 2
         a2 = tl.load(
             a_ptr + a_off[:, :, None] + two[None, None, :],
             mask=col_mask[None, :, None],
@@ -3979,6 +4482,17 @@ def _check_trsv(A, x, uplo, trans, diag, n, lda, incx, complex_ok):
         assert A.numel() >= n * lda
 
 
+def _row_major_dispatch(uplo, trans):
+    internal_uplo = (
+        CUBLAS_FILL_MODE_UPPER
+        if uplo == CUBLAS_FILL_MODE_LOWER
+        else CUBLAS_FILL_MODE_LOWER
+    )
+    trans_flag = 1 if trans == CUBLAS_OP_N else 0
+    conj = 1 if trans == CUBLAS_OP_C else 0
+    return internal_uplo, trans_flag, conj
+
+
 def _mode_key(uplo, trans, unit):
     return (uplo << 4) | (trans << 2) | unit
 
@@ -4019,8 +4533,8 @@ def strsv(
     if n == 0:
         return
     unit = 1 if diag == CUBLAS_DIAG_UNIT else 0
-    trans_flag = 0 if trans == CUBLAS_OP_N else 1
-    forward = _forward(uplo, trans)
+    uplo, trans_flag, _ = _row_major_dispatch(uplo, trans)
+    forward = _forward(uplo, trans_flag)
     mode_key = _mode_key(uplo, trans_flag, unit)
 
     with torch_device_fn.device(A.device):
@@ -4235,8 +4749,8 @@ def dtrsv(
     if n == 0:
         return
     unit = 1 if diag == CUBLAS_DIAG_UNIT else 0
-    trans_flag = 0 if trans == CUBLAS_OP_N else 1
-    forward = _forward(uplo, trans)
+    uplo, trans_flag, _ = _row_major_dispatch(uplo, trans)
+    forward = _forward(uplo, trans_flag)
     mode_key = _mode_key(uplo, trans_flag, unit)
 
     with torch_device_fn.device(A.device):
@@ -4617,11 +5131,14 @@ def ctrsv_fwd_fused_kernel(
     CHUNK: tl.constexpr,
     ROWLOAD: tl.constexpr,
     INV_DOT: tl.constexpr,
+    VEC64: tl.constexpr,
 ):
     pid = tl.program_id(0)
     offs = tl.arange(0, BLOCK_N)
     BK: tl.constexpr = BLOCK_N * CHUNK
     koffs = tl.arange(0, BK)
+    a_ptr_int64 = a_ptr.to(tl.pointer_type(tl.int64))
+    x_ptr_int64 = x_ptr.to(tl.pointer_type(tl.int64))
     row_start = pid * BLOCK_N
     row_end = tl.minimum(row_start + BLOCK_N, n)
     size = row_end - row_start
@@ -4658,25 +5175,27 @@ def ctrsv_fwd_fused_kernel(
         c1 = pid_hi * BLOCK_N
         kcols = c0 + koffs
         col_mask = (kcols < c1) & (kcols < n)
-        x2 = tl.load(
-            x_ptr + (kcols * 2)[:, None] + tl.arange(0, 2)[None, :],
-            mask=col_mask[:, None],
-            other=0.0,
+        x_bits = tl.load(
+            x_ptr_int64 + kcols,
+            mask=col_mask,
+            other=0,
             eviction_policy="evict_last",
         )
-        xpr, xpi = tl.split(x2)
+        xpr = x_bits.to(tl.int32).to(tl.float32, bitcast=True)
+        xpi = (x_bits >> 32).to(tl.int32).to(tl.float32, bitcast=True)
         if TRANS == 0:
-            a_off = (rows[:, None] + kcols[None, :] * LDA) * 2
+            a_off = rows[:, None] + kcols[None, :] * LDA
         else:
-            a_off = (kcols[None, :] + rows[:, None] * LDA) * 2
+            a_off = kcols[None, :] + rows[:, None] * LDA
         m2 = row_mask[:, None] & col_mask[None, :]
-        a2 = tl.load(
-            a_ptr + a_off[:, :, None] + tl.arange(0, 2)[None, None, :],
-            mask=m2[:, :, None],
-            other=0.0,
+        a_bits = tl.load(
+            a_ptr_int64 + a_off,
+            mask=m2,
+            other=0,
             eviction_policy="evict_first",
         )
-        ar, ai = tl.split(a2)
+        ar = a_bits.to(tl.int32).to(tl.float32, bitcast=True)
+        ai = (a_bits >> 32).to(tl.int32).to(tl.float32, bitcast=True)
         if CONJ:
             ai = -ai
         sxr -= tl.sum(ar * xpr[None, :] - ai * xpi[None, :], axis=1)
@@ -4795,26 +5314,33 @@ def ctrsv(
     if n == 0:
         return
     unit = 1 if diag == CUBLAS_DIAG_UNIT else 0
-    trans_flag = 0 if trans == CUBLAS_OP_N else 1
-    conj = 1 if trans == CUBLAS_OP_C else 0
-    forward = _forward(uplo, trans)
+    uplo, trans_flag, conj = _row_major_dispatch(uplo, trans)
+    forward = _forward(uplo, trans_flag)
     mode_key = _mode_key(uplo, trans_flag, unit) | (conj << 8)
 
     with torch_device_fn.device(A.device):
         A_real = torch.view_as_real(A)
         x_real = torch.view_as_real(x)
         if incx == 1 and lda == n:
-            if (
-                n == 256
-                and trans_flag == 0
+            scalar_lower = (
+                conj == 0
                 and unit == 1
-                and uplo == CUBLAS_FILL_MODE_LOWER
-            ):
+                and (
+                    (trans_flag == 0 and uplo == CUBLAS_FILL_MODE_LOWER)
+                    or (trans_flag == 1 and uplo == CUBLAS_FILL_MODE_UPPER)
+                )
+            )
+            scalar_size = n == 256 or (
+                n == 512 and trans_flag == 1 and uplo == CUBLAS_FILL_MODE_UPPER
+            )
+            if scalar_lower and scalar_size:
                 flags = _trsv_flags(A.device)
-                ctrsv_lu256_scalar_kernel[(8,)](
+                ctrsv_lu_scalar_kernel[(triton.cdiv(n, 32),)](
                     A_real,
                     x_real,
                     flags,
+                    lda,
+                    TRANS=trans_flag,
                     CHUNK=4,
                     num_warps=4,
                 )
@@ -4842,6 +5368,7 @@ def ctrsv(
                     CHUNK=chunk,
                     ROWLOAD=rowload,
                     INV_DOT=inv_dot,
+                    VEC64=1 if n >= 1024 else 0,
                     num_warps=nw,
                 )
             else:
@@ -4920,11 +5447,7 @@ def _ztrsv_diag_block_inv(
     ROWLOAD: tl.constexpr,
     INV_DOT: tl.constexpr,
 ):
-    if (
-        BLOCK_N == 16
-        and INV_DOT
-        and not (UNIT and LOWER_EFF and TRANS == 0 and ROWLOAD)
-    ):
+    if BLOCK_N == 16 and INV_DOT and not (UNIT and LOWER_EFF and ROWLOAD):
         if TRANS == 0:
             m_off = ((s + offs)[:, None] + (s + offs)[None, :] * LDA) * 2
         else:
@@ -4988,7 +5511,7 @@ def _ztrsv_diag_block_inv(
             Xi = Xr * nb_ri[None, :] + Xi * nb_rr[None, :]
             Xr = nb_tr
         return Xr, Xi
-    if UNIT and LOWER_EFF and TRANS == 0 and ROWLOAD:
+    if UNIT and LOWER_EFF and ROWLOAD:
         one = tl.full((BLOCK_N,), 1.0, tl.float64)
         zero = tl.full((BLOCK_N,), 0.0, tl.float64)
         Xr = tl.where(
@@ -4998,7 +5521,10 @@ def _ztrsv_diag_block_inv(
         )
         Xi = tl.zeros((BLOCK_N, BLOCK_N), tl.float64)
         for i in tl.static_range(0, BLOCK_N):
-            roff = ((s + i) + (s + offs) * LDA) * 2
+            if TRANS == 0:
+                roff = ((s + i) + (s + offs) * LDA) * 2
+            else:
+                roff = ((s + offs) + (s + i) * LDA) * 2
             mrr = tl.load(
                 a_ptr + roff,
                 mask=(offs < i) & row_mask,
@@ -5287,18 +5813,47 @@ def ztrsv(
     if n == 0:
         return
     unit = 1 if diag == CUBLAS_DIAG_UNIT else 0
-    trans_flag = 0 if trans == CUBLAS_OP_N else 1
-    conj = 1 if trans == CUBLAS_OP_C else 0
-    forward = _forward(uplo, trans)
+    uplo, trans_flag, conj = _row_major_dispatch(uplo, trans)
+    forward = _forward(uplo, trans_flag)
     mode_key = _mode_key(uplo, trans_flag, unit) | (conj << 8)
 
     with torch_device_fn.device(A.device):
         A_real = torch.view_as_real(A)
         x_real = torch.view_as_real(x)
         if incx == 1 and lda == n:
+            inv_precompute = (
+                n == 8192
+                and unit == 1
+                and conj == 0
+                and trans_flag == 1
+                and uplo == CUBLAS_FILL_MODE_UPPER
+            )
+            if inv_precompute:
+                bb = 32
+                npanel = triton.cdiv(n, bb)
+                flags = _trsv_flags(A.device)
+                dinv = torch.empty((npanel, bb, bb), dtype=A.dtype, device=A.device)
+                dinv_real = torch.view_as_real(dinv)
+                ztrsv_diag_inv_kernel[(npanel,)](
+                    A_real, dinv_real, n, lda, TRANS=trans_flag, BLOCK_N=bb, num_warps=4
+                )
+                ztrsv_fwd_inv_kernel[(npanel,)](
+                    A_real,
+                    x_real,
+                    dinv_real,
+                    flags,
+                    n,
+                    lda,
+                    TRANS=trans_flag,
+                    BLOCK_N=bb,
+                    CHUNK=1,
+                    num_warps=4,
+                )
+                return
             if (
                 n == 256
                 and trans_flag == 0
+                and conj == 0
                 and unit == 1
                 and uplo == CUBLAS_FILL_MODE_LOWER
             ):
@@ -5401,3 +5956,99 @@ def ztrsv(
                     BLOCK_M=block_m,
                     BLOCK_N=block_n,
                 )
+
+
+@triton.jit
+def ztrsv_diag_inv_kernel(
+    a_ptr,
+    dinv_ptr,
+    n,
+    LDA,
+    TRANS: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    offs = tl.arange(0, BLOCK_N)
+    s = pid * BLOCK_N
+    row_mask = s + offs < n
+    Xr, Xi = _ztrsv_diag_block_inv(
+        a_ptr,
+        s,
+        LDA,
+        offs,
+        row_mask,
+        TRANS,
+        1,
+        0,
+        1,
+        BLOCK_N,
+        1,
+        0,
+    )
+    out = pid * BLOCK_N * BLOCK_N + offs[:, None] * BLOCK_N + offs[None, :]
+    mask = row_mask[:, None] & row_mask[None, :]
+    tl.store(dinv_ptr + out * 2, Xr, mask=mask)
+    tl.store(dinv_ptr + out * 2 + 1, Xi, mask=mask)
+
+
+@triton.jit
+def ztrsv_fwd_inv_kernel(
+    a_ptr,
+    x_ptr,
+    dinv_ptr,
+    flag_ptr,
+    n,
+    LDA,
+    TRANS: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    CHUNK: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    offs = tl.arange(0, BLOCK_N)
+    BK: tl.constexpr = BLOCK_N * CHUNK
+    koffs = tl.arange(0, BK)
+    row_start = pid * BLOCK_N
+    rows = row_start + offs
+    row_mask = rows < n
+    inv_off = pid * BLOCK_N * BLOCK_N + offs[:, None] * BLOCK_N + offs[None, :]
+    mask = row_mask[:, None] & row_mask[None, :]
+    Xr = tl.load(dinv_ptr + inv_off * 2, mask=mask, other=0.0)
+    Xi = tl.load(dinv_ptr + inv_off * 2 + 1, mask=mask, other=0.0)
+    sxr = tl.load(x_ptr + rows * 2, mask=row_mask, other=0.0)
+    sxi = tl.load(x_ptr + rows * 2 + 1, mask=row_mask, other=0.0)
+
+    num_chunks = tl.cdiv(pid, CHUNK)
+    for g in tl.range(0, num_chunks):
+        pid_lo = g * CHUNK
+        pid_hi = tl.minimum(pid_lo + CHUNK, pid)
+        while tl.atomic_add(flag_ptr, 0, sem="acquire") < pid_hi - 1:
+            pass
+        kcols = pid_lo * BLOCK_N + koffs
+        col_mask = (kcols < pid_hi * BLOCK_N) & (kcols < n)
+        x2 = tl.load(
+            x_ptr + (kcols * 2)[:, None] + tl.arange(0, 2)[None, :],
+            mask=col_mask[:, None],
+            other=0.0,
+            eviction_policy="evict_last",
+        )
+        xpr, xpi = tl.split(x2)
+        if TRANS == 0:
+            a_off = (rows[:, None] + kcols[None, :] * LDA) * 2
+        else:
+            a_off = (kcols[None, :] + rows[:, None] * LDA) * 2
+        m2 = row_mask[:, None] & col_mask[None, :]
+        a2 = tl.load(
+            a_ptr + a_off[:, :, None] + tl.arange(0, 2)[None, None, :],
+            mask=m2[:, :, None],
+            other=0.0,
+            eviction_policy="evict_first",
+        )
+        ar, ai = tl.split(a2)
+        sxr -= tl.sum(ar * xpr[None, :] - ai * xpi[None, :], axis=1)
+        sxi -= tl.sum(ar * xpi[None, :] + ai * xpr[None, :], axis=1)
+
+    outr = tl.sum(Xr * sxr[None, :] - Xi * sxi[None, :], axis=1)
+    outi = tl.sum(Xr * sxi[None, :] + Xi * sxr[None, :], axis=1)
+    tl.store(x_ptr + rows * 2, outr, mask=row_mask)
+    tl.store(x_ptr + rows * 2 + 1, outi, mask=row_mask)
+    tl.atomic_xchg(flag_ptr, pid, sem="release")

@@ -14,6 +14,7 @@ from .symv import csymv, zsymv
 from .syr import csyr, dsyr, ssyr, zsyr
 from .syr2 import dsyr2, ssyr2
 from .trmv import ctrmv, dtrmv, strmv, ztrmv
+from .trsv import ctrsv, dtrsv, strsv, ztrsv
 
 __all__ = [
     "cgemv",
@@ -29,17 +30,20 @@ __all__ = [
     "csymv",
     "csyr",
     "ctrmv",
+    "ctrsv",
     "dsbmv",
     "dgbmv",
     "dspmv",
     "dsyr",
     "dsyr2",
     "dtrmv",
+    "dtrsv",
     "ssbmv",
     "sspmv",
     "ssyr",
     "ssyr2",
     "strmv",
+    "strsv",
     "zhemv",
     "zgerc",
     "zgeru",
@@ -54,4 +58,5 @@ __all__ = [
     "zsymv",
     "zsyr",
     "ztrmv",
+    "ztrsv",
 ]
