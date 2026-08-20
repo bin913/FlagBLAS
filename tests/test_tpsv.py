@@ -18,6 +18,7 @@ from flag_blas.ops import (
 
 from .accuracy_utils import blas_assert_close, to_cpu_blas_tensor
 from .conftest import TO_CPU
+from .hipblas_reference import check_hipblas_status, get_hipblas_context
 
 pytestmark = pytest.mark.tpsv
 
@@ -35,7 +36,7 @@ def load_cublas():
     raise RuntimeError("Unable to find libcublas.so on this system")
 
 
-_cublas = load_cublas()
+_cublas = None if flag_blas.vendor_name == "hygon" else load_cublas()
 
 
 def _cublas_tpsv(fn, fn_name, uplo, trans, diag, n, AP, x, incx):
@@ -61,7 +62,56 @@ def _cublas_tpsv(fn, fn_name, uplo, trans, diag, n, AP, x, incx):
     return x
 
 
+def hipblas_tpsv_reference(uplo, trans, diag, n, AP, x, incx):
+    if n == 0:
+        return x
+
+    if AP.dtype == torch.float32:
+        symbol = "hipblasStpsv"
+    elif AP.dtype == torch.float64:
+        symbol = "hipblasDtpsv"
+    elif AP.dtype == torch.complex64:
+        symbol = "hipblasCtpsv_v2"
+    elif AP.dtype == torch.complex128:
+        symbol = "hipblasZtpsv_v2"
+    else:
+        raise ValueError(f"Unsupported dtype for hipBLAS TPSV: {AP.dtype}")
+
+    hip_uplo = 121 if uplo == CUBLAS_FILL_MODE_UPPER else 122
+    hip_trans = 111 + trans
+    hip_diag = 131 + diag
+    library, handle = get_hipblas_context(AP)
+    function = getattr(library, symbol)
+    function.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_int,
+    ]
+    function.restype = ctypes.c_int
+    check_hipblas_status(
+        function(
+            handle,
+            hip_uplo,
+            hip_trans,
+            hip_diag,
+            n,
+            ctypes.c_void_p(AP.data_ptr()),
+            ctypes.c_void_p(x.data_ptr()),
+            incx,
+        ),
+        symbol,
+    )
+    return x
+
+
 def cublas_stpsv_reference(uplo, trans, diag, n, AP, x, incx):
+    if flag_blas.vendor_name == "hygon":
+        return hipblas_tpsv_reference(uplo, trans, diag, n, AP, x, incx)
     return _cublas_tpsv(
         _cublas.cublasStpsv_v2,
         "cublasStpsv_v2",
@@ -76,6 +126,8 @@ def cublas_stpsv_reference(uplo, trans, diag, n, AP, x, incx):
 
 
 def cublas_dtpsv_reference(uplo, trans, diag, n, AP, x, incx):
+    if flag_blas.vendor_name == "hygon":
+        return hipblas_tpsv_reference(uplo, trans, diag, n, AP, x, incx)
     return _cublas_tpsv(
         _cublas.cublasDtpsv_v2,
         "cublasDtpsv_v2",
@@ -90,6 +142,8 @@ def cublas_dtpsv_reference(uplo, trans, diag, n, AP, x, incx):
 
 
 def cublas_ctpsv_reference(uplo, trans, diag, n, AP, x, incx):
+    if flag_blas.vendor_name == "hygon":
+        return hipblas_tpsv_reference(uplo, trans, diag, n, AP, x, incx)
     return _cublas_tpsv(
         _cublas.cublasCtpsv_v2,
         "cublasCtpsv_v2",
@@ -104,6 +158,8 @@ def cublas_ctpsv_reference(uplo, trans, diag, n, AP, x, incx):
 
 
 def cublas_ztpsv_reference(uplo, trans, diag, n, AP, x, incx):
+    if flag_blas.vendor_name == "hygon":
+        return hipblas_tpsv_reference(uplo, trans, diag, n, AP, x, incx)
     return _cublas_tpsv(
         _cublas.cublasZtpsv_v2,
         "cublasZtpsv_v2",
@@ -117,39 +173,21 @@ def cublas_ztpsv_reference(uplo, trans, diag, n, AP, x, incx):
     )
 
 
-def _pack_triangular(A, uplo):
-    n = A.shape[0]
-    vals = []
-    for j in range(n):
-        if uplo == CUBLAS_FILL_MODE_UPPER:
-            for i in range(j + 1):
-                vals.append(A[i, j])
-        else:
-            for i in range(j, n):
-                vals.append(A[i, j])
-    return torch.stack(vals).contiguous()
+def _row_major_diag_offsets(n, uplo, device):
+    rows = torch.arange(n, dtype=torch.int64, device=device)
+    if uplo == CUBLAS_FILL_MODE_UPPER:
+        return rows * n - rows * (rows - 1) // 2
+    return rows * (rows + 3) // 2
 
 
 def _make_case(n, dtype, uplo, diag, incx, device):
     torch.manual_seed(n + 17 * int(uplo) + 31 * int(diag) + 43 * int(incx))
-    if dtype.is_complex:
-        A = (
-            torch.randn((n, n), dtype=dtype, device=device) * 0.05
-            + 1j * torch.randn((n, n), dtype=dtype, device=device) * 0.05
-        )
-        b = torch.randn(
-            (1 + (n - 1) * incx,), dtype=dtype, device=device
-        ) + 1j * torch.randn((1 + (n - 1) * incx,), dtype=dtype, device=device)
-    else:
-        A = torch.randn((n, n), dtype=dtype, device=device) * 0.05
-        b = torch.randn((1 + (n - 1) * incx,), dtype=dtype, device=device)
-    diag_idx = torch.arange(n, device=device)
-    A[diag_idx, diag_idx] = 1.0 if diag == CUBLAS_DIAG_UNIT else 2.0
-    if uplo == CUBLAS_FILL_MODE_UPPER:
-        A = torch.triu(A)
-    else:
-        A = torch.tril(A)
-    return _pack_triangular(A, uplo), b.contiguous()
+    AP = torch.randn(n * (n + 1) // 2, dtype=dtype, device=device) * 0.05
+    AP[_row_major_diag_offsets(n, uplo, device)] = (
+        1.0 if diag == CUBLAS_DIAG_UNIT else 2.0
+    )
+    b = torch.randn(1 + (n - 1) * incx, dtype=dtype, device=device)
+    return AP.contiguous(), b.contiguous()
 
 
 def _scipy_ref(name, n, AP, x, incx, uplo, trans, diag):
@@ -198,11 +236,21 @@ def _run(op, cpu_ref, gpu_ref, dtype, uplo, trans, diag, n, incx=1):
     device = flag_blas.device
     AP, x = _make_case(n, dtype, uplo, diag, incx, device)
     y = x.clone()
+    ref_uplo = (
+        CUBLAS_FILL_MODE_LOWER
+        if uplo == CUBLAS_FILL_MODE_UPPER
+        else CUBLAS_FILL_MODE_UPPER
+    )
+    ref_trans = CUBLAS_OP_T if trans == CUBLAS_OP_N else CUBLAS_OP_N
+    conjugate_vector = trans == CUBLAS_OP_C
+    ref_input = x.conj() if conjugate_vector else x
     if TO_CPU:
-        ref = cpu_ref(n, AP, x, incx, uplo, trans, diag)
+        ref = cpu_ref(n, AP, ref_input, incx, ref_uplo, ref_trans, diag)
     else:
-        ref = x.clone()
-        gpu_ref(uplo, trans, diag, n, AP, ref, incx)
+        ref = ref_input.clone()
+        gpu_ref(ref_uplo, ref_trans, diag, n, AP, ref, incx)
+    if conjugate_vector:
+        ref = ref.conj()
     op(uplo, trans, diag, n, AP, y, incx)
     blas_assert_close(y, ref, dtype, reduce_dim=n)
 
@@ -280,7 +328,7 @@ COMPLEX_STRIDE_CASES = [
 @pytest.mark.stpsv
 def test_accuracy_stpsv(uplo, trans, diag, n):
     _run(
-        flag_blas.ops.stpsv,
+        flag_blas.stpsv,
         scipy_stpsv_reference,
         cublas_stpsv_reference,
         torch.float32,
@@ -295,7 +343,7 @@ def test_accuracy_stpsv(uplo, trans, diag, n):
 @pytest.mark.stpsv
 def test_accuracy_stpsv_stride(incx, uplo, trans, diag, n):
     _run(
-        flag_blas.ops.stpsv,
+        flag_blas.stpsv,
         scipy_stpsv_reference,
         cublas_stpsv_reference,
         torch.float32,
@@ -311,7 +359,7 @@ def test_accuracy_stpsv_stride(incx, uplo, trans, diag, n):
 @pytest.mark.dtpsv
 def test_accuracy_dtpsv(uplo, trans, diag, n):
     _run(
-        flag_blas.ops.dtpsv,
+        flag_blas.dtpsv,
         scipy_dtpsv_reference,
         cublas_dtpsv_reference,
         torch.float64,
@@ -326,7 +374,7 @@ def test_accuracy_dtpsv(uplo, trans, diag, n):
 @pytest.mark.dtpsv
 def test_accuracy_dtpsv_stride(incx, uplo, trans, diag, n):
     _run(
-        flag_blas.ops.dtpsv,
+        flag_blas.dtpsv,
         scipy_dtpsv_reference,
         cublas_dtpsv_reference,
         torch.float64,
@@ -342,7 +390,7 @@ def test_accuracy_dtpsv_stride(incx, uplo, trans, diag, n):
 @pytest.mark.ctpsv
 def test_accuracy_ctpsv(uplo, trans, diag, n):
     _run(
-        flag_blas.ops.ctpsv,
+        flag_blas.ctpsv,
         scipy_ctpsv_reference,
         cublas_ctpsv_reference,
         torch.complex64,
@@ -357,7 +405,7 @@ def test_accuracy_ctpsv(uplo, trans, diag, n):
 @pytest.mark.ctpsv
 def test_accuracy_ctpsv_stride(incx, uplo, trans, diag, n):
     _run(
-        flag_blas.ops.ctpsv,
+        flag_blas.ctpsv,
         scipy_ctpsv_reference,
         cublas_ctpsv_reference,
         torch.complex64,
@@ -373,7 +421,7 @@ def test_accuracy_ctpsv_stride(incx, uplo, trans, diag, n):
 @pytest.mark.ztpsv
 def test_accuracy_ztpsv(uplo, trans, diag, n):
     _run(
-        flag_blas.ops.ztpsv,
+        flag_blas.ztpsv,
         scipy_ztpsv_reference,
         cublas_ztpsv_reference,
         torch.complex128,
@@ -388,7 +436,7 @@ def test_accuracy_ztpsv(uplo, trans, diag, n):
 @pytest.mark.ztpsv
 def test_accuracy_ztpsv_stride(incx, uplo, trans, diag, n):
     _run(
-        flag_blas.ops.ztpsv,
+        flag_blas.ztpsv,
         scipy_ztpsv_reference,
         cublas_ztpsv_reference,
         torch.complex128,
@@ -432,14 +480,10 @@ def test_tpsv_unit_diag_ignores_stored_diagonal(op, dtype, uplo):
     n = 9
     AP, x = _make_case(n, dtype, uplo, CUBLAS_DIAG_UNIT, 1, flag_blas.device)
     dirty = AP.clone()
-    for j in range(n):
-        if uplo == CUBLAS_FILL_MODE_UPPER:
-            offset = j * (j + 1) // 2 + j
-        else:
-            offset = j * n - j * (j - 1) // 2
-        dirty[offset] = (
-            complex(float("nan"), float("nan")) if dtype.is_complex else float("nan")
-        )
+    offsets = _row_major_diag_offsets(n, uplo, flag_blas.device)
+    dirty[offsets] = (
+        complex(float("nan"), float("nan")) if dtype.is_complex else float("nan")
+    )
     clean_x = x.clone()
     dirty_x = x.clone()
 
