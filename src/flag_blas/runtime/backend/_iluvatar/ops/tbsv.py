@@ -789,6 +789,16 @@ def _check_tbsv(A, x, uplo, trans, diag, n, k, lda, incx, complex_ok):
         assert A.numel() >= n * lda
 
 
+def _row_major_tbsv_args(uplo, trans):
+    physical_uplo = (
+        CUBLAS_FILL_MODE_LOWER
+        if uplo == CUBLAS_FILL_MODE_UPPER
+        else CUBLAS_FILL_MODE_UPPER
+    )
+    physical_trans = CUBLAS_OP_T if trans == CUBLAS_OP_N else CUBLAS_OP_N
+    return physical_uplo, physical_trans
+
+
 # --------------------------------------------------------------------------
 # Public API
 # --------------------------------------------------------------------------
@@ -808,6 +818,7 @@ def stbsv(
     _check_tbsv(A, x, uplo, trans, diag, n, k, lda, incx, complex_ok=False)
     if n == 0:
         return
+    uplo, trans = _row_major_tbsv_args(uplo, trans)
     unit = 1 if diag == CUBLAS_DIAG_UNIT else 0
     trans_flag = 0 if trans == CUBLAS_OP_N else 1
 
