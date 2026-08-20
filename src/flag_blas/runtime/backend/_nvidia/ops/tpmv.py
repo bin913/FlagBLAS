@@ -17,11 +17,12 @@ import triton
 import triton.language as tl
 
 from flag_blas import runtime
-from flag_blas.ops.level2._constants import CUBLAS_DIAG_UNIT, CUBLAS_OP_C, CUBLAS_OP_N
+from flag_blas.ops.level2._constants import CUBLAS_DIAG_UNIT, CUBLAS_OP_N
 from flag_blas.ops.level2.tpmv import (
     _check_tpmv,
     _ctpmv_split_k,
     _mode_key,
+    _row_major_tpmv_args,
     ctpmv_reduce_kernel,
 )
 from flag_blas.runtime import torch_device_fn
@@ -409,8 +410,8 @@ def ctpmv(
     if n == 0:
         return
     unit = 1 if diag == CUBLAS_DIAG_UNIT else 0
+    uplo, trans, conj = _row_major_tpmv_args(uplo, trans)
     trans_flag = 0 if trans == CUBLAS_OP_N else 1
-    conj = 1 if trans == CUBLAS_OP_C else 0
     split_k = _ctpmv_split_k(n, trans_flag)
 
     with torch_device_fn.device(AP.device):
