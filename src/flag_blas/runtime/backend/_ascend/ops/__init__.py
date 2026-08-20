@@ -1,4 +1,3 @@
-from .axpy import saxpy
 from .gemv import cgemv, sgemv
 from .ger import cgerc, cgeru
 from .hemv import chemv
@@ -11,7 +10,6 @@ from .tpmv import ctpmv, stpmv
 from .trsv import ctrsv, strsv
 
 __all__ = [
-    "saxpy",
     "cgeru",
     "cgerc",
     "sgemv",
