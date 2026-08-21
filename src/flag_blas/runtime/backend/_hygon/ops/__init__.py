@@ -9,6 +9,7 @@ from .hpmv import chpmv, zhpmv
 from .hpr import chpr, zhpr
 from .hpr2 import zhpr2
 from .sbmv import dsbmv, ssbmv
+from .sgemm import sgemm
 from .spmv import dspmv, sspmv
 from .symv import csymv, zsymv
 from .syr import csyr, dsyr, ssyr, zsyr
@@ -35,6 +36,7 @@ __all__ = [
     "dsyr",
     "dsyr2",
     "dtrmv",
+    "sgemm",
     "ssbmv",
     "sspmv",
     "ssyr",

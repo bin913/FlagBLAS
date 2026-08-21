@@ -15,10 +15,8 @@
 import itertools
 from typing import Generator, List, Tuple
 
-import cupy as cp
 import numpy as np
 import torch
-from cupy_backends.cuda.libs import cublas
 
 import flag_blas
 from benchmark.performance_utils import Benchmark
@@ -28,6 +26,140 @@ from flag_blas.utils import shape_utils
 CUDA_R_32F = 0
 CUDA_R_16F = 2
 CUDA_R_16BF = 14
+
+HIPBLAS_POINTER_MODE_HOST = 0
+
+# DTK hipBLAS follows the rocBLAS convention for the operation enum
+# (HIPBLAS_OP_N/T/C = 111/112/113), while FlagBLAS APIs use cuBLAS-style
+# enums (CUBLAS_OP_N/T/C = 0/1/2). Map between them when calling hipBLAS.
+_HIPBLAS_OP_MAP = {0: 111, 1: 112, 2: 113}
+
+IS_HYGON = flag_blas.vendor_name == "hygon"
+
+if IS_HYGON:
+    import atexit
+    import ctypes
+    import ctypes.util
+
+    _HIPBLAS_LIBRARY = None
+    _HIPBLAS_HANDLES = {}
+
+    def _check_hipblas_status(status, operation):
+        if status != 0:
+            raise RuntimeError(f"{operation} failed with hipBLAS status {status}")
+
+    def _load_hipblas():
+        global _HIPBLAS_LIBRARY
+        if _HIPBLAS_LIBRARY is None:
+            library_name = ctypes.util.find_library("hipblas")
+            if library_name is None:
+                raise RuntimeError("Unable to find the hipBLAS shared library")
+            library = ctypes.CDLL(library_name)
+            library.hipblasCreate.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
+            library.hipblasCreate.restype = ctypes.c_int
+            library.hipblasDestroy.argtypes = [ctypes.c_void_p]
+            library.hipblasDestroy.restype = ctypes.c_int
+            library.hipblasSetStream.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+            library.hipblasSetStream.restype = ctypes.c_int
+            library.hipblasSetPointerMode.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            library.hipblasSetPointerMode.restype = ctypes.c_int
+            library.hipblasSgemm.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_int,
+                ctypes.c_void_p,
+                ctypes.c_int,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_int,
+            ]
+            library.hipblasSgemm.restype = ctypes.c_int
+            _HIPBLAS_LIBRARY = library
+        return _HIPBLAS_LIBRARY
+
+    def _prepare_hipblas(device):
+        library = _load_hipblas()
+        torch_device = torch.device(device)
+        device_index = torch_device.index
+        if device_index is None:
+            device_index = torch.cuda.current_device()
+        handle = _HIPBLAS_HANDLES.get(device_index)
+        if handle is None:
+            with torch.cuda.device(device_index):
+                handle = ctypes.c_void_p()
+                _check_hipblas_status(
+                    library.hipblasCreate(ctypes.byref(handle)), "hipblasCreate"
+                )
+                _check_hipblas_status(
+                    library.hipblasSetPointerMode(handle, HIPBLAS_POINTER_MODE_HOST),
+                    "hipblasSetPointerMode",
+                )
+            _HIPBLAS_HANDLES[device_index] = handle
+        stream = torch.cuda.current_stream(device).cuda_stream
+        _check_hipblas_status(
+            library.hipblasSetStream(handle, ctypes.c_void_p(stream)),
+            "hipblasSetStream",
+        )
+        return library, handle
+
+    def _hipblas_sgemm(
+        handle,
+        transa,
+        transb,
+        m,
+        n,
+        k,
+        alpha_ptr,
+        A,
+        lda,
+        B,
+        ldb,
+        beta_ptr,
+        C,
+        ldc,
+    ):
+        library = _load_hipblas()
+        _check_hipblas_status(
+            library.hipblasSgemm(
+                handle,
+                _HIPBLAS_OP_MAP[transa],
+                _HIPBLAS_OP_MAP[transb],
+                m,
+                n,
+                k,
+                alpha_ptr,
+                ctypes.c_void_p(A.data_ptr()),
+                lda,
+                ctypes.c_void_p(B.data_ptr()),
+                ldb,
+                beta_ptr,
+                ctypes.c_void_p(C.data_ptr()),
+                ldc,
+            ),
+            "hipblasSgemm",
+        )
+        return C
+
+    def _destroy_hipblas_handles():
+        if _HIPBLAS_LIBRARY is None:
+            return
+        for handle in tuple(_HIPBLAS_HANDLES.values()):
+            try:
+                _HIPBLAS_LIBRARY.hipblasDestroy(handle)
+            except Exception:
+                pass
+        _HIPBLAS_HANDLES.clear()
+
+    atexit.register(_destroy_hipblas_handles)
+else:
+    import cupy as cp
+    from cupy_backends.cuda.libs import cublas
 
 GEMM_SHAPES = [
     (511, 511, 511),
@@ -110,22 +242,40 @@ def cublas_sgemm(
     alpha_ptr,
     beta_ptr,
 ):
-    cublas.sgemm(
-        handle,
-        transa,
-        transb,
-        m,
-        n,
-        k,
-        alpha_ptr,
-        A_col.data_ptr(),
-        lda_cublas,
-        B_col.data_ptr(),
-        ldb_cublas,
-        beta_ptr,
-        C_col.data_ptr(),
-        ldc_cublas,
-    )
+    if IS_HYGON:
+        _hipblas_sgemm(
+            handle,
+            transa,
+            transb,
+            m,
+            n,
+            k,
+            alpha_ptr,
+            A_col,
+            lda_cublas,
+            B_col,
+            ldb_cublas,
+            beta_ptr,
+            C_col,
+            ldc_cublas,
+        )
+    else:
+        cublas.sgemm(
+            handle,
+            transa,
+            transb,
+            m,
+            n,
+            k,
+            alpha_ptr,
+            A_col.data_ptr(),
+            lda_cublas,
+            B_col.data_ptr(),
+            ldb_cublas,
+            beta_ptr,
+            C_col.data_ptr(),
+            ldc_cublas,
+        )
     return C_col
 
 
@@ -436,15 +586,22 @@ class GemmBenchmark(Benchmark):
         return GEMM_SHAPES + model_shapes()
 
     def get_input_iter(self, cur_dtype) -> Generator:
-        handle = cp.cuda.device.get_cublas_handle()
-        cublas.setPointerMode(handle, cublas.CUBLAS_POINTER_MODE_HOST)
-        cublas.setMathMode(handle, 0)
-        torch.backends.cuda.matmul.allow_tf32 = False
+        if IS_HYGON:
+            _, handle = _prepare_hipblas(self.device)
+            alpha_np = ctypes.c_float(float(self.alpha))
+            beta_np = ctypes.c_float(float(self.beta))
+            alpha_ptr = ctypes.byref(alpha_np)
+            beta_ptr = ctypes.byref(beta_np)
+        else:
+            handle = cp.cuda.device.get_cublas_handle()
+            cublas.setPointerMode(handle, cublas.CUBLAS_POINTER_MODE_HOST)
+            cublas.setMathMode(handle, 0)
+            torch.backends.cuda.matmul.allow_tf32 = False
 
-        alpha_np = np.array(self.alpha, dtype=self.alpha_dtype)
-        beta_np = np.array(self.beta, dtype=self.alpha_dtype)
-        alpha_ptr = alpha_np.ctypes.data
-        beta_ptr = beta_np.ctypes.data
+            alpha_np = np.array(self.alpha, dtype=self.alpha_dtype)
+            beta_np = np.array(self.beta, dtype=self.alpha_dtype)
+            alpha_ptr = alpha_np.ctypes.data
+            beta_ptr = beta_np.ctypes.data
 
         for shape in self.shapes:
             m, n, k = shape

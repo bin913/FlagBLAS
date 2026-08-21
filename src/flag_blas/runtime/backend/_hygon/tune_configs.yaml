@@ -2054,3 +2054,17 @@ zhpr2_hygon:
   - META: {BLOCK_SIZE: 128}
     num_warps: 2
     num_stages: 2
+
+sgemm_hygon:
+  - META: {BLOCK_M: 32, BLOCK_N: 32, BLOCK_K: 64, GROUP_M: 8}
+    num_warps: 4
+    num_stages: 2
+  - META: {BLOCK_M: 32, BLOCK_N: 64, BLOCK_K: 32, GROUP_M: 8}
+    num_warps: 8
+    num_stages: 2
+  - META: {BLOCK_M: 128, BLOCK_N: 64, BLOCK_K: 32, GROUP_M: 8}
+    num_warps: 8
+    num_stages: 2
+  - META: {BLOCK_M: 128, BLOCK_N: 128, BLOCK_K: 32, GROUP_M: 8}
+    num_warps: 8
+    num_stages: 3

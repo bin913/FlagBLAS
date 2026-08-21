@@ -7,6 +7,18 @@ import torch
 
 HIPBLAS_POINTER_MODE_HOST = 0
 
+# DTK hipBLAS follows the rocBLAS convention for the operation enum
+# (HIPBLAS_OP_N/T/C = 111/112/113), while FlagBLAS APIs use cuBLAS-style
+# enums (CUBLAS_OP_N/T/C = 0/1/2). Map between them when calling hipBLAS.
+HIPBLAS_OP_N = 111
+HIPBLAS_OP_T = 112
+HIPBLAS_OP_C = 113
+
+
+def to_hipblas_op(op):
+    """Map a cuBLAS-style operation enum (CUBLAS_OP_N/T/C) to hipBLAS."""
+    return {0: HIPBLAS_OP_N, 1: HIPBLAS_OP_T, 2: HIPBLAS_OP_C}[op]
+
 
 class HipComplex(ctypes.Structure):
     _fields_ = [("real", ctypes.c_float), ("imag", ctypes.c_float)]
