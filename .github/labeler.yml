@@ -28,6 +28,12 @@ vendor/NVIDIA:
           - "src/flag_blas/runtime/backend/_nvidia/**"
           - "tools/check_nvidia_gpu.sh"
 
+vendor/Ascend:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "src/flag_blas/runtime/backend/_ascend/**"
+          - "tools/check_ascend_gpu.sh"
+
 vendor/Hygon:
   - changed-files:
       - any-glob-to-any-file:
