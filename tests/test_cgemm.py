@@ -46,7 +46,8 @@ def cublas_cgemm_reference(
 
 @pytest.mark.cgemm
 @pytest.mark.skipif(
-    flag_blas.vendor_name == "thead", reason="cublasCgemm not supported on T-Head (Zhenwu) platform"
+    flag_blas.vendor_name == "thead",
+    reason="cublasCgemm not supported on T-Head (Zhenwu) platform",
 )
 @pytest.mark.parametrize("m,n,k", CGEMM_SHAPES)
 @pytest.mark.parametrize(
@@ -137,7 +138,8 @@ def test_accuracy_cgemm(m, n, k, transa, transb):
 
 @pytest.mark.cgemm
 @pytest.mark.skipif(
-    flag_blas.vendor_name == "thead", reason="cublasCgemm not supported on T-Head (Zhenwu) platform"
+    flag_blas.vendor_name == "thead",
+    reason="cublasCgemm not supported on T-Head (Zhenwu) platform",
 )
 @pytest.mark.parametrize(
     "alpha,beta",
@@ -167,7 +169,8 @@ def test_cgemm_alpha_beta(alpha, beta):
 
 @pytest.mark.cgemm
 @pytest.mark.skipif(
-    flag_blas.vendor_name == "thead", reason="cublasCgemm not supported on T-Head (Zhenwu) platform"
+    flag_blas.vendor_name == "thead",
+    reason="cublasCgemm not supported on T-Head (Zhenwu) platform",
 )
 @pytest.mark.parametrize("m,n,k", [(0, 64, 64), (64, 0, 64), (64, 64, 0)])
 def test_cgemm_empty(m, n, k):

@@ -843,8 +843,22 @@ def _thead_hgemm_tn_kernel(
     GROUP_M: tl.constexpr,
 ):
     _thead_hgemm_tn_impl(
-        a_ptr, b_ptr, c_ptr, alpha, beta, lda, ldb, ldc,
-        BETA_IS_ZERO, M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, GROUP_M,
+        a_ptr,
+        b_ptr,
+        c_ptr,
+        alpha,
+        beta,
+        lda,
+        ldb,
+        ldc,
+        BETA_IS_ZERO,
+        M,
+        N,
+        K,
+        BLOCK_M,
+        BLOCK_N,
+        BLOCK_K,
+        GROUP_M,
     )
 
 
@@ -962,8 +976,22 @@ def _thead_hgemm_tn_trans_a_kernel(
     GROUP_M: tl.constexpr,
 ):
     _thead_hgemm_tn_trans_a_impl(
-        a_ptr, b_ptr, c_ptr, alpha, beta, lda, ldb, ldc,
-        BETA_IS_ZERO, M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, GROUP_M,
+        a_ptr,
+        b_ptr,
+        c_ptr,
+        alpha,
+        beta,
+        lda,
+        ldb,
+        ldc,
+        BETA_IS_ZERO,
+        M,
+        N,
+        K,
+        BLOCK_M,
+        BLOCK_N,
+        BLOCK_K,
+        GROUP_M,
     )
 
 
@@ -988,8 +1016,22 @@ def _thead_hgemm_tn_trans_a_bwd_kernel(
     GROUP_M: tl.constexpr,
 ):
     _thead_hgemm_tn_trans_a_impl(
-        a_ptr, b_ptr, c_ptr, alpha, beta, lda, ldb, ldc,
-        BETA_IS_ZERO, M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, GROUP_M,
+        a_ptr,
+        b_ptr,
+        c_ptr,
+        alpha,
+        beta,
+        lda,
+        ldb,
+        ldc,
+        BETA_IS_ZERO,
+        M,
+        N,
+        K,
+        BLOCK_M,
+        BLOCK_N,
+        BLOCK_K,
+        GROUP_M,
     )
 
 
@@ -1161,8 +1203,22 @@ def _thead_hgemm_tn_bwd_kernel(
     GROUP_M: tl.constexpr,
 ):
     _thead_hgemm_tn_impl(
-        a_ptr, b_ptr, c_ptr, alpha, beta, lda, ldb, ldc,
-        BETA_IS_ZERO, M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, GROUP_M,
+        a_ptr,
+        b_ptr,
+        c_ptr,
+        alpha,
+        beta,
+        lda,
+        ldb,
+        ldc,
+        BETA_IS_ZERO,
+        M,
+        N,
+        K,
+        BLOCK_M,
+        BLOCK_N,
+        BLOCK_K,
+        GROUP_M,
     )
 
 
@@ -1351,8 +1407,22 @@ def _thead_hgemm_nt_kernel(
     GROUP_M: tl.constexpr,
 ):
     _thead_hgemm_nt_impl(
-        a_ptr, b_ptr, c_ptr, alpha, beta, lda, ldb, ldc,
-        BETA_IS_ZERO, M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, GROUP_M,
+        a_ptr,
+        b_ptr,
+        c_ptr,
+        alpha,
+        beta,
+        lda,
+        ldb,
+        ldc,
+        BETA_IS_ZERO,
+        M,
+        N,
+        K,
+        BLOCK_M,
+        BLOCK_N,
+        BLOCK_K,
+        GROUP_M,
     )
 
 
@@ -1437,8 +1507,22 @@ def _thead_hgemm_nt_bwd_kernel(
     GROUP_M: tl.constexpr,
 ):
     _thead_hgemm_nt_impl(
-        a_ptr, b_ptr, c_ptr, alpha, beta, lda, ldb, ldc,
-        BETA_IS_ZERO, M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, GROUP_M,
+        a_ptr,
+        b_ptr,
+        c_ptr,
+        alpha,
+        beta,
+        lda,
+        ldb,
+        ldc,
+        BETA_IS_ZERO,
+        M,
+        N,
+        K,
+        BLOCK_M,
+        BLOCK_N,
+        BLOCK_K,
+        GROUP_M,
     )
 
 
@@ -1626,8 +1710,22 @@ def _thead_hgemm_tt_kernel(
     GROUP_M: tl.constexpr,
 ):
     _thead_hgemm_tt_impl(
-        a_ptr, b_ptr, c_ptr, alpha, beta, lda, ldb, ldc,
-        BETA_IS_ZERO, M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, GROUP_M,
+        a_ptr,
+        b_ptr,
+        c_ptr,
+        alpha,
+        beta,
+        lda,
+        ldb,
+        ldc,
+        BETA_IS_ZERO,
+        M,
+        N,
+        K,
+        BLOCK_M,
+        BLOCK_N,
+        BLOCK_K,
+        GROUP_M,
     )
 
 
@@ -1713,8 +1811,22 @@ def _thead_hgemm_tt_bwd_kernel(
     GROUP_M: tl.constexpr,
 ):
     _thead_hgemm_tt_impl(
-        a_ptr, b_ptr, c_ptr, alpha, beta, lda, ldb, ldc,
-        BETA_IS_ZERO, M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, GROUP_M,
+        a_ptr,
+        b_ptr,
+        c_ptr,
+        alpha,
+        beta,
+        lda,
+        ldb,
+        ldc,
+        BETA_IS_ZERO,
+        M,
+        N,
+        K,
+        BLOCK_M,
+        BLOCK_N,
+        BLOCK_K,
+        GROUP_M,
     )
 
 
@@ -1824,9 +1936,9 @@ def _thead_hgemm_nn_use_large_bwd(m: int, n: int, k: int) -> bool:
 
 
 def _thead_hgemm_nn_use_bwd(m: int, n: int, k: int) -> bool:
-    return _thead_hgemm_nn_use_large_bwd(m, n, k) and not _thead_hgemm_nn_use_desc_bwd_narrow(
+    return _thead_hgemm_nn_use_large_bwd(
         m, n, k
-    )
+    ) and not _thead_hgemm_nn_use_desc_bwd_narrow(m, n, k)
 
 
 def _thead_hgemm_nn_use_desc_bwd_narrow(m: int, n: int, k: int) -> bool:
@@ -1834,8 +1946,10 @@ def _thead_hgemm_nn_use_desc_bwd_narrow(m: int, n: int, k: int) -> bool:
 
 
 def _thead_hgemm_nn_use_desc_bwd(m: int, n: int, k: int) -> bool:
-    return _thead_hgemm_nn_use_desc_bwd_narrow(m, n, k) or min(m, n) >= 1024 or (
-        min(m, n) >= 512 and 512 < max(m, n, k) <= 1024
+    return (
+        _thead_hgemm_nn_use_desc_bwd_narrow(m, n, k)
+        or min(m, n) >= 1024
+        or (min(m, n) >= 512 and 512 < max(m, n, k) <= 1024)
     )
 
 
@@ -1978,59 +2092,33 @@ def _thead_hgemm_tt_config(m: int, n: int, k: int):
 def _can_use_thead_hgemm_nn(
     m: int, n: int, k: int, lda: int, ldb: int, ldc: int, alpha, beta
 ) -> bool:
-    return (
-        lda == k
-        and ldb == n
-        and ldc == n
-        and m >= 16
-        and n >= 16
-        and k >= 16
-    )
+    return lda == k and ldb == n and ldc == n and m >= 16 and n >= 16 and k >= 16
 
 
 def _can_use_thead_hgemm_tn(
     m: int, n: int, k: int, lda: int, ldb: int, ldc: int, alpha, beta
 ) -> bool:
     # A^T: A is (K, M), lda = M; B: (K, N), ldb = N
-    return (
-        lda == m
-        and ldb == n
-        and ldc == n
-        and m >= 16
-        and n >= 16
-        and k >= 16
-    )
+    return lda == m and ldb == n and ldc == n and m >= 16 and n >= 16 and k >= 16
 
 
 def _can_use_thead_hgemm_nt(
     m: int, n: int, k: int, lda: int, ldb: int, ldc: int, alpha, beta
 ) -> bool:
     # A: (M, K), lda = K; B^T: B is (N, K), ldb = K
-    return (
-        lda == k
-        and ldb == k
-        and ldc == n
-        and m >= 16
-        and n >= 16
-        and k >= 16
-    )
+    return lda == k and ldb == k and ldc == n and m >= 16 and n >= 16 and k >= 16
 
 
 def _can_use_thead_hgemm_tt(
     m: int, n: int, k: int, lda: int, ldb: int, ldc: int, alpha, beta
 ) -> bool:
     # A^T: A is (K, M), lda = M; B^T: B is (N, K), ldb = K
-    return (
-        lda == m
-        and ldb == k
-        and ldc == n
-        and m >= 16
-        and n >= 16
-        and k >= 16
-    )
+    return lda == m and ldb == k and ldc == n and m >= 16 and n >= 16 and k >= 16
 
 
-def _thead_hgemm_is_tile_aligned(m: int, n: int, k: int, block_m: int, block_n: int, block_k: int) -> bool:
+def _thead_hgemm_is_tile_aligned(
+    m: int, n: int, k: int, block_m: int, block_n: int, block_k: int
+) -> bool:
     """Check if all dimensions are multiples of their block sizes (no partial tiles)."""
     return m % block_m == 0 and n % block_n == 0 and k % block_k == 0
 
@@ -2155,12 +2243,15 @@ def _thead_hgemm_tn_use_cola(m: int, n: int, k: int) -> bool:
 def _run_thead_hgemm_tn_cola(
     A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero
 ):
-    block_m, block_n, block_k, num_warps, num_stages, maxnreg = (
-        _thead_hgemm_tn_cola_config(m, n, k)
-    )
-    _thead_hgemm_tn_cola_kernel[
-        (triton.cdiv(m, block_m) * triton.cdiv(n, block_n),)
-    ](
+    (
+        block_m,
+        block_n,
+        block_k,
+        num_warps,
+        num_stages,
+        maxnreg,
+    ) = _thead_hgemm_tn_cola_config(m, n, k)
+    _thead_hgemm_tn_cola_kernel[(triton.cdiv(m, block_m) * triton.cdiv(n, block_n),)](
         A,
         B,
         C,
@@ -2193,9 +2284,14 @@ def _run_thead_hgemm_tn(
         )
         return
     if _thead_hgemm_tn_use_desc_overlap(m, n, k):
-        block_m, block_n, block_k, num_warps, num_stages, maxnreg = (
-            _thead_hgemm_tn_desc_overlap_config(m, n, k)
-        )
+        (
+            block_m,
+            block_n,
+            block_k,
+            num_warps,
+            num_stages,
+            maxnreg,
+        ) = _thead_hgemm_tn_desc_overlap_config(m, n, k)
         _thead_hgemm_tn_desc_overlap_kernel[
             (triton.cdiv(m, block_m) * triton.cdiv(n, block_n),)
         ](
@@ -2638,13 +2734,9 @@ def _run_thead_hgemm_tt_materialized(
 ):
     C_T = torch.empty((n, m), dtype=C.dtype, device=C.device)
     if _thead_hgemm_nn_should_pad(n, m, k):
-        _run_thead_hgemm_nn_padded(
-            B, ldb, A, lda, C_T, m, n, m, k, alpha, 0.0, True
-        )
+        _run_thead_hgemm_nn_padded(B, ldb, A, lda, C_T, m, n, m, k, alpha, 0.0, True)
     else:
-        _run_thead_hgemm_nn(
-            B, ldb, A, lda, C_T, m, n, m, k, alpha, 0.0, True, True
-        )
+        _run_thead_hgemm_nn(B, ldb, A, lda, C_T, m, n, m, k, alpha, 0.0, True, True)
 
     if m <= 512 and n <= 512:
         block_m, block_n = 8, 64
@@ -2652,9 +2744,7 @@ def _run_thead_hgemm_tt_materialized(
         block_m, block_n = 16, 128
     else:
         block_m, block_n = 16, 64
-    _thead_hgemm_transpose_c_kernel[
-        (triton.cdiv(m, block_m), triton.cdiv(n, block_n))
-    ](
+    _thead_hgemm_transpose_c_kernel[(triton.cdiv(m, block_m), triton.cdiv(n, block_n))](
         C_T,
         C,
         beta,
@@ -2689,11 +2779,30 @@ def _run_thead_hgemm_tn_padded(
         B, B_pad, k, n, ldb, n_pad, k_pad, n_pad, BLOCK_SIZE=pad_block
     )
     _run_thead_hgemm_tn(
-        A_pad, m_pad, B_pad, n_pad, C_pad, n_pad,
-        m_pad, n_pad, k_pad, alpha, 0.0, True, True,
+        A_pad,
+        m_pad,
+        B_pad,
+        n_pad,
+        C_pad,
+        n_pad,
+        m_pad,
+        n_pad,
+        k_pad,
+        alpha,
+        0.0,
+        True,
+        True,
     )
     _thead_hgemm_crop_c_kernel[(triton.cdiv(m * n, pad_block),)](
-        C_pad, C, beta, m, n, n_pad, ldc, beta_is_zero, BLOCK_SIZE=pad_block,
+        C_pad,
+        C,
+        beta,
+        m,
+        n,
+        n_pad,
+        ldc,
+        beta_is_zero,
+        BLOCK_SIZE=pad_block,
     )
 
 
@@ -2716,11 +2825,30 @@ def _run_thead_hgemm_nt_padded(
         B, B_pad, n, k, ldb, k_pad, n_pad, k_pad, BLOCK_SIZE=pad_block
     )
     _run_thead_hgemm_nt(
-        A_pad, k_pad, B_pad, k_pad, C_pad, n_pad,
-        m_pad, n_pad, k_pad, alpha, 0.0, True, True,
+        A_pad,
+        k_pad,
+        B_pad,
+        k_pad,
+        C_pad,
+        n_pad,
+        m_pad,
+        n_pad,
+        k_pad,
+        alpha,
+        0.0,
+        True,
+        True,
     )
     _thead_hgemm_crop_c_kernel[(triton.cdiv(m * n, pad_block),)](
-        C_pad, C, beta, m, n, n_pad, ldc, beta_is_zero, BLOCK_SIZE=pad_block,
+        C_pad,
+        C,
+        beta,
+        m,
+        n,
+        n_pad,
+        ldc,
+        beta_is_zero,
+        BLOCK_SIZE=pad_block,
     )
 
 
@@ -2743,11 +2871,30 @@ def _run_thead_hgemm_tt_padded(
         B, B_pad, n, k, ldb, k_pad, n_pad, k_pad, BLOCK_SIZE=pad_block
     )
     _run_thead_hgemm_tt(
-        A_pad, m_pad, B_pad, k_pad, C_pad, n_pad,
-        m_pad, n_pad, k_pad, alpha, 0.0, True, True,
+        A_pad,
+        m_pad,
+        B_pad,
+        k_pad,
+        C_pad,
+        n_pad,
+        m_pad,
+        n_pad,
+        k_pad,
+        alpha,
+        0.0,
+        True,
+        True,
     )
     _thead_hgemm_crop_c_kernel[(triton.cdiv(m * n, pad_block),)](
-        C_pad, C, beta, m, n, n_pad, ldc, beta_is_zero, BLOCK_SIZE=pad_block,
+        C_pad,
+        C,
+        beta,
+        m,
+        n,
+        n_pad,
+        ldc,
+        beta_is_zero,
+        BLOCK_SIZE=pad_block,
     )
 
 
@@ -2839,9 +2986,14 @@ def _run_thead_hgemm_nn_padded(
 def _run_thead_hgemm_nn_splitk(
     A, lda, B, ldb, C, ldc, m, n, k, alpha, beta, beta_is_zero
 ):
-    block_m, block_n, block_k, num_warps, num_stages, split_k = (
-        _thead_hgemm_nn_splitk_config(m, n, k)
-    )
+    (
+        block_m,
+        block_n,
+        block_k,
+        num_warps,
+        num_stages,
+        split_k,
+    ) = _thead_hgemm_nn_splitk_config(m, n, k)
     tmp = torch.empty((m, n), dtype=torch.float32, device=C.device)
     block = 1024
     _thead_hgemm_zero_f32_kernel[(triton.cdiv(m * n, block),)](
@@ -2954,8 +3106,19 @@ def hgemm(
                     # Small non-aligned TN: single fused kernel, avoids the
                     # materialize (transpose + NN) overhead.
                     _run_thead_hgemm_tn(
-                        A, lda, B, ldb, C, ldc, m, n, k,
-                        alpha, beta, beta_is_zero, aligned,
+                        A,
+                        lda,
+                        B,
+                        ldb,
+                        C,
+                        ldc,
+                        m,
+                        n,
+                        k,
+                        alpha,
+                        beta,
+                        beta_is_zero,
+                        aligned,
                     )
                 elif _thead_hgemm_tn_should_materialize(m, n, k):
                     if m <= n:
@@ -2963,25 +3126,67 @@ def hgemm(
                         # A is (K, M) with lda=M, A^T will be (M, K) with lda=K.
                         if max(m, n, k) <= 1024:
                             _run_thead_hgemm_tn_materialize_a(
-                                A, lda, B, ldb, C, ldc, m, n, k,
-                                alpha, beta, beta_is_zero,
+                                A,
+                                lda,
+                                B,
+                                ldb,
+                                C,
+                                ldc,
+                                m,
+                                n,
+                                k,
+                                alpha,
+                                beta,
+                                beta_is_zero,
                             )
-                        elif _thead_hgemm_nn_should_pad(m, n, k) or _thead_hgemm_nt_should_pad(m, n, k):
+                        elif _thead_hgemm_nn_should_pad(
+                            m, n, k
+                        ) or _thead_hgemm_nt_should_pad(m, n, k):
                             if _thead_hgemm_tn_use_narrow_materialize(m, n, k):
                                 _run_thead_hgemm_tn_materialize_a_narrow(
-                                    A, lda, B, ldb, C, ldc, m, n, k,
-                                    alpha, beta, beta_is_zero,
+                                    A,
+                                    lda,
+                                    B,
+                                    ldb,
+                                    C,
+                                    ldc,
+                                    m,
+                                    n,
+                                    k,
+                                    alpha,
+                                    beta,
+                                    beta_is_zero,
                                 )
                             else:
                                 A_T = _thead_hgemm_transpose2d(A, k, m, lda)
                                 _run_thead_hgemm_nn_padded(
-                                    A_T, k, B, ldb, C, ldc, m, n, k,
-                                    alpha, beta, beta_is_zero,
+                                    A_T,
+                                    k,
+                                    B,
+                                    ldb,
+                                    C,
+                                    ldc,
+                                    m,
+                                    n,
+                                    k,
+                                    alpha,
+                                    beta,
+                                    beta_is_zero,
                                 )
                         else:
                             _run_thead_hgemm_tn_materialize_a(
-                                A, lda, B, ldb, C, ldc, m, n, k,
-                                alpha, beta, beta_is_zero,
+                                A,
+                                lda,
+                                B,
+                                ldb,
+                                C,
+                                ldc,
+                                m,
+                                n,
+                                k,
+                                alpha,
+                                beta,
+                                beta_is_zero,
                             )
                     else:
                         # N < M: Materialize B^T as (N, K) and use TT transpose-free kernel.
@@ -2989,19 +3194,51 @@ def hgemm(
                         # TT kernel computes C(M,N) = A^T(K,M) x B_T^T(K,N) = (M,K)x(K,N).
                         if max(m, n, k) <= 1024:
                             _run_thead_hgemm_tn_materialize_b(
-                                A, lda, B, ldb, C, ldc, m, n, k,
-                                alpha, beta, beta_is_zero,
+                                A,
+                                lda,
+                                B,
+                                ldb,
+                                C,
+                                ldc,
+                                m,
+                                n,
+                                k,
+                                alpha,
+                                beta,
+                                beta_is_zero,
                             )
-                        elif _thead_hgemm_nn_should_pad(m, n, k) or _thead_hgemm_tt_should_pad(m, n, k):
+                        elif _thead_hgemm_nn_should_pad(
+                            m, n, k
+                        ) or _thead_hgemm_tt_should_pad(m, n, k):
                             B_T = _thead_hgemm_transpose2d(B, k, n, ldb)
                             _run_thead_hgemm_tt_padded(
-                                A, lda, B_T, k, C, ldc, m, n, k,
-                                alpha, beta, beta_is_zero,
+                                A,
+                                lda,
+                                B_T,
+                                k,
+                                C,
+                                ldc,
+                                m,
+                                n,
+                                k,
+                                alpha,
+                                beta,
+                                beta_is_zero,
                             )
                         else:
                             _run_thead_hgemm_tn_materialize_b(
-                                A, lda, B, ldb, C, ldc, m, n, k,
-                                alpha, beta, beta_is_zero,
+                                A,
+                                lda,
+                                B,
+                                ldb,
+                                C,
+                                ldc,
+                                m,
+                                n,
+                                k,
+                                alpha,
+                                beta,
+                                beta_is_zero,
                             )
                 elif _thead_hgemm_tn_should_pad(m, n, k):
                     _run_thead_hgemm_tn_padded(
@@ -3009,8 +3246,19 @@ def hgemm(
                     )
                 else:
                     _run_thead_hgemm_tn(
-                        A, lda, B, ldb, C, ldc, m, n, k,
-                        alpha, beta, beta_is_zero, aligned,
+                        A,
+                        lda,
+                        B,
+                        ldb,
+                        C,
+                        ldc,
+                        m,
+                        n,
+                        k,
+                        alpha,
+                        beta,
+                        beta_is_zero,
+                        aligned,
                     )
             else:
                 _hgemm_tn_kernel[grid](
@@ -3028,8 +3276,19 @@ def hgemm(
                     )
                 else:
                     _run_thead_hgemm_nt(
-                        A, lda, B, ldb, C, ldc, m, n, k,
-                        alpha, beta, beta_is_zero, aligned,
+                        A,
+                        lda,
+                        B,
+                        ldb,
+                        C,
+                        ldc,
+                        m,
+                        n,
+                        k,
+                        alpha,
+                        beta,
+                        beta_is_zero,
+                        aligned,
                     )
             else:
                 _hgemm_nt_kernel[grid](
@@ -3047,8 +3306,19 @@ def hgemm(
                     )
                 else:
                     _run_thead_hgemm_tt(
-                        A, lda, B, ldb, C, ldc, m, n, k,
-                        alpha, beta, beta_is_zero, aligned,
+                        A,
+                        lda,
+                        B,
+                        ldb,
+                        C,
+                        ldc,
+                        m,
+                        n,
+                        k,
+                        alpha,
+                        beta,
+                        beta_is_zero,
+                        aligned,
                     )
             else:
                 _hgemm_tt_kernel[grid](

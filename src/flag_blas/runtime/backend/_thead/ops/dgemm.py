@@ -32,8 +32,6 @@ def _select_dgemm_config(transa: int, transb: int, m: int, n: int, k: int):
     """Select tile config optimized for Zhenwu PPU-ZW810E FP64 GEMM."""
     max_dim = max(m, n, k)
     min_dim = min(m, n, k)
-    maxnreg = None
-    num_stages = 3
 
     if transa == CUBLAS_OP_N and transb == CUBLAS_OP_N:
         if max_dim <= 32:
@@ -437,9 +435,15 @@ def dgemm(
             # iteration's swap so it overlaps the compute-bound GEMM.
             blk = 32 if max_dim <= 1024 else 64
             grid_t = (triton.cdiv(m, blk) * triton.cdiv(k, blk),)
-            block_m, block_n, block_k, num_warps, group_m, maxnreg, num_stages = (
-                _select_dgemm_tt_swap_config(m, n, k)
-            )
+            (
+                block_m,
+                block_n,
+                block_k,
+                num_warps,
+                group_m,
+                maxnreg,
+                num_stages,
+            ) = _select_dgemm_tt_swap_config(m, n, k)
             grid = (triton.cdiv(n, block_n) * triton.cdiv(m, block_m),)
             launch_kwargs = {
                 "BLOCK_M": block_m,
@@ -461,7 +465,14 @@ def dgemm(
                 s_trans.wait_event(ev_geom[buf])
                 with torch.cuda.stream(s_trans):
                     _transpose_kernel[grid_t](
-                        A, At[buf], m, k, lda, m, BLOCK=blk, num_warps=8 if blk == 32 else 4
+                        A,
+                        At[buf],
+                        m,
+                        k,
+                        lda,
+                        m,
+                        BLOCK=blk,
+                        num_warps=8 if blk == 32 else 4,
                     )
                     ev_trans[buf].record(s_trans)
                 cur.wait_event(ev_trans[buf])
@@ -490,9 +501,15 @@ def dgemm(
             Bt = torch.empty(k, n, dtype=B.dtype, device=B.device)
             with torch_device_fn.device(A.device):
                 _transpose_kernel[grid_t](B, Bt, n, k, ldb, n, BLOCK=64)
-            block_m, block_n, block_k, num_warps, group_m, maxnreg, num_stages = (
-                _select_dgemm_config(CUBLAS_OP_N, CUBLAS_OP_N, m, n, k)
-            )
+            (
+                block_m,
+                block_n,
+                block_k,
+                num_warps,
+                group_m,
+                maxnreg,
+                num_stages,
+            ) = _select_dgemm_config(CUBLAS_OP_N, CUBLAS_OP_N, m, n, k)
             grid = (triton.cdiv(m, block_m) * triton.cdiv(n, block_n),)
             launch_kwargs = {
                 "BLOCK_M": block_m,
@@ -527,9 +544,15 @@ def dgemm(
     if transa == CUBLAS_OP_T and transb == CUBLAS_OP_T:
         # Swapped TT path: all loads coalesced (see _dgemm_tt_swap_kernel).
         # Wins for both small and large core shapes on Zhenwu.
-        block_m, block_n, block_k, num_warps, group_m, maxnreg, num_stages = (
-            _select_dgemm_tt_swap_config(m, n, k)
-        )
+        (
+            block_m,
+            block_n,
+            block_k,
+            num_warps,
+            group_m,
+            maxnreg,
+            num_stages,
+        ) = _select_dgemm_tt_swap_config(m, n, k)
         grid = (triton.cdiv(n, block_n) * triton.cdiv(m, block_m),)
         launch_kwargs = {
             "BLOCK_M": block_m,
@@ -560,9 +583,15 @@ def dgemm(
             )
         return
 
-    block_m, block_n, block_k, num_warps, group_m, maxnreg, num_stages = (
-        _select_dgemm_config(transa, transb, m, n, k)
-    )
+    (
+        block_m,
+        block_n,
+        block_k,
+        num_warps,
+        group_m,
+        maxnreg,
+        num_stages,
+    ) = _select_dgemm_config(transa, transb, m, n, k)
 
     grid = (triton.cdiv(m, block_m) * triton.cdiv(n, block_n),)
     launch_kwargs = {

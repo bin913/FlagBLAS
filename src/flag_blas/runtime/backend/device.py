@@ -13,8 +13,8 @@
 # limitations under the License.
 
 import os
-import shutil
 import shlex
+import shutil
 import subprocess
 import threading
 from queue import Queue
