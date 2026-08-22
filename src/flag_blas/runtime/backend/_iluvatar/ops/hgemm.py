@@ -42,6 +42,7 @@ def _hgemm_kernel(
     ldb,
     ldc,
     BETA_IS_ZERO: tl.constexpr,
+    ALPHA_IS_ONE: tl.constexpr,
     TRANS_A: tl.constexpr,
     TRANS_B: tl.constexpr,
     CHECK_BOUNDS: tl.constexpr,
@@ -188,7 +189,10 @@ def _hgemm_kernel(
 
 
     c_ptrs = c_ptr + offs_m[:, None] * ldc + offs_n[None, :]
-    result = alpha * acc
+    if ALPHA_IS_ONE:
+        result = acc
+    else:
+        result = alpha * acc
     if CHECK_BOUNDS:
         c_mask = (offs_m[:, None] < m) & (offs_n[None, :] < n)
         if not BETA_IS_ZERO:
@@ -198,6 +202,421 @@ def _hgemm_kernel(
         if not BETA_IS_ZERO:
             result += beta * tl.load(c_ptrs).to(tl.float32)
         tl.store(c_ptrs, result.to(tl.float16))
+
+
+@triton.jit
+def _hgemm_nn_persistent_kernel(
+    a_ptr, b_ptr, c_ptr, alpha: tl.float32, m, n, k, lda, ldb, ldc,
+    NUM_SMS: tl.constexpr, GRID_STRIDE: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr, GROUP_M: tl.constexpr,
+):
+    start_pid = tl.program_id(0)
+    grid_m = tl.cdiv(m, BLOCK_M)
+    grid_n = tl.cdiv(n, BLOCK_N)
+    num_tiles = grid_m * grid_n
+    width = GROUP_M * grid_n
+    offs_k_base = tl.arange(0, BLOCK_K)
+    tiles_per_program = tl.cdiv(num_tiles - start_pid, GRID_STRIDE)
+    for idx in range(0, tiles_per_program):
+        tile_id = start_pid + idx * GRID_STRIDE
+        group_id = tile_id // width
+        group_size = tl.minimum(grid_m - group_id * GROUP_M, GROUP_M)
+        pid_m = group_id * GROUP_M + (tile_id % group_size)
+        pid_n = (tile_id % width) // group_size
+        offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+        acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+        for k_start in range(0, k, BLOCK_K):
+            offs_k = k_start + offs_k_base
+            a = tl.load(a_ptr + offs_m[:, None] * lda + offs_k[None, :], cache_modifier=".cg")
+            b = tl.load(b_ptr + offs_k[:, None] * ldb + offs_n[None, :], cache_modifier=".cg")
+            acc = tl.dot(a, b, acc, out_dtype=tl.float32, allow_tf32=False)
+        tl.store(c_ptr + offs_m[:, None] * ldc + offs_n[None, :], (alpha * acc).to(tl.float16))
+
+
+@triton.jit
+def _hgemm_nn_blockptr_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    beta: tl.float32,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    BETA_IS_ZERO: tl.constexpr,
+    ALPHA_IS_ONE: tl.constexpr,
+    N_MAJOR_ORDER: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    grid_m = tl.cdiv(m, BLOCK_M)
+    grid_n = tl.cdiv(n, BLOCK_N)
+    if N_MAJOR_ORDER:
+        pid_n = pid // grid_m
+        pid_m = pid - pid_n * grid_m
+    else:
+        width = GROUP_M * grid_n
+        group_id = pid // width
+        group_size = tl.minimum(grid_m - group_id * GROUP_M, GROUP_M)
+        pid_m = group_id * GROUP_M + (pid % group_size)
+        pid_n = (pid % width) // group_size
+
+    a_block_ptr = tl.make_block_ptr(
+        base=a_ptr,
+        shape=(m, k),
+        strides=(lda, 1),
+        offsets=(pid_m * BLOCK_M, 0),
+        block_shape=(BLOCK_M, BLOCK_K),
+        order=(1, 0),
+    )
+    b_block_ptr = tl.make_block_ptr(
+        base=b_ptr,
+        shape=(k, n),
+        strides=(ldb, 1),
+        offsets=(0, pid_n * BLOCK_N),
+        block_shape=(BLOCK_K, BLOCK_N),
+        order=(1, 0),
+    )
+    c_block_ptr = tl.make_block_ptr(
+        base=c_ptr,
+        shape=(m, n),
+        strides=(ldc, 1),
+        offsets=(pid_m * BLOCK_M, pid_n * BLOCK_N),
+        block_shape=(BLOCK_M, BLOCK_N),
+        order=(1, 0),
+    )
+
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    for _ in range(0, tl.cdiv(k, BLOCK_K)):
+        a = tl.load(a_block_ptr, boundary_check=(0, 1))
+        b = tl.load(b_block_ptr, boundary_check=(0, 1))
+        acc = tl.dot(a, b, acc, out_dtype=tl.float32, allow_tf32=False)
+        a_block_ptr = tl.advance(a_block_ptr, (0, BLOCK_K))
+        b_block_ptr = tl.advance(b_block_ptr, (BLOCK_K, 0))
+
+    if BETA_IS_ZERO:
+        tl.store(c_block_ptr, (alpha * acc).to(tl.float16), boundary_check=(0, 1))
+    else:
+        c_vals = tl.load(c_block_ptr, boundary_check=(0, 1)).to(tl.float32)
+        tl.store(
+            c_block_ptr,
+            (alpha * acc + beta * c_vals).to(tl.float16),
+            boundary_check=(0, 1),
+        )
+
+
+@triton.jit
+def _hgemm_nn_blockptr_fast_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    beta: tl.float32,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    BETA_IS_ZERO: tl.constexpr,
+    ALPHA_IS_ONE: tl.constexpr,
+    N_MAJOR_ORDER: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    grid_m = tl.cdiv(m, BLOCK_M)
+    grid_n = tl.cdiv(n, BLOCK_N)
+    if N_MAJOR_ORDER:
+        pid_n = pid // grid_m
+        pid_m = pid - pid_n * grid_m
+    else:
+        width = GROUP_M * grid_n
+        group_id = pid // width
+        group_size = tl.minimum(grid_m - group_id * GROUP_M, GROUP_M)
+        pid_m = group_id * GROUP_M + (pid % group_size)
+        pid_n = (pid % width) // group_size
+
+    a_block_ptr = tl.make_block_ptr(
+        base=a_ptr,
+        shape=(m, k),
+        strides=(lda, 1),
+        offsets=(pid_m * BLOCK_M, 0),
+        block_shape=(BLOCK_M, BLOCK_K),
+        order=(1, 0),
+    )
+    b_block_ptr = tl.make_block_ptr(
+        base=b_ptr,
+        shape=(k, n),
+        strides=(ldb, 1),
+        offsets=(0, pid_n * BLOCK_N),
+        block_shape=(BLOCK_K, BLOCK_N),
+        order=(1, 0),
+    )
+
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    for _ in range(0, k, BLOCK_K):
+        a = tl.load(a_block_ptr)
+        b = tl.load(b_block_ptr)
+        acc = tl.dot(a, b, acc, out_dtype=tl.float32, allow_tf32=False)
+        a_block_ptr = tl.advance(a_block_ptr, (0, BLOCK_K))
+        b_block_ptr = tl.advance(b_block_ptr, (BLOCK_K, 0))
+
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    c_ptrs = c_ptr + offs_m[:, None] * ldc + offs_n[None, :]
+    if ALPHA_IS_ONE:
+        result = acc
+    else:
+        result = alpha * acc
+    if not BETA_IS_ZERO:
+        result += beta * tl.load(c_ptrs).to(tl.float32)
+    tl.store(c_ptrs, result.to(tl.float16))
+
+
+@triton.jit
+def _hgemm_nn_blockptr_ab1_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    N_MAJOR_ORDER: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    grid_m = tl.cdiv(m, BLOCK_M)
+    grid_n = tl.cdiv(n, BLOCK_N)
+    if N_MAJOR_ORDER:
+        pid_n = pid // grid_m
+        pid_m = pid - pid_n * grid_m
+    else:
+        width = GROUP_M * grid_n
+        group_id = pid // width
+        group_size = tl.minimum(grid_m - group_id * GROUP_M, GROUP_M)
+        pid_m = group_id * GROUP_M + (pid % group_size)
+        pid_n = (pid % width) // group_size
+
+    a_block_ptr = tl.make_block_ptr(
+        base=a_ptr,
+        shape=(m, k),
+        strides=(lda, 1),
+        offsets=(pid_m * BLOCK_M, 0),
+        block_shape=(BLOCK_M, BLOCK_K),
+        order=(1, 0),
+    )
+    b_block_ptr = tl.make_block_ptr(
+        base=b_ptr,
+        shape=(k, n),
+        strides=(ldb, 1),
+        offsets=(0, pid_n * BLOCK_N),
+        block_shape=(BLOCK_K, BLOCK_N),
+        order=(1, 0),
+    )
+
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    for _ in range(0, k, BLOCK_K):
+        a = tl.load(a_block_ptr)
+        b = tl.load(b_block_ptr)
+        acc = tl.dot(a, b, acc, out_dtype=tl.float32, allow_tf32=False)
+        a_block_ptr = tl.advance(a_block_ptr, (0, BLOCK_K))
+        b_block_ptr = tl.advance(b_block_ptr, (BLOCK_K, 0))
+
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    c_ptrs = c_ptr + offs_m[:, None] * ldc + offs_n[None, :]
+    tl.store(c_ptrs, acc.to(tl.float16))
+
+
+@triton.jit
+def _hgemm_nn_static_ab1_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    N_MAJOR_ORDER: tl.constexpr,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+    LOOP_STAGES: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    grid_m = M // BLOCK_M
+    grid_n = N // BLOCK_N
+    if N_MAJOR_ORDER:
+        pid_n = pid // grid_m
+        pid_m = pid - pid_n * grid_m
+    else:
+        width = GROUP_M * grid_n
+        group_id = pid // width
+        group_size = tl.minimum(grid_m - group_id * GROUP_M, GROUP_M)
+        pid_m = group_id * GROUP_M + (pid % group_size)
+        pid_n = (pid % width) // group_size
+
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_k_base = tl.arange(0, BLOCK_K)
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+
+    for k_start in tl.static_range(0, K, BLOCK_K):
+        offs_k = k_start + offs_k_base
+        a = tl.load(
+            a_ptr + offs_m[:, None] * K + offs_k[None, :],
+            cache_modifier=".cg",
+        )
+        b = tl.load(
+            b_ptr + offs_k[:, None] * N + offs_n[None, :],
+            cache_modifier=".cg",
+        )
+        acc = tl.dot(a, b, acc, out_dtype=tl.float32, allow_tf32=False)
+
+    tl.store(c_ptr + offs_m[:, None] * N + offs_n[None, :], acc.to(tl.float16))
+
+
+@triton.jit
+def _hgemm_nn_m2_blockptr_fast_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    beta: tl.float32,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    BETA_IS_ZERO: tl.constexpr,
+    ALPHA_IS_ONE: tl.constexpr,
+    N_MAJOR_ORDER: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    grid_m = tl.cdiv(m, BLOCK_M)
+    grid_m2 = grid_m // 2
+    grid_n = tl.cdiv(n, BLOCK_N)
+    if N_MAJOR_ORDER:
+        pid_n = pid // grid_m2
+        pid_m2 = pid - pid_n * grid_m2
+    else:
+        width = GROUP_M * grid_n
+        group_id = pid // width
+        group_size = tl.minimum(grid_m2 - group_id * GROUP_M, GROUP_M)
+        pid_m2 = group_id * GROUP_M + (pid % group_size)
+        pid_n = (pid % width) // group_size
+    pid_m0 = pid_m2 * 2
+    pid_m1 = pid_m0 + 1
+
+    a0_block_ptr = tl.make_block_ptr(
+        base=a_ptr,
+        shape=(m, k),
+        strides=(lda, 1),
+        offsets=(pid_m0 * BLOCK_M, 0),
+        block_shape=(BLOCK_M, BLOCK_K),
+        order=(1, 0),
+    )
+    a1_block_ptr = tl.make_block_ptr(
+        base=a_ptr,
+        shape=(m, k),
+        strides=(lda, 1),
+        offsets=(pid_m1 * BLOCK_M, 0),
+        block_shape=(BLOCK_M, BLOCK_K),
+        order=(1, 0),
+    )
+    b_block_ptr = tl.make_block_ptr(
+        base=b_ptr,
+        shape=(k, n),
+        strides=(ldb, 1),
+        offsets=(0, pid_n * BLOCK_N),
+        block_shape=(BLOCK_K, BLOCK_N),
+        order=(1, 0),
+    )
+
+    acc0 = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    acc1 = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    for _ in range(0, k, BLOCK_K):
+        a0 = tl.load(a0_block_ptr)
+        a1 = tl.load(a1_block_ptr)
+        b = tl.load(b_block_ptr)
+        acc0 = tl.dot(a0, b, acc0, out_dtype=tl.float32, allow_tf32=False)
+        acc1 = tl.dot(a1, b, acc1, out_dtype=tl.float32, allow_tf32=False)
+        a0_block_ptr = tl.advance(a0_block_ptr, (0, BLOCK_K))
+        a1_block_ptr = tl.advance(a1_block_ptr, (0, BLOCK_K))
+        b_block_ptr = tl.advance(b_block_ptr, (BLOCK_K, 0))
+
+    offs_m = tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    c0_ptrs = c_ptr + (pid_m0 * BLOCK_M + offs_m)[:, None] * ldc + offs_n[None, :]
+    c1_ptrs = c_ptr + (pid_m1 * BLOCK_M + offs_m)[:, None] * ldc + offs_n[None, :]
+    result0 = alpha * acc0
+    result1 = alpha * acc1
+    if not BETA_IS_ZERO:
+        result0 += beta * tl.load(c0_ptrs).to(tl.float32)
+        result1 += beta * tl.load(c1_ptrs).to(tl.float32)
+    tl.store(c0_ptrs, result0.to(tl.float16))
+    tl.store(c1_ptrs, result1.to(tl.float16))
+
+
+@triton.jit
+def _hgemm_nn_descriptor_kernel(
+    a_ptr, b_ptr, c_ptr, alpha: tl.float32, beta: tl.float32,
+    m, n, k, lda, ldb, ldc, BETA_IS_ZERO: tl.constexpr,
+    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    grid_m = tl.cdiv(m, BLOCK_M)
+    grid_n = tl.cdiv(n, BLOCK_N)
+    width = GROUP_M * grid_n
+    group_id = pid // width
+    group_size = tl.minimum(grid_m - group_id * GROUP_M, GROUP_M)
+    pid_m = group_id * GROUP_M + (pid % group_size)
+    pid_n = (pid % width) // group_size
+    offs_m = pid_m * BLOCK_M
+    offs_n = pid_n * BLOCK_N
+    a_desc = tl.make_tensor_descriptor(
+        a_ptr, shape=[m, k], strides=[lda, 1], block_shape=[BLOCK_M, BLOCK_K]
+    )
+    b_desc = tl.make_tensor_descriptor(
+        b_ptr, shape=[k, n], strides=[ldb, 1], block_shape=[BLOCK_K, BLOCK_N]
+    )
+    c_desc = tl.make_tensor_descriptor(
+        c_ptr, shape=[m, n], strides=[ldc, 1], block_shape=[BLOCK_M, BLOCK_N]
+    )
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    for kk in range(0, tl.cdiv(k, BLOCK_K)):
+        a = a_desc.load([offs_m, kk * BLOCK_K])
+        b = b_desc.load([kk * BLOCK_K, offs_n])
+        acc = tl.dot(a, b, acc, out_dtype=tl.float32, allow_tf32=False)
+    if alpha == 1.0:
+        result = acc
+    else:
+        result = alpha * acc
+    if not BETA_IS_ZERO:
+        result += beta * c_desc.load([offs_m, offs_n]).to(tl.float32)
+    c_desc.store([offs_m, offs_n], result.to(tl.float16))
 
 
 @triton.jit
@@ -215,16 +634,21 @@ def _hgemm_nn_splitk_kernel(
     BLOCK_K: tl.constexpr,
     GROUP_M: tl.constexpr,
     K_TILES_PER_SPLIT: tl.constexpr,
+    N_MAJOR_ORDER: tl.constexpr,
 ):
     pid = tl.program_id(0)
     split_id = tl.program_id(1)
     grid_m = tl.cdiv(m, BLOCK_M)
     grid_n = tl.cdiv(n, BLOCK_N)
-    width = GROUP_M * grid_n
-    group_id = pid // width
-    group_size = tl.minimum(grid_m - group_id * GROUP_M, GROUP_M)
-    pid_m = group_id * GROUP_M + (pid % group_size)
-    pid_n = (pid % width) // group_size
+    if N_MAJOR_ORDER:
+        pid_n = pid // grid_m
+        pid_m = pid - pid_n * grid_m
+    else:
+        width = GROUP_M * grid_n
+        group_id = pid // width
+        group_size = tl.minimum(grid_m - group_id * GROUP_M, GROUP_M)
+        pid_m = group_id * GROUP_M + (pid % group_size)
+        pid_n = (pid % width) // group_size
 
     offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
@@ -323,7 +747,10 @@ def _hgemm_tt_transpose_dot_kernel(
 
     c_ptrs = c_ptr + offs_m[:, None] * ldc + offs_n[None, :]
     acc = tl.trans(acc_t)
-    result = alpha * acc
+    if ALPHA_IS_ONE:
+        result = acc
+    else:
+        result = alpha * acc
     if not BETA_IS_ZERO:
         result += beta * tl.load(c_ptrs).to(tl.float32)
     tl.store(c_ptrs, result.to(tl.float16))
@@ -385,17 +812,87 @@ def _hgemm_tn_transpose_dot_kernel(
 
     c_ptrs = c_ptr + offs_m[:, None] * ldc + offs_n[None, :]
     acc = tl.trans(acc_t)
-    result = alpha * acc
+    if ALPHA_IS_ONE:
+        result = acc
+    else:
+        result = alpha * acc
     if not BETA_IS_ZERO:
         result += beta * tl.load(c_ptrs).to(tl.float32)
     tl.store(c_ptrs, result.to(tl.float16))
 
 
+def _select_hgemm_nn_descriptor_config(m: int, n: int, k: int):
+    return None
+
+
+def _select_hgemm_nn_2048_square_persistent_config(m: int, n: int, k: int):
+    if m == 2048 and n == 2048 and k == 2048:
+        return 128, 128, 64, 16, 2, 1, 4
+    return None
+
+
+def _select_hgemm_nn_persistent_config(m: int, n: int, k: int):
+    if m == 4096 and n == 4096 and k == 4096:
+        return 128, 128, 64, 16, 4, 1, 4
+    return None
+
+
+def _select_hgemm_nn_static_ab1_config(m: int, n: int, k: int):
+    return None
+
+
+def _select_hgemm_nn_ab1_blockptr_config(m: int, n: int, k: int):
+    return None
+
+
+def _select_hgemm_nn_m2_blockptr_config(m: int, n: int, k: int):
+    return None
+
+
+def _select_hgemm_nn_pointer_config(m: int, n: int, k: int):
+    return None
+
+
 def _select_hgemm_nn_splitk_config(m: int, n: int, k: int):
+    return None
+
+
+def _select_hgemm_nn_blockptr_config(m: int, n: int, k: int):
+    # Narrow exact-shape blockptr fast path for the remaining low-score NN cases.
+    if m == 2048 and n == 2048 and k == 2048:
+        return 128, 128, 64, 16, 2, 4, False
+    if m == 4096 and n == 4096 and k == 4096:
+        return 128, 128, 64, 16, 4, 1, False
+    if m == 16384 and n == 16384 and k == 16384:
+        return 256, 128, 64, 16, 4, 2, False
     if m == 8192 and n == 256 and k == 2048:
-        return 128, 128, 64, 16, 4, 2, 4
+        return 128, 128, 64, 16, 8, 3, False
+    if m == 8192 and n == 8192 and k == 8192:
+        return 128, 128, 64, 16, 4, 2, False
     if m == 16384 and n == 512 and k == 4096:
-        return 128, 128, 64, 16, 4, 2, 8
+        return 128, 128, 64, 16, 2, 4, False
+    if m == 512 and n == 16384 and k == 4096:
+        return 128, 128, 64, 16, 8, 3, False
+    if m == 2048 and n == 12288 and k == 4096:
+        return 128, 128, 64, 16, 4, 4, False
+    if m == 2048 and n == 11008 and k == 4096:
+        return 128, 128, 64, 16, 4, 4, False
+    if m == 2048 and n == 4096 and k == 11008:
+        return 128, 128, 64, 16, 4, 4, False
+    if m == 4096 and n == 24576 and k == 8192:
+        return 128, 128, 64, 16, 4, 2, False
+    if m == 4096 and n == 8192 and k == 28672:
+        return 128, 128, 64, 16, 4, 2, False
+    if m == 8192 and n == 28672 and k == 8192:
+        return 128, 128, 64, 16, 4, 2, False
+    if m == 16384 and n == 2048 and k == 2048:
+        return 128, 128, 64, 16, 4, 3, False
+    if m == 2048 and n == 16384 and k == 2048:
+        return 128, 128, 64, 16, 4, 4, False
+    if m == 2048 and n == 2048 and k == 16384:
+        return 128, 128, 64, 16, 8, 2, False
+    if m == 32768 and n == 1024 and k == 1024:
+        return 128, 128, 64, 16, 8, 2, False
     return None
 
 
@@ -428,13 +925,13 @@ def _select_hgemm_config(m: int, n: int, k: int, transa: int, transb: int):
     # lever. nw=8 wins only for a couple of M-asymmetric shapes.
     if transa == CUBLAS_OP_N and transb == CUBLAS_OP_N:
         if m == 2048 and n == 2048 and k == 2048:
-            return 128, 128, 64, 16, 8, 2, 1
+            return 128, 128, 64, 16, 2, 4, 1
         if m == 4096 and n == 4096 and k == 4096:
-            return 128, 128, 64, 16, 4, 4, 1
-        if m == 8192 and n == 8192 and k == 8192:
-            return 128, 128, 64, 16, 4, 1, 2
-        if m == 16384 and n == 16384 and k == 16384:
             return 128, 128, 64, 16, 4, 1, 1
+        if m == 8192 and n == 8192 and k == 8192:
+            return 128, 128, 64, 16, 4, 4, 1
+        if m == 16384 and n == 16384 and k == 16384:
+            return 256, 128, 64, 16, 4, 1, 1
         if m == 2048 and n == 12288 and k == 4096:
             return 128, 128, 64, 16, 4, 1, 2
         if m == 2048 and n == 11008 and k == 4096:
@@ -578,8 +1075,6 @@ def _can_use_fast_hgemm(m: int, n: int, k: int, block_m: int, block_n: int, bloc
 def _select_hgemm_n_major_order(m: int, n: int, k: int, transa: int, transb: int) -> bool:
     if transa != CUBLAS_OP_N or transb != CUBLAS_OP_N:
         return False
-    if m == 2048 and n == 2048 and k == 2048:
-        return True
     if m == 512 and n == 16384 and k == 4096:
         return True
     return False
@@ -621,11 +1116,219 @@ def _launch_hgemm(
     n_major_order: bool = False,
 ) -> None:
     _hgemm_kernel[grid](
-        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero,
+        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero, alpha == 1.0,
         transa == CUBLAS_OP_T, transb == CUBLAS_OP_T, check_bounds, False, 0, 0,
         ".cg", n_major_order,
         BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k, GROUP_M=group_m,
         UNROLL=unroll, num_warps=num_warps, num_stages=num_stages,
+    )
+
+
+def _launch_hgemm_nn_blockptr(
+    grid,
+    A: torch.Tensor,
+    B: torch.Tensor,
+    C: torch.Tensor,
+    alpha: float,
+    beta: float,
+    m: int,
+    n: int,
+    k: int,
+    lda: int,
+    ldb: int,
+    ldc: int,
+    block_m: int,
+    block_n: int,
+    block_k: int,
+    num_warps: int,
+    group_m: int,
+    num_stages: int,
+    n_major_order: bool = False,
+) -> None:
+    _hgemm_nn_blockptr_kernel[grid](
+        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta == 0.0, alpha == 1.0,
+        n_major_order, BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k,
+        GROUP_M=group_m, num_warps=num_warps, num_stages=num_stages,
+    )
+
+
+def _launch_hgemm_nn_blockptr_fast(
+    grid,
+    A: torch.Tensor,
+    B: torch.Tensor,
+    C: torch.Tensor,
+    alpha: float,
+    beta: float,
+    m: int,
+    n: int,
+    k: int,
+    lda: int,
+    ldb: int,
+    ldc: int,
+    block_m: int,
+    block_n: int,
+    block_k: int,
+    num_warps: int,
+    group_m: int,
+    num_stages: int,
+    n_major_order: bool = False,
+) -> None:
+    _hgemm_nn_blockptr_fast_kernel[grid](
+        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta == 0.0, alpha == 1.0,
+        n_major_order, BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k,
+        GROUP_M=group_m, num_warps=num_warps, num_stages=num_stages,
+    )
+
+
+def _launch_hgemm_nn_ab1_blockptr_fast(
+    grid,
+    A: torch.Tensor,
+    B: torch.Tensor,
+    C: torch.Tensor,
+    m: int,
+    n: int,
+    k: int,
+    lda: int,
+    ldb: int,
+    ldc: int,
+    block_m: int,
+    block_n: int,
+    block_k: int,
+    num_warps: int,
+    group_m: int,
+    num_stages: int,
+    n_major_order: bool = False,
+) -> None:
+    _hgemm_nn_blockptr_ab1_kernel[grid](
+        A, B, C, m, n, k, lda, ldb, ldc, n_major_order,
+        BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k,
+        GROUP_M=group_m, num_warps=num_warps, num_stages=num_stages,
+    )
+
+
+def _launch_hgemm_nn_static_ab1(
+    grid,
+    A: torch.Tensor,
+    B: torch.Tensor,
+    C: torch.Tensor,
+    m: int,
+    n: int,
+    k: int,
+    block_m: int,
+    block_n: int,
+    block_k: int,
+    num_warps: int,
+    group_m: int,
+    num_stages: int,
+    n_major_order: bool = False,
+) -> None:
+    _hgemm_nn_static_ab1_kernel[grid](
+        A, B, C, n_major_order, M=m, N=n, K=k,
+        BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k,
+        GROUP_M=group_m, LOOP_STAGES=num_stages, num_warps=num_warps, num_stages=num_stages,
+    )
+
+
+def _launch_hgemm_nn_m2_blockptr_fast(
+    grid,
+    A: torch.Tensor,
+    B: torch.Tensor,
+    C: torch.Tensor,
+    alpha: float,
+    beta: float,
+    m: int,
+    n: int,
+    k: int,
+    lda: int,
+    ldb: int,
+    ldc: int,
+    block_m: int,
+    block_n: int,
+    block_k: int,
+    num_warps: int,
+    group_m: int,
+    num_stages: int,
+    n_major_order: bool = False,
+) -> None:
+    _hgemm_nn_m2_blockptr_fast_kernel[grid](
+        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta == 0.0, alpha == 1.0,
+        n_major_order, BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k,
+        GROUP_M=group_m, num_warps=num_warps, num_stages=num_stages,
+    )
+
+
+def _launch_hgemm_nn_descriptor(
+    grid,
+    A: torch.Tensor,
+    B: torch.Tensor,
+    C: torch.Tensor,
+    alpha: float,
+    beta: float,
+    m: int,
+    n: int,
+    k: int,
+    lda: int,
+    ldb: int,
+    ldc: int,
+    block_m: int,
+    block_n: int,
+    block_k: int,
+    num_warps: int,
+    group_m: int,
+    num_stages: int,
+) -> None:
+    _hgemm_nn_descriptor_kernel[grid](
+        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta == 0.0,
+        BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k, GROUP_M=group_m,
+        num_warps=num_warps, num_stages=num_stages,
+    )
+
+
+def _launch_hgemm_nn_persistent(
+    grid,
+    A: torch.Tensor,
+    B: torch.Tensor,
+    C: torch.Tensor,
+    alpha: float,
+    m: int,
+    n: int,
+    k: int,
+    lda: int,
+    ldb: int,
+    ldc: int,
+    block_m: int,
+    block_n: int,
+    block_k: int,
+    num_warps: int,
+    group_m: int,
+    num_stages: int,
+    num_sms: int,
+    grid_stride: int,
+) -> None:
+    _hgemm_nn_persistent_kernel[grid](
+        A, B, C, alpha, m, n, k, lda, ldb, ldc, NUM_SMS=num_sms, GRID_STRIDE=grid_stride,
+        BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k, GROUP_M=group_m,
+        num_warps=num_warps, num_stages=num_stages,
+    )
+
+
+def _launch_hgemm_nn_2048_square_persistent(
+    grid,
+    A: torch.Tensor,
+    B: torch.Tensor,
+    C: torch.Tensor,
+    block_m: int,
+    block_n: int,
+    block_k: int,
+    num_warps: int,
+    group_m: int,
+    num_stages: int,
+    grid_stride: int,
+) -> None:
+    _hgemm_nn_2048_square_persistent_kernel[grid](
+        A, B, C, GRID_STRIDE=grid_stride,
+        BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k, GROUP_M=group_m,
+        num_warps=num_warps, num_stages=num_stages,
     )
 
 
@@ -649,17 +1352,18 @@ def _launch_hgemm_nn_splitk(
     group_m: int,
     num_stages: int,
     split_k: int,
-    beta: float,
+    n_major_order: bool = False,
 ) -> None:
     partial = torch.empty((split_k, m, n), device=C.device, dtype=torch.float32)
     k_tiles_per_split = k // (block_k * split_k)
     _hgemm_nn_splitk_kernel[grid](
         A, B, partial, m, n, k, lda, ldb,
         BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k, GROUP_M=group_m,
-        K_TILES_PER_SPLIT=k_tiles_per_split, num_warps=num_warps, num_stages=num_stages,
+        K_TILES_PER_SPLIT=k_tiles_per_split, N_MAJOR_ORDER=n_major_order,
+        num_warps=num_warps, num_stages=num_stages,
     )
     _hgemm_nn_splitk_reduce_kernel[reduce_grid](
-        partial, C, alpha, beta, m, n, ldc,
+        partial, C, alpha, m, n, ldc,
         BLOCK_M=block_m, BLOCK_N=block_n, SPLIT_K=split_k,
         num_warps=num_warps, num_stages=1,
     )
@@ -794,6 +1498,152 @@ def hgemm(
                     grid, A, B, C, alpha, beta, m, n, k, lda, ldb, ldc,
                     beta_is_zero, block_m, block_n, block_k, num_warps,
                     group_m, num_stages,
+                )
+            return
+
+    nn_square_persistent_config = None
+    if (
+        transa == CUBLAS_OP_N
+        and transb == CUBLAS_OP_N
+        and alpha == 1.0
+        and beta_is_zero
+        and lda == k
+        and ldb == n
+        and ldc == n
+    ):
+        nn_square_persistent_config = _select_hgemm_nn_2048_square_persistent_config(m, n, k)
+    if nn_square_persistent_config is not None:
+        block_m, block_n, block_k, num_warps, group_m, num_stages, wave_count = nn_square_persistent_config
+        if _can_use_fast_hgemm(m, n, k, block_m, block_n, block_k):
+            num_sms = torch.cuda.get_device_properties(A.device).multi_processor_count
+            grid_stride = num_sms * wave_count
+            grid = (min(grid_stride, triton.cdiv(m, block_m) * triton.cdiv(n, block_n)),)
+            with torch_device_fn.device(A.device):
+                _launch_hgemm_nn_2048_square_persistent(
+                    grid, A, B, C, block_m, block_n, block_k,
+                    num_warps, group_m, num_stages, grid_stride,
+                )
+            return
+
+    nn_descriptor_config = None
+    if transa == CUBLAS_OP_N and transb == CUBLAS_OP_N and lda == k and ldb == n and ldc == n:
+        nn_descriptor_config = _select_hgemm_nn_descriptor_config(m, n, k)
+    if nn_descriptor_config is not None:
+        block_m, block_n, block_k, num_warps, group_m, num_stages = nn_descriptor_config
+        if _can_use_fast_hgemm(m, n, k, block_m, block_n, block_k):
+            grid = (triton.cdiv(m, block_m) * triton.cdiv(n, block_n),)
+            with torch_device_fn.device(A.device):
+                _launch_hgemm_nn_descriptor(
+                    grid, A, B, C, alpha, beta, m, n, k, lda, ldb, ldc,
+                    block_m, block_n, block_k, num_warps, group_m, num_stages,
+                )
+            return
+
+    nn_persistent_config = None
+    if transa == CUBLAS_OP_N and transb == CUBLAS_OP_N and beta_is_zero and lda == k and ldb == n and ldc == n:
+        nn_persistent_config = _select_hgemm_nn_persistent_config(m, n, k)
+    if nn_persistent_config is not None:
+        block_m, block_n, block_k, num_warps, group_m, num_stages, wave_count = nn_persistent_config
+        if _can_use_fast_hgemm(m, n, k, block_m, block_n, block_k):
+            num_sms = torch.cuda.get_device_properties(A.device).multi_processor_count
+            grid_stride = num_sms * wave_count
+            grid = (min(grid_stride, triton.cdiv(m, block_m) * triton.cdiv(n, block_n)),)
+            with torch_device_fn.device(A.device):
+                _launch_hgemm_nn_persistent(
+                    grid, A, B, C, alpha, m, n, k, lda, ldb, ldc,
+                    block_m, block_n, block_k, num_warps, group_m, num_stages, num_sms, grid_stride,
+                )
+            return
+
+    nn_pointer_config = None
+    if (
+        transa == CUBLAS_OP_N
+        and transb == CUBLAS_OP_N
+        and alpha == 1.0
+        and beta_is_zero
+        and lda == k
+        and ldb == n
+        and ldc == n
+    ):
+        nn_pointer_config = _select_hgemm_nn_pointer_config(m, n, k)
+    if nn_pointer_config is not None:
+        (
+            block_m,
+            block_n,
+            block_k,
+            num_warps,
+            group_m,
+            num_stages,
+            unroll,
+            n_major_order,
+        ) = nn_pointer_config
+        if _can_use_fast_hgemm(m, n, k, block_m, block_n, block_k):
+            grid = (triton.cdiv(m, block_m) * triton.cdiv(n, block_n),)
+            with torch_device_fn.device(A.device):
+                _launch_hgemm(
+                    transa, transb, grid, A, B, C, alpha, beta,
+                    m, n, k, lda, ldb, ldc, beta_is_zero, False,
+                    block_m, block_n, block_k, num_warps, group_m,
+                    num_stages, unroll, n_major_order,
+                )
+            return
+
+    nn_static_ab1_config = None
+    if transa == CUBLAS_OP_N and transb == CUBLAS_OP_N and alpha == 1.0 and beta_is_zero and lda == k and ldb == n and ldc == n:
+        nn_static_ab1_config = _select_hgemm_nn_static_ab1_config(m, n, k)
+    if nn_static_ab1_config is not None:
+        block_m, block_n, block_k, num_warps, group_m, num_stages, n_major_order = nn_static_ab1_config
+        if _can_use_fast_hgemm(m, n, k, block_m, block_n, block_k):
+            grid = (triton.cdiv(m, block_m) * triton.cdiv(n, block_n),)
+            with torch_device_fn.device(A.device):
+                _launch_hgemm_nn_static_ab1(
+                    grid, A, B, C, m, n, k, block_m, block_n, block_k,
+                    num_warps, group_m, num_stages, n_major_order,
+                )
+            return
+
+    nn_ab1_blockptr_config = None
+    if transa == CUBLAS_OP_N and transb == CUBLAS_OP_N and alpha == 1.0 and beta_is_zero and lda == k and ldb == n and ldc == n:
+        nn_ab1_blockptr_config = _select_hgemm_nn_ab1_blockptr_config(m, n, k)
+    if nn_ab1_blockptr_config is not None:
+        block_m, block_n, block_k, num_warps, group_m, num_stages, n_major_order = nn_ab1_blockptr_config
+        if _can_use_fast_hgemm(m, n, k, block_m, block_n, block_k):
+            grid = (triton.cdiv(m, block_m) * triton.cdiv(n, block_n),)
+            with torch_device_fn.device(A.device):
+                _launch_hgemm_nn_ab1_blockptr_fast(
+                    grid, A, B, C, m, n, k, lda, ldb, ldc,
+                    block_m, block_n, block_k, num_warps, group_m, num_stages,
+                    n_major_order,
+                )
+            return
+
+    nn_m2_blockptr_config = None
+    if transa == CUBLAS_OP_N and transb == CUBLAS_OP_N and beta_is_zero and lda == k and ldb == n and ldc == n:
+        nn_m2_blockptr_config = _select_hgemm_nn_m2_blockptr_config(m, n, k)
+    if nn_m2_blockptr_config is not None:
+        block_m, block_n, block_k, num_warps, group_m, num_stages, n_major_order = nn_m2_blockptr_config
+        if _can_use_fast_hgemm(m, n, k, block_m * 2, block_n, block_k):
+            grid = ((triton.cdiv(m, block_m) // 2) * triton.cdiv(n, block_n),)
+            with torch_device_fn.device(A.device):
+                _launch_hgemm_nn_m2_blockptr_fast(
+                    grid, A, B, C, alpha, beta, m, n, k, lda, ldb, ldc,
+                    block_m, block_n, block_k, num_warps, group_m, num_stages,
+                    n_major_order,
+                )
+            return
+
+    nn_blockptr_config = None
+    if transa == CUBLAS_OP_N and transb == CUBLAS_OP_N and lda == k and ldb == n and ldc == n:
+        nn_blockptr_config = _select_hgemm_nn_blockptr_config(m, n, k)
+    if nn_blockptr_config is not None:
+        block_m, block_n, block_k, num_warps, group_m, num_stages, n_major_order = nn_blockptr_config
+        if _can_use_fast_hgemm(m, n, k, block_m, block_n, block_k):
+            grid = (triton.cdiv(m, block_m) * triton.cdiv(n, block_n),)
+            with torch_device_fn.device(A.device):
+                _launch_hgemm_nn_blockptr_fast(
+                    grid, A, B, C, alpha, beta, m, n, k, lda, ldb, ldc,
+                    block_m, block_n, block_k, num_warps, group_m, num_stages,
+                    n_major_order,
                 )
             return
 
