@@ -205,10 +205,45 @@ def _hgemm_kernel(
 
 
 @triton.jit
+def _hgemm_nn_2048_square_persistent_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    GRID_STRIDE: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+):
+    start_pid = tl.program_id(0)
+    grid_m = 2048 // BLOCK_M
+    grid_n = 2048 // BLOCK_N
+    num_tiles = grid_m * grid_n
+    width = GROUP_M * grid_n
+    offs_k_base = tl.arange(0, BLOCK_K)
+    tiles_per_program = tl.cdiv(num_tiles - start_pid, GRID_STRIDE)
+    for idx in range(0, tiles_per_program):
+        tile_id = start_pid + idx * GRID_STRIDE
+        group_id = tile_id // width
+        group_size = tl.minimum(grid_m - group_id * GROUP_M, GROUP_M)
+        pid_m = group_id * GROUP_M + (tile_id % group_size)
+        pid_n = (tile_id % width) // group_size
+        offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+        acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+        for k_start in tl.static_range(0, 2048, BLOCK_K):
+            offs_k = k_start + offs_k_base
+            a = tl.load(a_ptr + offs_m[:, None] * 2048 + offs_k[None, :], cache_modifier=".cg")
+            b = tl.load(b_ptr + offs_k[:, None] * 2048 + offs_n[None, :], cache_modifier=".cg")
+            acc = tl.dot(a, b, acc, out_dtype=tl.float32, allow_tf32=False)
+        tl.store(c_ptr + offs_m[:, None] * 2048 + offs_n[None, :], acc.to(tl.float16))
+
+
+@triton.jit
 def _hgemm_nn_persistent_kernel(
     a_ptr, b_ptr, c_ptr, alpha: tl.float32, m, n, k, lda, ldb, ldc,
     NUM_SMS: tl.constexpr, GRID_STRIDE: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
-    BLOCK_K: tl.constexpr, GROUP_M: tl.constexpr,
+    BLOCK_K: tl.constexpr, GROUP_M: tl.constexpr, CACHE_MOD: tl.constexpr,
 ):
     start_pid = tl.program_id(0)
     grid_m = tl.cdiv(m, BLOCK_M)
@@ -228,8 +263,60 @@ def _hgemm_nn_persistent_kernel(
         acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
         for k_start in range(0, k, BLOCK_K):
             offs_k = k_start + offs_k_base
-            a = tl.load(a_ptr + offs_m[:, None] * lda + offs_k[None, :], cache_modifier=".cg")
-            b = tl.load(b_ptr + offs_k[:, None] * ldb + offs_n[None, :], cache_modifier=".cg")
+            a_ptrs = a_ptr + offs_m[:, None] * lda + offs_k[None, :]
+            b_ptrs = b_ptr + offs_k[:, None] * ldb + offs_n[None, :]
+            if CACHE_MOD == 0:
+                a = tl.load(a_ptrs)
+                b = tl.load(b_ptrs)
+            elif CACHE_MOD == 1:
+                a = tl.load(a_ptrs, cache_modifier=".ca")
+                b = tl.load(b_ptrs, cache_modifier=".ca")
+            else:
+                a = tl.load(a_ptrs, cache_modifier=".cg")
+                b = tl.load(b_ptrs, cache_modifier=".cg")
+            acc = tl.dot(a, b, acc, out_dtype=tl.float32, allow_tf32=False)
+        tl.store(c_ptr + offs_m[:, None] * ldc + offs_n[None, :], (alpha * acc).to(tl.float16))
+
+
+@triton.jit
+def _hgemm_nn_pipe_kernel(
+    a_ptr, b_ptr, c_ptr, alpha: tl.float32, m, n, k, lda, ldb, ldc,
+    NUM_SMS: tl.constexpr, GRID_STRIDE: tl.constexpr, BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr, GROUP_M: tl.constexpr,
+    CACHE_MOD: tl.constexpr, NS: tl.constexpr,
+):
+    # Persistent variant with an explicit software-pipelined K loop
+    # (tl.range(..., num_stages=NS)). Found on GPU1 to beat the plain
+    # persistent kernel on several K-heavy core shapes.
+    start_pid = tl.program_id(0)
+    grid_m = tl.cdiv(m, BLOCK_M)
+    grid_n = tl.cdiv(n, BLOCK_N)
+    num_tiles = grid_m * grid_n
+    width = GROUP_M * grid_n
+    offs_k_base = tl.arange(0, BLOCK_K)
+    tiles_per_program = tl.cdiv(num_tiles - start_pid, GRID_STRIDE)
+    for idx in range(0, tiles_per_program):
+        tile_id = start_pid + idx * GRID_STRIDE
+        group_id = tile_id // width
+        group_size = tl.minimum(grid_m - group_id * GROUP_M, GROUP_M)
+        pid_m = group_id * GROUP_M + (tile_id % group_size)
+        pid_n = (tile_id % width) // group_size
+        offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+        acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+        for k_start in tl.range(0, k, BLOCK_K, num_stages=NS):
+            offs_k = k_start + offs_k_base
+            a_ptrs = a_ptr + offs_m[:, None] * lda + offs_k[None, :]
+            b_ptrs = b_ptr + offs_k[:, None] * ldb + offs_n[None, :]
+            if CACHE_MOD == 0:
+                a = tl.load(a_ptrs)
+                b = tl.load(b_ptrs)
+            elif CACHE_MOD == 1:
+                a = tl.load(a_ptrs, cache_modifier=".ca")
+                b = tl.load(b_ptrs, cache_modifier=".ca")
+            else:
+                a = tl.load(a_ptrs, cache_modifier=".cg")
+                b = tl.load(b_ptrs, cache_modifier=".cg")
             acc = tl.dot(a, b, acc, out_dtype=tl.float32, allow_tf32=False)
         tl.store(c_ptr + offs_m[:, None] * ldc + offs_n[None, :], (alpha * acc).to(tl.float16))
 
@@ -713,6 +800,7 @@ def _hgemm_tt_transpose_dot_kernel(
     ldb,
     ldc,
     BETA_IS_ZERO: tl.constexpr,
+    ALPHA_IS_ONE: tl.constexpr,
     CACHE: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -770,6 +858,7 @@ def _hgemm_tn_transpose_dot_kernel(
     ldb,
     ldc,
     BETA_IS_ZERO: tl.constexpr,
+    ALPHA_IS_ONE: tl.constexpr,
     CACHE: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -826,14 +915,68 @@ def _select_hgemm_nn_descriptor_config(m: int, n: int, k: int):
 
 
 def _select_hgemm_nn_2048_square_persistent_config(m: int, n: int, k: int):
-    if m == 2048 and n == 2048 and k == 2048:
-        return 128, 128, 64, 16, 2, 1, 4
+    # Disabled: the generic blockptr path (128, 128, 64, nw=16, gm=2, ns=1,
+    # nmo=0) beats the dedicated 2048^3 persistent kernel (0.970 vs 0.754).
     return None
 
 
 def _select_hgemm_nn_persistent_config(m: int, n: int, k: int):
+    # Configurations from benchmark-semantics sweeps on Iluvatar BI-V150 (GPU1,
+    # corex 4.4.0). Tuple: (BLOCK_M, BLOCK_N, BLOCK_K, num_warps, group_m,
+    # num_stages, wave_count, cache_mod) where cache_mod is 0=default, 1=.ca,
+    # 2=.cg. Shapes without an entry fall through to the generic blockptr path.
+    if m == 2048 and n == 2048 and k == 2048:
+        return 256, 256, 64, 16, 4, 1, 4, 2
     if m == 4096 and n == 4096 and k == 4096:
-        return 128, 128, 64, 16, 4, 1, 4
+        return 256, 256, 64, 16, 4, 3, 2, 1
+    if m == 8192 and n == 8192 and k == 8192:
+        return 256, 256, 64, 16, 4, 1, 8, 2
+    if m == 16384 and n == 16384 and k == 16384:
+        return 256, 256, 64, 16, 4, 2, 2, 0
+    if m == 512 and n == 16384 and k == 4096:
+        return 256, 256, 64, 16, 2, 4, 16, 0
+    if m == 8192 and n == 256 and k == 2048:
+        return 256, 256, 64, 16, 8, 2, 4, 2
+    if m == 16384 and n == 512 and k == 4096:
+        return 256, 256, 64, 16, 2, 4, 4, 1
+    if m == 2048 and n == 12288 and k == 4096:
+        return 256, 256, 64, 16, 4, 2, 8, 1
+    if m == 2048 and n == 11008 and k == 4096:
+        return 256, 256, 64, 16, 2, 4, 16, 2
+    if m == 2048 and n == 4096 and k == 11008:
+        return 256, 256, 64, 16, 4, 1, 8, 2
+    if m == 4096 and n == 24576 and k == 8192:
+        return 256, 256, 64, 16, 2, 4, 4, 1
+    if m == 4096 and n == 8192 and k == 28672:
+        return 256, 256, 64, 16, 4, 1, 4, 2
+    if m == 8192 and n == 28672 and k == 8192:
+        return 256, 256, 64, 16, 4, 1, 2, 1
+    if m == 16384 and n == 2048 and k == 2048:
+        return 256, 256, 64, 16, 4, 1, 2, 2
+    if m == 2048 and n == 16384 and k == 2048:
+        return 256, 256, 64, 16, 4, 1, 2, 0
+    if m == 2048 and n == 2048 and k == 16384:
+        return 256, 256, 64, 16, 2, 2, 4, 2
+    if m == 32768 and n == 1024 and k == 1024:
+        return 256, 256, 64, 16, 2, 1, 8, 2
+    return None
+
+
+def _select_hgemm_nn_pipe_config(m: int, n: int, k: int):
+    # Configs for the software-pipelined persistent kernel
+    # (_hgemm_nn_pipe_kernel). Tuple: (BLOCK_M, BLOCK_N, BLOCK_K, num_warps,
+    # group_m, wave_count, cache_mod, num_pipe_stages). From GPU1 head-to-head
+    # vs the plain persistent kernel; wins on these shapes only. 2048^3 and
+    # 4096x24576x8192 reverted to the base persistent kernel after official
+    # core runs showed no gain (pipe median 0.852 vs base 0.855; 0.836 vs 0.879).
+    if m == 512 and n == 16384 and k == 4096:
+        return 256, 256, 64, 16, 2, 16, 0, 3
+    if m == 2048 and n == 11008 and k == 4096:
+        return 256, 256, 64, 16, 2, 16, 2, 3
+    if m == 2048 and n == 12288 and k == 4096:
+        return 256, 256, 64, 16, 4, 8, 1, 3
+    if m == 16384 and n == 16384 and k == 16384:
+        return 256, 256, 64, 16, 4, 2, 0, 4
     return None
 
 
@@ -858,41 +1001,44 @@ def _select_hgemm_nn_splitk_config(m: int, n: int, k: int):
 
 
 def _select_hgemm_nn_blockptr_config(m: int, n: int, k: int):
-    # Narrow exact-shape blockptr fast path for the remaining low-score NN cases.
+    # Exact-shape blockptr fast path configs, from batch sweeps on GPU1.
+    # Tuple: (BLOCK_M, BLOCK_N, BLOCK_K, num_warps, group_m, num_stages, n_major_order).
+    # Several shapes are dispatched to the persistent path first; these blockptr
+    # entries act as fallback when persistent preconditions do not hold.
     if m == 2048 and n == 2048 and k == 2048:
-        return 128, 128, 64, 16, 2, 4, False
+        return 128, 128, 64, 16, 2, 1, False
     if m == 4096 and n == 4096 and k == 4096:
         return 128, 128, 64, 16, 4, 1, False
     if m == 16384 and n == 16384 and k == 16384:
-        return 256, 128, 64, 16, 4, 2, False
+        return 256, 256, 64, 16, 2, 4, False
     if m == 8192 and n == 256 and k == 2048:
-        return 128, 128, 64, 16, 8, 3, False
+        return 256, 256, 64, 16, 8, 4, False
     if m == 8192 and n == 8192 and k == 8192:
-        return 128, 128, 64, 16, 4, 2, False
+        return 128, 256, 32, 16, 4, 2, False
     if m == 16384 and n == 512 and k == 4096:
-        return 128, 128, 64, 16, 2, 4, False
+        return 128, 128, 64, 16, 1, 1, False
     if m == 512 and n == 16384 and k == 4096:
-        return 128, 128, 64, 16, 8, 3, False
+        return 128, 128, 64, 16, 2, 1, True
     if m == 2048 and n == 12288 and k == 4096:
-        return 128, 128, 64, 16, 4, 4, False
+        return 128, 128, 64, 16, 4, 1, False
     if m == 2048 and n == 11008 and k == 4096:
-        return 128, 128, 64, 16, 4, 4, False
+        return 128, 128, 64, 16, 8, 1, False
     if m == 2048 and n == 4096 and k == 11008:
-        return 128, 128, 64, 16, 4, 4, False
+        return 128, 128, 64, 16, 4, 1, False
     if m == 4096 and n == 24576 and k == 8192:
-        return 128, 128, 64, 16, 4, 2, False
+        return 256, 256, 64, 16, 2, 1, False
     if m == 4096 and n == 8192 and k == 28672:
-        return 128, 128, 64, 16, 4, 2, False
+        return 256, 256, 64, 16, 2, 1, False
     if m == 8192 and n == 28672 and k == 8192:
-        return 128, 128, 64, 16, 4, 2, False
+        return 256, 256, 64, 16, 2, 4, False
     if m == 16384 and n == 2048 and k == 2048:
-        return 128, 128, 64, 16, 4, 3, False
+        return 256, 128, 64, 16, 2, 1, False
     if m == 2048 and n == 16384 and k == 2048:
-        return 128, 128, 64, 16, 4, 4, False
+        return 128, 128, 64, 16, 4, 1, True
     if m == 2048 and n == 2048 and k == 16384:
-        return 128, 128, 64, 16, 8, 2, False
+        return 128, 128, 64, 16, 4, 1, False
     if m == 32768 and n == 1024 and k == 1024:
-        return 128, 128, 64, 16, 8, 2, False
+        return 128, 128, 64, 16, 2, 1, False
     return None
 
 
@@ -1304,11 +1450,43 @@ def _launch_hgemm_nn_persistent(
     num_stages: int,
     num_sms: int,
     grid_stride: int,
+    cache_mod: int = 2,
 ) -> None:
     _hgemm_nn_persistent_kernel[grid](
         A, B, C, alpha, m, n, k, lda, ldb, ldc, NUM_SMS=num_sms, GRID_STRIDE=grid_stride,
         BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k, GROUP_M=group_m,
+        CACHE_MOD=cache_mod,
         num_warps=num_warps, num_stages=num_stages,
+    )
+
+
+def _launch_hgemm_nn_pipe(
+    grid,
+    A: torch.Tensor,
+    B: torch.Tensor,
+    C: torch.Tensor,
+    alpha: float,
+    m: int,
+    n: int,
+    k: int,
+    lda: int,
+    ldb: int,
+    ldc: int,
+    block_m: int,
+    block_n: int,
+    block_k: int,
+    num_warps: int,
+    group_m: int,
+    num_sms: int,
+    grid_stride: int,
+    cache_mod: int,
+    num_pipe_stages: int,
+) -> None:
+    _hgemm_nn_pipe_kernel[grid](
+        A, B, C, alpha, m, n, k, lda, ldb, ldc, NUM_SMS=num_sms, GRID_STRIDE=grid_stride,
+        BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k, GROUP_M=group_m,
+        CACHE_MOD=cache_mod, NS=num_pipe_stages,
+        num_warps=num_warps, num_stages=3,
     )
 
 
@@ -1391,7 +1569,8 @@ def _launch_hgemm_tt_transpose_dot(
     num_stages: int,
 ) -> None:
     _hgemm_tt_transpose_dot_kernel[grid](
-        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero, ".cg",
+        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero,
+        ALPHA_IS_ONE=alpha == 1.0, CACHE=".cg",
         BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k, GROUP_M=group_m,
         num_warps=num_warps, num_stages=num_stages,
     )
@@ -1419,7 +1598,8 @@ def _launch_hgemm_tn_transpose_dot(
     num_stages: int,
 ) -> None:
     _hgemm_tn_transpose_dot_kernel[grid](
-        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero, ".cg",
+        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero,
+        ALPHA_IS_ONE=alpha == 1.0, CACHE=".cg",
         BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k, GROUP_M=group_m,
         num_warps=num_warps, num_stages=num_stages,
     )
@@ -1539,11 +1719,28 @@ def hgemm(
                 )
             return
 
+    nn_pipe_config = None
+    if transa == CUBLAS_OP_N and transb == CUBLAS_OP_N and beta_is_zero and lda == k and ldb == n and ldc == n:
+        nn_pipe_config = _select_hgemm_nn_pipe_config(m, n, k)
+    if nn_pipe_config is not None:
+        block_m, block_n, block_k, num_warps, group_m, wave_count, cache_mod, pipe_stages = nn_pipe_config
+        if _can_use_fast_hgemm(m, n, k, block_m, block_n, block_k):
+            num_sms = torch.cuda.get_device_properties(A.device).multi_processor_count
+            grid_stride = num_sms * wave_count
+            grid = (min(grid_stride, triton.cdiv(m, block_m) * triton.cdiv(n, block_n)),)
+            with torch_device_fn.device(A.device):
+                _launch_hgemm_nn_pipe(
+                    grid, A, B, C, alpha, m, n, k, lda, ldb, ldc,
+                    block_m, block_n, block_k, num_warps, group_m,
+                    num_sms, grid_stride, cache_mod, pipe_stages,
+                )
+            return
+
     nn_persistent_config = None
     if transa == CUBLAS_OP_N and transb == CUBLAS_OP_N and beta_is_zero and lda == k and ldb == n and ldc == n:
         nn_persistent_config = _select_hgemm_nn_persistent_config(m, n, k)
     if nn_persistent_config is not None:
-        block_m, block_n, block_k, num_warps, group_m, num_stages, wave_count = nn_persistent_config
+        block_m, block_n, block_k, num_warps, group_m, num_stages, wave_count, cache_mod = nn_persistent_config
         if _can_use_fast_hgemm(m, n, k, block_m, block_n, block_k):
             num_sms = torch.cuda.get_device_properties(A.device).multi_processor_count
             grid_stride = num_sms * wave_count
@@ -1551,7 +1748,8 @@ def hgemm(
             with torch_device_fn.device(A.device):
                 _launch_hgemm_nn_persistent(
                     grid, A, B, C, alpha, m, n, k, lda, ldb, ldc,
-                    block_m, block_n, block_k, num_warps, group_m, num_stages, num_sms, grid_stride,
+                    block_m, block_n, block_k, num_warps, group_m, num_stages,
+                    num_sms, grid_stride, cache_mod,
                 )
             return
 
