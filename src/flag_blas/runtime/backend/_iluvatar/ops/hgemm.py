@@ -1117,12 +1117,14 @@ def _select_hgemm_nn_persistent_config(m: int, n: int, k: int):
         return 256, 256, 64, 16, 4, 1, 8, 2
     if m == 16384 and n == 16384 and k == 16384:
         return 256, 256, 64, 16, 4, 2, 2, 0
+    if m == 256 and n == 8192 and k == 2048:
+        return 256, 256, 32, 16, 4, 2, 4, 0
     if m == 512 and n == 16384 and k == 4096:
         return 256, 256, 64, 16, 2, 4, 16, 0
     if m == 8192 and n == 256 and k == 2048:
         return 256, 256, 64, 16, 8, 2, 4, 2
     if m == 16384 and n == 512 and k == 4096:
-        return 256, 256, 64, 16, 4, 4, 4, 1
+        return 256, 256, 64, 16, 4, 2, 4, 1
     if m == 2048 and n == 12288 and k == 4096:
         return 256, 256, 64, 16, 4, 2, 8, 1
     if m == 2048 and n == 11008 and k == 4096:
@@ -1138,7 +1140,7 @@ def _select_hgemm_nn_persistent_config(m: int, n: int, k: int):
     if m == 16384 and n == 2048 and k == 2048:
         return 256, 256, 64, 16, 4, 1, 2, 2
     if m == 2048 and n == 16384 and k == 2048:
-        return 256, 256, 64, 16, 4, 1, 2, 0
+        return 256, 256, 64, 16, 4, 2, 2, 0
     if m == 2048 and n == 2048 and k == 16384:
         return 256, 256, 64, 16, 2, 2, 4, 2
     if m == 32768 and n == 1024 and k == 1024:
@@ -1153,6 +1155,10 @@ def _select_hgemm_nn_pipe_config(m: int, n: int, k: int):
     # vs the plain persistent kernel; wins on these shapes only. 2048^3 and
     # 4096x24576x8192 reverted to the base persistent kernel after official
     # core runs showed no gain (pipe median 0.852 vs base 0.855; 0.836 vs 0.879).
+    # 2026-08-25: official core A/B confirmed pipe is faster than the persistent
+    # kernel for 512x16384x4096, 2048x11008x4096 and 2048x12288x4096
+    # (pipe 0.933/0.855/0.904 vs pers 0.930/0.832/0.890), so the experimental
+    # persistent-kernel routing for those shapes was reverted.
     if m == 512 and n == 16384 and k == 4096:
         return 256, 256, 64, 16, 2, 16, 0, 3
     if m == 2048 and n == 11008 and k == 4096:
