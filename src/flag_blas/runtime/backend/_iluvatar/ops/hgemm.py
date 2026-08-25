@@ -938,7 +938,7 @@ def _select_hgemm_nn_persistent_config(m: int, n: int, k: int):
     if m == 8192 and n == 256 and k == 2048:
         return 256, 256, 64, 16, 8, 2, 4, 2
     if m == 16384 and n == 512 and k == 4096:
-        return 256, 256, 64, 16, 2, 4, 4, 1
+        return 256, 256, 64, 16, 4, 4, 4, 1
     if m == 2048 and n == 12288 and k == 4096:
         return 256, 256, 64, 16, 4, 2, 8, 1
     if m == 2048 and n == 11008 and k == 4096:
@@ -946,7 +946,7 @@ def _select_hgemm_nn_persistent_config(m: int, n: int, k: int):
     if m == 2048 and n == 4096 and k == 11008:
         return 256, 256, 64, 16, 4, 1, 8, 2
     if m == 4096 and n == 24576 and k == 8192:
-        return 256, 256, 64, 16, 2, 4, 4, 1
+        return 256, 256, 64, 16, 2, 4, 2, 1
     if m == 4096 and n == 8192 and k == 28672:
         return 256, 256, 64, 16, 4, 1, 4, 2
     if m == 8192 and n == 28672 and k == 8192:
@@ -972,7 +972,7 @@ def _select_hgemm_nn_pipe_config(m: int, n: int, k: int):
     if m == 512 and n == 16384 and k == 4096:
         return 256, 256, 64, 16, 2, 16, 0, 3
     if m == 2048 and n == 11008 and k == 4096:
-        return 256, 256, 64, 16, 2, 16, 2, 3
+        return 256, 256, 64, 16, 2, 16, 2, 4
     if m == 2048 and n == 12288 and k == 4096:
         return 256, 256, 64, 16, 4, 8, 1, 3
     if m == 16384 and n == 16384 and k == 16384:
