@@ -910,6 +910,190 @@ def _hgemm_tn_transpose_dot_kernel(
     tl.store(c_ptrs, result.to(tl.float16))
 
 
+@triton.jit
+def _hgemm_tn_transpose_dot_persistent_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    NUM_SMS: tl.constexpr,
+    GRID_STRIDE: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+    CACHE_MOD: tl.constexpr,
+):
+    """Persistent TN transposed-dot kernel (C = A^T @ B, A stored (k, m)).
+
+    Same arithmetic as _hgemm_tn_transpose_dot_kernel but each program keeps
+    a persistent tile via grid-stride looping; wins for extreme-aspect shapes
+    (e.g. 8192x256x2048) where the plain transpose-dot launch loses to the
+    A-pretranspose -> NN path on GPU1.
+    """
+    start_pid = tl.program_id(0)
+    grid_m = tl.cdiv(m, BLOCK_M)
+    grid_n = tl.cdiv(n, BLOCK_N)
+    num_tiles = grid_m * grid_n
+    width = GROUP_M * grid_n
+    offs_k_base = tl.arange(0, BLOCK_K)
+    tiles_per_program = tl.cdiv(num_tiles - start_pid, GRID_STRIDE)
+    for idx in range(0, tiles_per_program):
+        tile_id = start_pid + idx * GRID_STRIDE
+        group_id = tile_id // width
+        group_size = tl.minimum(grid_m - group_id * GROUP_M, GROUP_M)
+        pid_m = group_id * GROUP_M + (tile_id % group_size)
+        pid_n = (tile_id % width) // group_size
+        offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+        acc_t = tl.zeros((BLOCK_N, BLOCK_M), dtype=tl.float32)
+        for k_start in range(0, k, BLOCK_K):
+            offs_k = k_start + offs_k_base
+            a_ptrs = a_ptr + offs_k[:, None] * lda + offs_m[None, :]
+            b_ptrs = b_ptr + offs_k[None, :] * ldb + offs_n[:, None]
+            if CACHE_MOD == 0:
+                a = tl.load(a_ptrs)
+                b = tl.load(b_ptrs)
+            elif CACHE_MOD == 1:
+                a = tl.load(a_ptrs, cache_modifier=".ca")
+                b = tl.load(b_ptrs, cache_modifier=".ca")
+            else:
+                a = tl.load(a_ptrs, cache_modifier=".cg")
+                b = tl.load(b_ptrs, cache_modifier=".cg")
+            acc_t = tl.dot(b, a, acc_t, out_dtype=tl.float32, allow_tf32=False)
+        c_ptrs = c_ptr + offs_m[:, None] * ldc + offs_n[None, :]
+        tl.store(c_ptrs, (alpha * tl.trans(acc_t)).to(tl.float16))
+
+
+@triton.jit
+def _hgemm_tt_transpose_dot_persistent_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    NUM_SMS: tl.constexpr,
+    GRID_STRIDE: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+    CACHE_MOD: tl.constexpr,
+):
+    """Persistent TT transposed-dot kernel (C = A^T @ B^T, A stored (k, m),
+    B stored (n, k)). Same structure as the TN persistent kernel but B tiles
+    are loaded row-contiguous (B is (n, k), ldb = k). Wins over the
+    transpose-both -> NN path on GPU1 for extreme-aspect shapes."""
+    start_pid = tl.program_id(0)
+    grid_m = tl.cdiv(m, BLOCK_M)
+    grid_n = tl.cdiv(n, BLOCK_N)
+    num_tiles = grid_m * grid_n
+    width = GROUP_M * grid_n
+    offs_k_base = tl.arange(0, BLOCK_K)
+    tiles_per_program = tl.cdiv(num_tiles - start_pid, GRID_STRIDE)
+    for idx in range(0, tiles_per_program):
+        tile_id = start_pid + idx * GRID_STRIDE
+        group_id = tile_id // width
+        group_size = tl.minimum(grid_m - group_id * GROUP_M, GROUP_M)
+        pid_m = group_id * GROUP_M + (tile_id % group_size)
+        pid_n = (tile_id % width) // group_size
+        offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+        acc_t = tl.zeros((BLOCK_N, BLOCK_M), dtype=tl.float32)
+        for k_start in range(0, k, BLOCK_K):
+            offs_k = k_start + offs_k_base
+            a_ptrs = a_ptr + offs_k[:, None] * lda + offs_m[None, :]
+            b_ptrs = b_ptr + offs_n[:, None] * ldb + offs_k[None, :]
+            if CACHE_MOD == 0:
+                a = tl.load(a_ptrs)
+                b = tl.load(b_ptrs)
+            elif CACHE_MOD == 1:
+                a = tl.load(a_ptrs, cache_modifier=".ca")
+                b = tl.load(b_ptrs, cache_modifier=".ca")
+            else:
+                a = tl.load(a_ptrs, cache_modifier=".cg")
+                b = tl.load(b_ptrs, cache_modifier=".cg")
+            acc_t = tl.dot(b, a, acc_t, out_dtype=tl.float32, allow_tf32=False)
+        c_ptrs = c_ptr + offs_m[:, None] * ldc + offs_n[None, :]
+        tl.store(c_ptrs, (alpha * tl.trans(acc_t)).to(tl.float16))
+
+
+@triton.jit
+def _hgemm_nt_transpose_dot_persistent_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    NUM_SMS: tl.constexpr,
+    GRID_STRIDE: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+    CACHE_MOD: tl.constexpr,
+):
+    """Persistent NT transposed-dot kernel (C = A @ B^T, A stored (m, k),
+    B stored (n, k), lda == ldb == k).
+
+    A tiles are loaded DIRECTLY as [BLOCK_K, BLOCK_M] via the gather address
+    offs_m * lda + offs_k (A[mm, kk] sits at mm * lda + kk), so no tl.trans of
+    the A tile is needed; B tiles [N, K] are row-contiguous. The result is
+    accumulated in the transposed orientation C^T = B @ A^T and transposed once
+    before store. On GPU1 this beats the B-pretranspose -> NN path for shapes
+    where A fits in cache (gather is L2-resident)."""
+    start_pid = tl.program_id(0)
+    grid_m = tl.cdiv(m, BLOCK_M)
+    grid_n = tl.cdiv(n, BLOCK_N)
+    num_tiles = grid_m * grid_n
+    width = GROUP_M * grid_n
+    offs_k_base = tl.arange(0, BLOCK_K)
+    tiles_per_program = tl.cdiv(num_tiles - start_pid, GRID_STRIDE)
+    for idx in range(0, tiles_per_program):
+        tile_id = start_pid + idx * GRID_STRIDE
+        group_id = tile_id // width
+        group_size = tl.minimum(grid_m - group_id * GROUP_M, GROUP_M)
+        pid_m = group_id * GROUP_M + (tile_id % group_size)
+        pid_n = (tile_id % width) // group_size
+        offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+        acc_t = tl.zeros((BLOCK_N, BLOCK_M), dtype=tl.float32)
+        for k_start in range(0, k, BLOCK_K):
+            offs_k = k_start + offs_k_base
+            a_ptrs = a_ptr + offs_m[None, :] * lda + offs_k[:, None]
+            b_ptrs = b_ptr + offs_n[:, None] * ldb + offs_k[None, :]
+            if CACHE_MOD == 0:
+                a = tl.load(a_ptrs)
+                b = tl.load(b_ptrs)
+            elif CACHE_MOD == 1:
+                a = tl.load(a_ptrs, cache_modifier=".ca")
+                b = tl.load(b_ptrs, cache_modifier=".ca")
+            else:
+                a = tl.load(a_ptrs, cache_modifier=".cg")
+                b = tl.load(b_ptrs, cache_modifier=".cg")
+            acc_t = tl.dot(b, a, acc_t, out_dtype=tl.float32, allow_tf32=False)
+        c_ptrs = c_ptr + offs_m[:, None] * ldc + offs_n[None, :]
+        tl.store(c_ptrs, (alpha * tl.trans(acc_t)).to(tl.float16))
+
+
+
+
 def _select_hgemm_nn_descriptor_config(m: int, n: int, k: int):
     return None
 
@@ -1214,6 +1398,66 @@ def _select_hgemm_tn_transpose_dot_config(m: int, n: int, k: int):
     return None
 
 
+def _select_hgemm_tn_transpose_dot_persistent_config(m: int, n: int, k: int):
+    """(BLOCK_M, BLOCK_N, BLOCK_K, num_warps, group_m, wave_count, cache_mod)
+    for the persistent TN transposed-dot kernel. Wins over both the plain TN
+    transpose-dot kernel and the A-pretranspose -> NN path on GPU1; currently
+    only the extreme-aspect 8192x256x2048 shape (sp 1.028 vs 0.888)."""
+    if m == 8192 and n == 256 and k == 2048:
+        return 128, 128, 64, 16, 2, 4, 0
+    if m == 16384 and n == 512 and k == 4096:
+        return 128, 128, 64, 16, 4, 16, 0
+    if m == 256 and n == 8192 and k == 2048:
+        return 128, 128, 64, 16, 4, 4, 0
+    if m == 32768 and n == 1024 and k == 1024:
+        return 128, 128, 64, 16, 8, 4, 0
+    if m == 2048 and n == 2048 and k == 2048:
+        return 128, 128, 64, 16, 2, 4, 0
+    if m == 2048 and n == 2048 and k == 16384:
+        return 128, 128, 64, 16, 4, 16, 0
+    return None
+
+
+def _select_hgemm_tt_transpose_dot_persistent_config(m: int, n: int, k: int):
+    """(BLOCK_M, BLOCK_N, BLOCK_K, num_warps, group_m, wave_count, cache_mod)
+    for the persistent TT transposed-dot kernel. These shapes beat the
+    transpose-both -> NN path on GPU1 (head-to-head sweeps, 2026-08) and are
+    intercepted BEFORE the pretranspose branch in hgemm()."""
+    if m == 8192 and n == 256 and k == 2048:
+        return 128, 128, 64, 16, 4, 4, 0
+    if m == 256 and n == 8192 and k == 2048:
+        return 128, 128, 64, 16, 2, 4, 0
+    if m == 512 and n == 16384 and k == 4096:
+        return 128, 128, 64, 16, 8, 4, 0
+    if m == 16384 and n == 512 and k == 4096:
+        return 128, 128, 64, 16, 4, 16, 0
+    if m == 2048 and n == 2048 and k == 2048:
+        return 128, 128, 64, 16, 8, 4, 0
+    if m == 2048 and n == 2048 and k == 16384:
+        return 128, 128, 64, 16, 8, 4, 0
+    if m == 32768 and n == 1024 and k == 1024:
+        return 128, 128, 64, 16, 8, 4, 0
+    return None
+
+
+def _select_hgemm_nt_transpose_dot_persistent_config(m: int, n: int, k: int):
+    """(BLOCK_M, BLOCK_N, BLOCK_K, num_warps, group_m, wave_count, cache_mod)
+    for the persistent NT transposed-dot kernel (C = A @ B^T). The A-tile
+    gather is L2-resident when A is small, so these shapes beat the
+    B-pretranspose -> NN path on GPU1 (head-to-head sweeps + official runs,
+    2026-08) and are intercepted BEFORE the pretranspose branch in hgemm().
+    The pipelined variant was tried for 2048^3 / 2048x16384x2048 but lost to
+    the pretranspose path under official sustained-load conditions, so those
+    shapes are not wired."""
+    if m == 256 and n == 8192 and k == 2048:
+        return 128, 128, 64, 16, 4, 8, 0
+    if m == 512 and n == 16384 and k == 4096:
+        return 128, 128, 64, 16, 4, 4, 0
+    if m == 2048 and n == 11008 and k == 4096:
+        return 128, 128, 64, 16, 8, 4, 0
+    return None
+
+
 def _can_use_fast_hgemm(m: int, n: int, k: int, block_m: int, block_n: int, block_k: int) -> bool:
     return (m % block_m == 0) and (n % block_n == 0) and (k % block_k == 0)
 
@@ -1226,13 +1470,52 @@ def _select_hgemm_n_major_order(m: int, n: int, k: int, transa: int, transb: int
     return False
 
 
+def _should_pretranspose_a(m: int, n: int, k: int) -> bool:
+    """Transposing A for transa == T (TN / TT) so the fast transa == N kernels
+    apply. The one-time A copy (k, m) -> (m, k) is amortized over the N-side of
+    the output; on BI-V150 its overhead is ~ 1/n of the kernel time, so it is
+    profitable for wide-N shapes. m >= 256 keeps small-m (m <= 128) wide-N
+    shapes on the generic path where the copy would not amortize. Derived from
+    head-to-head sweeps on GPU1."""
+    if n >= 4096 and m >= 256:
+        return True
+    if (m, n, k) in (
+        (2048, 2048, 2048),
+        (16384, 512, 4096),
+        (32768, 1024, 1024),
+        (2048, 2048, 16384),
+        (16384, 2048, 2048),
+    ):
+        return True
+    return False
+
+
 def _should_pretranspose_b(m: int, n: int, k: int) -> bool:
     """Transposing B is profitable only when B is large enough that the
     transposed-load software gather (per-element) dominates the one-time
     contiguous copy cost. Derived from sweeps on Iluvatar BI-V150: for
     transb == T with large K, converting to the transb == N load path yields
     up to ~35% speedup, while the copy is fully amortized over the K loop."""
-    return k >= 8192 and min(m, n) >= 2048
+    if k >= 8192 and min(m, n) >= 2048:
+        return True
+    # Additional NT/TT shapes where the generic transposed-B gather is much
+    # slower than the transb == N path even after the one-time copy
+    # (head-to-head sweeps on GPU1, 2026-08).
+    if (m, n, k) in (
+        (4096, 4096, 4096),
+        (2048, 2048, 2048),
+        (2048, 16384, 2048),
+        (512, 16384, 4096),
+        (256, 8192, 2048),
+        (8192, 256, 2048),
+        (16384, 512, 4096),
+        (2048, 12288, 4096),
+        (2048, 11008, 4096),
+        (16384, 2048, 2048),
+        (32768, 1024, 1024),
+    ):
+        return True
+    return False
 
 
 def _launch_hgemm(
@@ -1605,6 +1888,93 @@ def _launch_hgemm_tn_transpose_dot(
     )
 
 
+def _launch_hgemm_tn_transpose_dot_persistent(
+    grid,
+    A: torch.Tensor,
+    B: torch.Tensor,
+    C: torch.Tensor,
+    alpha: float,
+    m: int,
+    n: int,
+    k: int,
+    lda: int,
+    ldb: int,
+    ldc: int,
+    block_m: int,
+    block_n: int,
+    block_k: int,
+    num_warps: int,
+    group_m: int,
+    num_sms: int,
+    grid_stride: int,
+    cache_mod: int,
+) -> None:
+    _hgemm_tn_transpose_dot_persistent_kernel[grid](
+        A, B, C, alpha, m, n, k, lda, ldb, ldc, NUM_SMS=num_sms,
+        GRID_STRIDE=grid_stride, BLOCK_M=block_m, BLOCK_N=block_n,
+        BLOCK_K=block_k, GROUP_M=group_m, CACHE_MOD=cache_mod,
+        num_warps=num_warps, num_stages=1,
+    )
+
+
+def _launch_hgemm_tt_transpose_dot_persistent(
+    grid,
+    A: torch.Tensor,
+    B: torch.Tensor,
+    C: torch.Tensor,
+    alpha: float,
+    m: int,
+    n: int,
+    k: int,
+    lda: int,
+    ldb: int,
+    ldc: int,
+    block_m: int,
+    block_n: int,
+    block_k: int,
+    num_warps: int,
+    group_m: int,
+    num_sms: int,
+    grid_stride: int,
+    cache_mod: int,
+) -> None:
+    _hgemm_tt_transpose_dot_persistent_kernel[grid](
+        A, B, C, alpha, m, n, k, lda, ldb, ldc, NUM_SMS=num_sms,
+        GRID_STRIDE=grid_stride, BLOCK_M=block_m, BLOCK_N=block_n,
+        BLOCK_K=block_k, GROUP_M=group_m, CACHE_MOD=cache_mod,
+        num_warps=num_warps, num_stages=1,
+    )
+
+
+def _launch_hgemm_nt_transpose_dot_persistent(
+    grid,
+    A: torch.Tensor,
+    B: torch.Tensor,
+    C: torch.Tensor,
+    alpha: float,
+    m: int,
+    n: int,
+    k: int,
+    lda: int,
+    ldb: int,
+    ldc: int,
+    block_m: int,
+    block_n: int,
+    block_k: int,
+    num_warps: int,
+    group_m: int,
+    num_sms: int,
+    grid_stride: int,
+    cache_mod: int,
+) -> None:
+    _hgemm_nt_transpose_dot_persistent_kernel[grid](
+        A, B, C, alpha, m, n, k, lda, ldb, ldc, NUM_SMS=num_sms,
+        GRID_STRIDE=grid_stride, BLOCK_M=block_m, BLOCK_N=block_n,
+        BLOCK_K=block_k, GROUP_M=group_m, CACHE_MOD=cache_mod,
+        num_warps=num_warps, num_stages=1,
+    )
+
+
 def hgemm(
     transa: int,
     transb: int,
@@ -1640,17 +2010,97 @@ def hgemm(
             C.mul_(beta)
         return
 
-    # ---- B-transposed large-shape fast path ----
-    # The transposed-B load path uses slow per-element software gathers. For
-    # large shapes, transpose B once (a single coalesced copy) and reuse the
-    # fast transb == N kernel; the copy is amortized over the long K loop.
-    if transb == CUBLAS_OP_T and _should_pretranspose_b(m, n, k):
+    # ---- Transposed-operand fast paths ----
+    # The transposed-load paths (transa == T / transb == T) use slow per-element
+    # software gathers. For large shapes, transpose the operand once (a single
+    # coalesced copy) and reuse the fast transa == N / transb == N kernels; the
+    # copy is amortized over the opposite output dimension (A over N, B over M).
+    # - TT: transpose both operands -> NN when either operand benefits.
+    # - TN: transpose A only -> NN.
+    # - NT: transpose B only -> NN.
+    # Decisions come from head-to-head sweeps on GPU1 (see _should_pretranspose_*).
+    #
+    # A few TN/TT shapes are faster with the dedicated persistent transposed-dot
+    # kernel than with the operand copy -> NN path (which includes the copy in
+    # the timed region), so those are intercepted BEFORE the pretranspose branch.
+    beta_is_zero = beta == 0.0
+
+    tn_td_persistent_config = None
+    if transa == CUBLAS_OP_T and transb == CUBLAS_OP_N:
+        tn_td_persistent_config = _select_hgemm_tn_transpose_dot_persistent_config(m, n, k)
+    if tn_td_persistent_config is not None:
+        (
+            block_m, block_n, block_k, num_warps, group_m, wave_count, cache_mod,
+        ) = tn_td_persistent_config
+        if beta_is_zero and _can_use_fast_hgemm(m, n, k, block_m, block_n, block_k):
+            num_sms = torch.cuda.get_device_properties(A.device).multi_processor_count
+            grid_stride = num_sms * wave_count
+            grid = (min(grid_stride, triton.cdiv(m, block_m) * triton.cdiv(n, block_n)),)
+            with torch_device_fn.device(A.device):
+                _launch_hgemm_tn_transpose_dot_persistent(
+                    grid, A, B, C, alpha, m, n, k, lda, ldb, ldc,
+                    block_m, block_n, block_k, num_warps, group_m, num_sms,
+                    grid_stride, cache_mod,
+                )
+            return
+
+    tt_td_persistent_config = None
+    if transa == CUBLAS_OP_T and transb == CUBLAS_OP_T:
+        tt_td_persistent_config = _select_hgemm_tt_transpose_dot_persistent_config(m, n, k)
+    if tt_td_persistent_config is not None:
+        (
+            block_m, block_n, block_k, num_warps, group_m, wave_count, cache_mod,
+        ) = tt_td_persistent_config
+        if beta_is_zero and _can_use_fast_hgemm(m, n, k, block_m, block_n, block_k):
+            num_sms = torch.cuda.get_device_properties(A.device).multi_processor_count
+            grid_stride = num_sms * wave_count
+            grid = (min(grid_stride, triton.cdiv(m, block_m) * triton.cdiv(n, block_n)),)
+            with torch_device_fn.device(A.device):
+                _launch_hgemm_tt_transpose_dot_persistent(
+                    grid, A, B, C, alpha, m, n, k, lda, ldb, ldc,
+                    block_m, block_n, block_k, num_warps, group_m, num_sms,
+                    grid_stride, cache_mod,
+                )
+            return
+
+    nt_td_persistent_config = None
+    if transa == CUBLAS_OP_N and transb == CUBLAS_OP_T:
+        nt_td_persistent_config = _select_hgemm_nt_transpose_dot_persistent_config(m, n, k)
+    if nt_td_persistent_config is not None:
+        (
+            block_m, block_n, block_k, num_warps, group_m, wave_count, cache_mod,
+        ) = nt_td_persistent_config
+        if beta_is_zero and _can_use_fast_hgemm(m, n, k, block_m, block_n, block_k):
+            num_sms = torch.cuda.get_device_properties(A.device).multi_processor_count
+            grid_stride = num_sms * wave_count
+            grid = (min(grid_stride, triton.cdiv(m, block_m) * triton.cdiv(n, block_n)),)
+            with torch_device_fn.device(A.device):
+                _launch_hgemm_nt_transpose_dot_persistent(
+                    grid, A, B, C, alpha, m, n, k, lda, ldb, ldc,
+                    block_m, block_n, block_k, num_warps, group_m, num_sms,
+                    grid_stride, cache_mod,
+                )
+            return
+
+    if (
+        transa == CUBLAS_OP_T
+        and transb == CUBLAS_OP_T
+        and (_should_pretranspose_a(m, n, k) or _should_pretranspose_b(m, n, k))
+    ):
+        A = A.t().contiguous()
+        transa = CUBLAS_OP_N
+        lda = k
         B = B.t().contiguous()
         transb = CUBLAS_OP_N
         ldb = n
-
-    beta_is_zero = beta == 0.0
-
+    elif transa == CUBLAS_OP_T and _should_pretranspose_a(m, n, k):
+        A = A.t().contiguous()
+        transa = CUBLAS_OP_N
+        lda = k
+    elif transb == CUBLAS_OP_T and _should_pretranspose_b(m, n, k):
+        B = B.t().contiguous()
+        transb = CUBLAS_OP_N
+        ldb = n
     tt_transpose_dot_config = None
     if transa == CUBLAS_OP_T and transb == CUBLAS_OP_T:
         tt_transpose_dot_config = _select_hgemm_tt_transpose_dot_config(m, n, k)
