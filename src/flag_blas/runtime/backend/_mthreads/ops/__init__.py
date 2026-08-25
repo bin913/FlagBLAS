@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from flag_blas.runtime.backend._mthreads.ops.hgemm import hgemm
 from flag_blas.runtime.backend._mthreads.ops.sgemm import sgemm
 
-__all__ = ["sgemm"]
+__all__ = ["hgemm", "sgemm"]
