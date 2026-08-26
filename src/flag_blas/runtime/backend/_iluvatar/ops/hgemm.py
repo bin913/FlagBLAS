@@ -1421,6 +1421,11 @@ def _select_hgemm_tn_transpose_dot_persistent_config(m: int, n: int, k: int):
     sweep suggested (official TN 8192x256x2048: 0.858 via pretranspose vs
     0.876 baseline here; 2048^3: 0.807 vs 0.794), so these shapes are
     intercepted again to keep the persistent kernel."""
+    # 2026-08-27: retune from sweep td data: 32768x1024x1024 wave 4->8
+    # (td-w8 0.970 vs td-comm 0.899), 2048x2048x16384 cm 0->1 (td-cm1 0.823 vs
+    # td-comm <0.799). 8192x256x2048 keeps the persistent intercept (an
+    # attempt to route it to the non-persistent transpose-dot kernel regressed
+    # official 0.874 -> 0.857).
     if m == 8192 and n == 256 and k == 2048:
         return 128, 128, 64, 16, 2, 4, 0
     if m == 16384 and n == 512 and k == 4096:
@@ -1428,9 +1433,9 @@ def _select_hgemm_tn_transpose_dot_persistent_config(m: int, n: int, k: int):
     if m == 256 and n == 8192 and k == 2048:
         return 128, 128, 64, 16, 4, 4, 0
     if m == 32768 and n == 1024 and k == 1024:
-        return 128, 128, 64, 16, 8, 4, 0
+        return 128, 128, 64, 16, 8, 8, 0
     if m == 2048 and n == 2048 and k == 16384:
-        return 128, 128, 64, 16, 4, 16, 0
+        return 128, 128, 64, 16, 4, 16, 1
     if m == 2048 and n == 2048 and k == 2048:
         return 128, 128, 64, 16, 2, 4, 0
     return None
@@ -1445,21 +1450,42 @@ def _select_hgemm_tt_transpose_dot_persistent_config(m: int, n: int, k: int):
     512x16384x4096 0.564 / 16384x512x4096 0.606 / 2048^3 0.715 /
     2048x2048x16384 0.726 vs 0.802 / 0.801 / 0.800 / 0.771 / 0.829 baseline),
     so the intercepts are restored. 2026-08-26: 512x16384x4096 cache_mod 0->1
-    (sweep td-cm1 0.937 vs td-comm 0.913; official 0.800 vs 0.772)."""
+    (sweep td-cm1 0.937 vs td-comm 0.913; official 0.800 vs 0.772).
+    2026-08-27: 256x8192x2048 w4->w8 and 16384x512x4096 gm4->gm2 (sweep-E td
+    data; official 0.841 vs 0.799 / 0.865 vs 0.801); added wide-N intercepts
+    that used to go pretranspose -> NN (sweep td 0.85-0.89 vs official
+    pretranspose 0.73-0.83; official 0.873 / 0.817 / 0.850 / 0.840 / 0.853 /
+    0.854 for 2048x12288x4096 / 2048x11008x4096 / 2048x4096x11008 /
+    4096x24576x8192 / 8192x28672x8192 / 2048x16384x2048). 2048x2048x16384
+    keeps wave 4 (w8 regressed official 0.829 -> 0.766). 8192x28672x8192
+    keeps pretranspose -> NN (td kernel context-sensitive: two full core runs
+    0.629 / 0.637 vs 0.755 pretranspose baseline, so the added intercept was
+    removed)."""
     if m == 8192 and n == 256 and k == 2048:
         return 128, 128, 64, 16, 4, 4, 0
     if m == 256 and n == 8192 and k == 2048:
-        return 128, 128, 64, 16, 2, 4, 0
+        return 128, 128, 64, 16, 2, 8, 0
     if m == 512 and n == 16384 and k == 4096:
         return 128, 128, 64, 16, 8, 4, 1
     if m == 16384 and n == 512 and k == 4096:
-        return 128, 128, 64, 16, 4, 16, 0
+        return 128, 128, 64, 16, 2, 16, 0
     if m == 2048 and n == 2048 and k == 16384:
         return 128, 128, 64, 16, 8, 4, 0
     if m == 32768 and n == 1024 and k == 1024:
         return 128, 128, 64, 16, 8, 4, 0
     if m == 2048 and n == 2048 and k == 2048:
         return 128, 128, 64, 16, 8, 4, 0
+    if m == 2048 and n == 11008 and k == 4096:
+        return 128, 128, 64, 16, 8, 16, 0
+    if m == 2048 and n == 4096 and k == 11008:
+        return 128, 128, 64, 16, 4, 8, 0
+    if m == 4096 and n == 24576 and k == 8192:
+        return 128, 128, 64, 16, 4, 4, 0
+    if m == 2048 and n == 16384 and k == 2048:
+        return 128, 128, 64, 16, 8, 16, 0
+    # 8192x28672x8192 keeps pretranspose -> NN: the persistent td kernel is
+    # context-sensitive (subset bench 0.81-0.85, full core run 0.629 vs
+    # pretranspose 0.755 baseline).
     return None
 
 
@@ -1473,12 +1499,15 @@ def _select_hgemm_nt_transpose_dot_persistent_config(m: int, n: int, k: int):
     0.776 / 0.743 / 0.780 baseline), so the intercepts are restored.
     2026-08-26: 512x16384x4096 wave 4->8 (sweep td-w8 0.876 vs td-comm 0.747;
     official 0.768 vs 0.742)."""
+    # 2026-08-27: retune from sweep D td data: 256x8192x2048 wave 8->16
+    # (td-w16 0.814 vs td-comm 0.796), 2048x11008x4096 cm 0->1
+    # (td-cm1 0.888 vs td-comm 0.835).
     if m == 256 and n == 8192 and k == 2048:
-        return 128, 128, 64, 16, 4, 8, 0
+        return 128, 128, 64, 16, 4, 16, 0
     if m == 512 and n == 16384 and k == 4096:
         return 128, 128, 64, 16, 4, 8, 0
     if m == 2048 and n == 11008 and k == 4096:
-        return 128, 128, 64, 16, 8, 4, 0
+        return 128, 128, 64, 16, 8, 4, 1
     return None
 
 
