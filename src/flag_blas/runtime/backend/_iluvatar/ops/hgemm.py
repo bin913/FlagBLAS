@@ -1164,11 +1164,13 @@ def _select_hgemm_nn_pipe_config(m: int, n: int, k: int):
     # persistent-kernel routing for those shapes was reverted.
     # 2026-08-26: wave sweep on GPU1 found wave=2 fastest for the two big pipe
     # shapes (2048x11008x4096: 2.5176 vs 2.5978 @w16; 2048x12288x4096: 2.6321
-    # vs 2.8574 @w8), so wave was dropped to 2 for both.
+    # vs 2.8574 @w8), so wave was dropped to 2 for both. A cache_mod sweep on
+    # GPU1 (2026-08-26) also showed cm=0 (default) beats cm=2 (.cg) for
+    # 2048x11008x4096 (0.951 vs 0.922), so cm was switched to 0.
     if m == 512 and n == 16384 and k == 4096:
         return 256, 256, 64, 16, 2, 16, 0, 3
     if m == 2048 and n == 11008 and k == 4096:
-        return 256, 256, 64, 16, 2, 2, 2, 4
+        return 256, 256, 64, 16, 2, 2, 0, 4
     if m == 2048 and n == 12288 and k == 4096:
         return 256, 256, 64, 16, 4, 2, 1, 3
     if m == 16384 and n == 16384 and k == 16384:
@@ -1412,9 +1414,13 @@ def _select_hgemm_tn_transpose_dot_config(m: int, n: int, k: int):
 
 def _select_hgemm_tn_transpose_dot_persistent_config(m: int, n: int, k: int):
     """(BLOCK_M, BLOCK_N, BLOCK_K, num_warps, group_m, wave_count, cache_mod)
-    for the persistent TN transposed-dot kernel. Wins over both the plain TN
-    transpose-dot kernel and the A-pretranspose -> NN path on GPU1; currently
-    only the extreme-aspect 8192x256x2048 shape (sp 1.028 vs 0.888)."""
+    for the persistent TN transposed-dot kernel. 2026-08-26 official core run
+    (GPU1): the head-to-head sweep's "full-ps" numbers were measured with the
+    A-pretranspose copy OUTSIDE the timed region, but in hgemm() the copy is
+    inside do_bench, so the pretranspose -> NN path is much slower than the
+    sweep suggested (official TN 8192x256x2048: 0.858 via pretranspose vs
+    0.876 baseline here; 2048^3: 0.807 vs 0.794), so these shapes are
+    intercepted again to keep the persistent kernel."""
     if m == 8192 and n == 256 and k == 2048:
         return 128, 128, 64, 16, 2, 4, 0
     if m == 16384 and n == 512 and k == 4096:
@@ -1423,48 +1429,54 @@ def _select_hgemm_tn_transpose_dot_persistent_config(m: int, n: int, k: int):
         return 128, 128, 64, 16, 4, 4, 0
     if m == 32768 and n == 1024 and k == 1024:
         return 128, 128, 64, 16, 8, 4, 0
-    if m == 2048 and n == 2048 and k == 2048:
-        return 128, 128, 64, 16, 2, 4, 0
     if m == 2048 and n == 2048 and k == 16384:
         return 128, 128, 64, 16, 4, 16, 0
+    if m == 2048 and n == 2048 and k == 2048:
+        return 128, 128, 64, 16, 2, 4, 0
     return None
 
 
 def _select_hgemm_tt_transpose_dot_persistent_config(m: int, n: int, k: int):
     """(BLOCK_M, BLOCK_N, BLOCK_K, num_warps, group_m, wave_count, cache_mod)
-    for the persistent TT transposed-dot kernel. These shapes beat the
-    transpose-both -> NN path on GPU1 (head-to-head sweeps, 2026-08) and are
-    intercepted BEFORE the pretranspose branch in hgemm()."""
+    for the persistent TT transposed-dot kernel. 2026-08-26 official core run
+    (GPU1) exposed the sweep's "full-ps" artifact: the transpose-both copy was
+    outside the timed region in the sweep but inside do_bench in hgemm(), so
+    the pretranspose -> NN path collapsed (official TT 256x8192x2048 0.444 /
+    512x16384x4096 0.564 / 16384x512x4096 0.606 / 2048^3 0.715 /
+    2048x2048x16384 0.726 vs 0.802 / 0.801 / 0.800 / 0.771 / 0.829 baseline),
+    so the intercepts are restored. 2026-08-26: 512x16384x4096 cache_mod 0->1
+    (sweep td-cm1 0.937 vs td-comm 0.913; official 0.800 vs 0.772)."""
     if m == 8192 and n == 256 and k == 2048:
         return 128, 128, 64, 16, 4, 4, 0
     if m == 256 and n == 8192 and k == 2048:
         return 128, 128, 64, 16, 2, 4, 0
     if m == 512 and n == 16384 and k == 4096:
-        return 128, 128, 64, 16, 8, 4, 0
+        return 128, 128, 64, 16, 8, 4, 1
     if m == 16384 and n == 512 and k == 4096:
         return 128, 128, 64, 16, 4, 16, 0
-    if m == 2048 and n == 2048 and k == 2048:
-        return 128, 128, 64, 16, 8, 4, 0
     if m == 2048 and n == 2048 and k == 16384:
         return 128, 128, 64, 16, 8, 4, 0
     if m == 32768 and n == 1024 and k == 1024:
+        return 128, 128, 64, 16, 8, 4, 0
+    if m == 2048 and n == 2048 and k == 2048:
         return 128, 128, 64, 16, 8, 4, 0
     return None
 
 
 def _select_hgemm_nt_transpose_dot_persistent_config(m: int, n: int, k: int):
     """(BLOCK_M, BLOCK_N, BLOCK_K, num_warps, group_m, wave_count, cache_mod)
-    for the persistent NT transposed-dot kernel (C = A @ B^T). The A-tile
-    gather is L2-resident when A is small, so these shapes beat the
-    B-pretranspose -> NN path on GPU1 (head-to-head sweeps + official runs,
-    2026-08) and are intercepted BEFORE the pretranspose branch in hgemm().
-    The pipelined variant was tried for 2048^3 / 2048x16384x2048 but lost to
-    the pretranspose path under official sustained-load conditions, so those
-    shapes are not wired."""
+    for the persistent NT transposed-dot kernel (C = A @ B^T). 2026-08-26
+    official core run (GPU1) exposed the sweep's "full-ps" artifact (the
+    B-pretranspose copy was outside the timed region in the sweep but inside
+    do_bench in hgemm()): the pretranspose -> NN path collapsed (official NT
+    256x8192x2048 0.453 / 512x16384x4096 0.596 / 2048x11008x4096 0.741 vs
+    0.776 / 0.743 / 0.780 baseline), so the intercepts are restored.
+    2026-08-26: 512x16384x4096 wave 4->8 (sweep td-w8 0.876 vs td-comm 0.747;
+    official 0.768 vs 0.742)."""
     if m == 256 and n == 8192 and k == 2048:
         return 128, 128, 64, 16, 4, 8, 0
     if m == 512 and n == 16384 and k == 4096:
-        return 128, 128, 64, 16, 4, 4, 0
+        return 128, 128, 64, 16, 4, 8, 0
     if m == 2048 and n == 11008 and k == 4096:
         return 128, 128, 64, 16, 8, 4, 0
     return None
