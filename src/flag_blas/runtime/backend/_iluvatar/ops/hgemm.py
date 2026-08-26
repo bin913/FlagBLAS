@@ -1109,8 +1109,11 @@ def _select_hgemm_nn_persistent_config(m: int, n: int, k: int):
     # corex 4.4.0). Tuple: (BLOCK_M, BLOCK_N, BLOCK_K, num_warps, group_m,
     # num_stages, wave_count, cache_mod) where cache_mod is 0=default, 1=.ca,
     # 2=.cg. Shapes without an entry fall through to the generic blockptr path.
+    # 2026-08-26: 2048^3 wave 4->2 after GPU1 sweep (0.2467 -> 0.2408).
+    # 8192x256x2048 kept at wave=4: sweep on the correct shape showed the
+    # committed config is already best (0.1450; wave=2 is worse at 0.1471).
     if m == 2048 and n == 2048 and k == 2048:
-        return 256, 256, 64, 16, 4, 1, 4, 2
+        return 256, 256, 64, 16, 4, 1, 2, 2
     if m == 4096 and n == 4096 and k == 4096:
         return 256, 256, 64, 16, 4, 3, 2, 1
     if m == 8192 and n == 8192 and k == 8192:
@@ -1159,12 +1162,15 @@ def _select_hgemm_nn_pipe_config(m: int, n: int, k: int):
     # kernel for 512x16384x4096, 2048x11008x4096 and 2048x12288x4096
     # (pipe 0.933/0.855/0.904 vs pers 0.930/0.832/0.890), so the experimental
     # persistent-kernel routing for those shapes was reverted.
+    # 2026-08-26: wave sweep on GPU1 found wave=2 fastest for the two big pipe
+    # shapes (2048x11008x4096: 2.5176 vs 2.5978 @w16; 2048x12288x4096: 2.6321
+    # vs 2.8574 @w8), so wave was dropped to 2 for both.
     if m == 512 and n == 16384 and k == 4096:
         return 256, 256, 64, 16, 2, 16, 0, 3
     if m == 2048 and n == 11008 and k == 4096:
-        return 256, 256, 64, 16, 2, 16, 2, 4
+        return 256, 256, 64, 16, 2, 2, 2, 4
     if m == 2048 and n == 12288 and k == 4096:
-        return 256, 256, 64, 16, 4, 8, 1, 3
+        return 256, 256, 64, 16, 4, 2, 1, 3
     if m == 16384 and n == 16384 and k == 16384:
         return 256, 256, 64, 16, 4, 2, 0, 4
     return None
