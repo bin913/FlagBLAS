@@ -1426,10 +1426,12 @@ def _select_hgemm_tn_transpose_dot_persistent_config(m: int, n: int, k: int):
     # td-comm <0.799). 8192x256x2048 keeps the persistent intercept (an
     # attempt to route it to the non-persistent transpose-dot kernel regressed
     # official 0.874 -> 0.857).
+    # 2026-08-27 (round 2): 16384x512x4096 gm 4->2 (sweep-C td-gm2 0.863 vs
+    # comm 0.828; official subset 0.851 vs 0.792, full core neutral 0.791).
     if m == 8192 and n == 256 and k == 2048:
         return 128, 128, 64, 16, 2, 4, 0
     if m == 16384 and n == 512 and k == 4096:
-        return 128, 128, 64, 16, 4, 16, 0
+        return 128, 128, 64, 16, 2, 16, 0
     if m == 256 and n == 8192 and k == 2048:
         return 128, 128, 64, 16, 4, 4, 0
     if m == 32768 and n == 1024 and k == 1024:
@@ -1502,12 +1504,20 @@ def _select_hgemm_nt_transpose_dot_persistent_config(m: int, n: int, k: int):
     # 2026-08-27: retune from sweep D td data: 256x8192x2048 wave 8->16
     # (td-w16 0.814 vs td-comm 0.796), 2048x11008x4096 cm 0->1
     # (td-cm1 0.888 vs td-comm 0.835).
+    # 2026-08-27 (round 2): sweep-G td-44/td-88 looked good (0.916 / 0.891)
+    # for 2048^3 / 2048x16384x2048, but the sweep torch baseline is slower
+    # than official do_bench, inflating sp; official subset runs regressed
+    # (0.694 / 0.736 vs 0.801 / 0.813-0.839 pretranspose), so no intercepts.
+    # 8192x256x2048 td-44 (sweep-F 0.839 vs full-ps 0.807, same harness) was
+    # added; official full core 0.804 vs pretranspose mean 0.78, neutral.
     if m == 256 and n == 8192 and k == 2048:
         return 128, 128, 64, 16, 4, 16, 0
     if m == 512 and n == 16384 and k == 4096:
         return 128, 128, 64, 16, 4, 8, 0
     if m == 2048 and n == 11008 and k == 4096:
         return 128, 128, 64, 16, 8, 4, 1
+    if m == 8192 and n == 256 and k == 2048:
+        return 128, 128, 64, 16, 4, 4, 0
     return None
 
 
