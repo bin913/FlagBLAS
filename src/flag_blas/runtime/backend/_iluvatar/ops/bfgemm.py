@@ -1110,16 +1110,19 @@ def _select_bfgemm_nn_persistent_config(m: int, n: int, k: int):
     # fp16 256x256 persistent tiles regress 20-35% on bf16, so 128x128 only.
     # (BLOCK_M, BLOCK_N, BLOCK_K, num_warps, group_m, num_stages, wave_count,
     # cache_mod).
-    # h2h (official-param, same-process cublas gemmEx) + official core
-    # verification on GPU1: 16384x512x4096 pers-w4 >= blockptr (0.790 vs 0.764
-    # h2h; official 0.791 vs 0.786). 16384^3 pers-w8 and 32768x1024x1024
-    # pers-w4 were REVERTED after official core showed regressions (0.751 vs
-    # 0.833 / 0.734 vs 0.823) -- h2h ranking did not transfer to the official
-    # harness there.
+    # h2h (official-param, same-process cublas gemmEx) + official-subset
+    # arbitration (2 rounds) on GPU1. Rejected candidates that looked good in
+    # h2h but lost official arbitration: 512x16384x4096 g8ns2 / pers-g4w8,
+    # 2048x12288x4096 g4ns1, 16384x2048x2048 g2ns1, 256x8192x2048 pers-g2w4.
+    # wave 8 (full tile grid) wins for the skinny shapes.
     if m == 16384 and n == 512 and k == 4096:
         return 128, 128, 64, 16, 4, 1, 4, 0
     if m == 2048 and n == 2048 and k == 16384:
         return 128, 128, 64, 16, 4, 1, 4, 0
+    if m == 8192 and n == 256 and k == 2048:
+        return 128, 128, 64, 16, 2, 1, 8, 0
+    if m == 32768 and n == 1024 and k == 1024:
+        return 128, 128, 64, 16, 2, 1, 8, 0
     return None
 
 
@@ -1171,13 +1174,13 @@ def _select_bfgemm_nn_blockptr_config(m: int, n: int, k: int):
     if m == 512 and n == 16384 and k == 4096:
         return 128, 128, 64, 16, 2, 1, True
     if m == 2048 and n == 12288 and k == 4096:
-        return 128, 128, 64, 16, 8, 2, False
+        return 128, 128, 64, 16, 4, 2, False
     if m == 2048 and n == 11008 and k == 4096:
         return 128, 128, 64, 16, 8, 1, False
     if m == 2048 and n == 4096 and k == 11008:
         return 128, 128, 64, 16, 4, 1, False
     if m == 4096 and n == 24576 and k == 8192:
-        return 128, 128, 64, 16, 2, 1, False
+        return 128, 128, 64, 16, 8, 2, False
     if m == 4096 and n == 8192 and k == 28672:
         return 128, 128, 64, 16, 4, 2, False
     if m == 8192 and n == 28672 and k == 8192:
@@ -1185,7 +1188,7 @@ def _select_bfgemm_nn_blockptr_config(m: int, n: int, k: int):
     if m == 16384 and n == 2048 and k == 2048:
         return 128, 128, 64, 16, 2, 2, False
     if m == 2048 and n == 16384 and k == 2048:
-        return 128, 128, 64, 16, 4, 1, True
+        return 128, 128, 64, 16, 8, 1, False
     if m == 2048 and n == 2048 and k == 16384:
         return 128, 128, 64, 16, 4, 1, False
     if m == 32768 and n == 1024 and k == 1024:
