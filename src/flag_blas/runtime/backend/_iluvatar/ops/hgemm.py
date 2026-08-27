@@ -1465,10 +1465,13 @@ def _select_hgemm_tt_transpose_dot_persistent_config(m: int, n: int, k: int):
     removed)."""
     if m == 8192 and n == 256 and k == 2048:
         return 128, 128, 64, 16, 4, 4, 0
+    # 2026-08-27 (round 4, sweep5 official-param do_bench): 512x16384x4096
+    # cm1 (8,4,1) -> w8 (8,8,0) 0.792 vs 0.748; 2048^3 w4 (8,4,0) -> w16
+    # (8,16,0) 0.880 vs 0.774. Older warmup=500 sweeps mis-ranked these.
     if m == 256 and n == 8192 and k == 2048:
         return 128, 128, 64, 16, 2, 8, 0
     if m == 512 and n == 16384 and k == 4096:
-        return 128, 128, 64, 16, 8, 4, 1
+        return 128, 128, 64, 16, 8, 8, 0
     if m == 16384 and n == 512 and k == 4096:
         return 128, 128, 64, 16, 2, 16, 0
     if m == 2048 and n == 2048 and k == 16384:
@@ -1476,7 +1479,7 @@ def _select_hgemm_tt_transpose_dot_persistent_config(m: int, n: int, k: int):
     if m == 32768 and n == 1024 and k == 1024:
         return 128, 128, 64, 16, 8, 4, 0
     if m == 2048 and n == 2048 and k == 2048:
-        return 128, 128, 64, 16, 8, 4, 0
+        return 128, 128, 64, 16, 8, 16, 0
     if m == 2048 and n == 11008 and k == 4096:
         return 128, 128, 64, 16, 8, 16, 0
     if m == 2048 and n == 4096 and k == 11008:
@@ -1512,8 +1515,10 @@ def _select_hgemm_nt_transpose_dot_persistent_config(m: int, n: int, k: int):
     # added; official full core 0.804 vs pretranspose mean 0.78, neutral.
     if m == 256 and n == 8192 and k == 2048:
         return 128, 128, 64, 16, 4, 16, 0
+    # 2026-08-27 (round 4, sweep5 official-param do_bench): 512x16384x4096
+    # wave 8 -> 16 (0.828 vs 0.804).
     if m == 512 and n == 16384 and k == 4096:
-        return 128, 128, 64, 16, 4, 8, 0
+        return 128, 128, 64, 16, 4, 16, 0
     if m == 2048 and n == 11008 and k == 4096:
         return 128, 128, 64, 16, 8, 4, 1
     if m == 8192 and n == 256 and k == 2048:
