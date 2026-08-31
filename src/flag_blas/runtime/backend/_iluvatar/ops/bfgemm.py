@@ -1124,14 +1124,10 @@ def _select_bfgemm_nn_persistent_config(m: int, n: int, k: int):
     # h2h but lost official arbitration: 512x16384x4096 g8ns2 / pers-g4w8,
     # 2048x12288x4096 g4ns1, 16384x2048x2048 g2ns1, 256x8192x2048 pers-g2w4.
     # wave 8 (full tile grid) wins for the skinny shapes.
-    if m == 16384 and n == 512 and k == 4096:
-        return 128, 128, 64, 16, 4, 1, 4, 0
-    if m == 2048 and n == 2048 and k == 16384:
-        return 128, 128, 64, 16, 4, 1, 4, 0
-    if m == 8192 and n == 256 and k == 2048:
-        return 128, 128, 64, 16, 2, 1, 8, 0
-    if m == 32768 and n == 1024 and k == 1024:
-        return 128, 128, 64, 16, 2, 1, 8, 0
+    # 2026-08-31: the 128x128 persistent entries for the skinny shapes used to
+    # shadow the 256x256 two-step-store configs below (dead code). Cross-op
+    # sweep + official subset arbitration confirmed 256x256 wins ~11-17%, so
+    # the 128x128 entries were removed and the 256x256 configs are now live.
     # Big squares: 256x256 persistent with a two-step store epilogue. The
     # chained (alpha*acc).to(bf16) store inflates the register peak (142 vs 96
     # regs) and costs ~35% throughput on 256x256 bf16 tiles; the kernel's
