@@ -1493,10 +1493,10 @@ def _select_bfgemm_tt_transpose_dot_persistent_config(m: int, n: int, k: int):
         return 128, 128, 64, 16, 8, 16, 0
     if m == 2048 and n == 4096 and k == 11008:
         return 128, 128, 64, 16, 4, 8, 0
-    if m == 4096 and n == 24576 and k == 8192:
-        return 128, 128, 64, 16, 4, 4, 0
-    if m == 2048 and n == 16384 and k == 2048:
-        return 128, 128, 64, 16, 8, 16, 0
+    # 2026-08-31: 4096x24576x8192 / 2048x16384x2048 intercepts removed. The
+    # 256x256 two-step-store NN persistent kernel now beats the td kernel on
+    # the pretranspose -> NN route (same-process A/B: 0.86 / 0.86 vs 0.79 /
+    # 0.81), so they fall through to the pretranspose branch again.
     # 8192x28672x8192 keeps pretranspose -> NN: the persistent td kernel is
     # context-sensitive (subset bench 0.81-0.85, full core run 0.629 vs
     # pretranspose 0.755 baseline).
