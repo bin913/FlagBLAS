@@ -1146,6 +1146,24 @@ def _select_bfgemm_nn_persistent_config(m: int, n: int, k: int):
         return 256, 256, 64, 16, 4, 1, 8, 2
     if m == 16384 and n == 16384 and k == 16384:
         return 256, 256, 64, 16, 4, 2, 2, 0
+    # 2026-08-31: the 256x256 two-step-store persistent kernel also wins on
+    # the skinny/model NN shapes (same-harness sweep +0.08~+0.30 vs the
+    # 128x128 blockptr/persistent paths, output bit-identical to production;
+    # official subset arbitration base/var x2).
+    if m == 512 and n == 16384 and k == 4096:
+        return 256, 256, 64, 16, 4, 1, 2, 2
+    if m == 16384 and n == 512 and k == 4096:
+        return 256, 256, 64, 16, 4, 1, 4, 2
+    if m == 8192 and n == 256 and k == 2048:
+        return 256, 256, 64, 16, 8, 1, 4, 2
+    if m == 32768 and n == 1024 and k == 1024:
+        return 256, 256, 64, 16, 2, 1, 8, 0
+    if m == 2048 and n == 2048 and k == 16384:
+        return 256, 256, 64, 16, 8, 1, 4, 2
+    if m == 2048 and n == 12288 and k == 4096:
+        return 256, 256, 64, 16, 2, 1, 8, 0
+    if m == 4096 and n == 24576 and k == 8192:
+        return 256, 256, 64, 16, 4, 1, 4, 2
     return None
 
 
