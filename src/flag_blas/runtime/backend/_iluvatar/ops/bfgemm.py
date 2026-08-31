@@ -1164,6 +1164,22 @@ def _select_bfgemm_nn_persistent_config(m: int, n: int, k: int):
         return 256, 256, 64, 16, 2, 1, 8, 0
     if m == 4096 and n == 24576 and k == 8192:
         return 256, 256, 64, 16, 4, 1, 4, 2
+    # 2026-08-31 round 2: same-harness sweep (official do_bench, 2-round
+    # alternation, allclose vs production maxdiff=0) confirmed the 256x256
+    # two-step-store persistent kernel also wins on the remaining 128x128
+    # blockptr NN underperformers. Subset arbitration base/var x2 follows.
+    if m == 2048 and n == 16384 and k == 2048:
+        return 256, 256, 64, 16, 4, 1, 2, 2
+    if m == 16384 and n == 2048 and k == 2048:
+        return 256, 256, 64, 16, 4, 1, 2, 2
+    if m == 2048 and n == 11008 and k == 4096:
+        return 256, 256, 64, 16, 2, 1, 8, 0
+    if m == 2048 and n == 4096 and k == 11008:
+        return 256, 256, 64, 16, 2, 1, 4, 2
+    if m == 4096 and n == 8192 and k == 28672:
+        return 256, 256, 64, 16, 4, 1, 4, 2
+    if m == 8192 and n == 28672 and k == 8192:
+        return 256, 256, 64, 16, 4, 1, 8, 2
     return None
 
 
