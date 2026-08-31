@@ -243,7 +243,7 @@ def _hgemm_nn_2048_square_persistent_kernel(
 def _hgemm_nn_persistent_kernel(
     a_ptr, b_ptr, c_ptr, alpha: tl.float32, m, n, k, lda, ldb, ldc,
     NUM_SMS: tl.constexpr, GRID_STRIDE: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
-    BLOCK_K: tl.constexpr, GROUP_M: tl.constexpr, CACHE_MOD: tl.constexpr,
+    BLOCK_K: tl.constexpr, GROUP_M: tl.constexpr, CACHE_MOD: tl.constexpr, TWO_STEP: tl.constexpr,
 ):
     start_pid = tl.program_id(0)
     grid_m = tl.cdiv(m, BLOCK_M)
@@ -275,7 +275,17 @@ def _hgemm_nn_persistent_kernel(
                 a = tl.load(a_ptrs, cache_modifier=".cg")
                 b = tl.load(b_ptrs, cache_modifier=".cg")
             acc = tl.dot(a, b, acc, out_dtype=tl.float32, allow_tf32=False)
-        tl.store(c_ptr + offs_m[:, None] * ldc + offs_n[None, :], (alpha * acc).to(tl.float16))
+        if BLOCK_M == 256 and BLOCK_N == 256 and TWO_STEP:
+            # Two-step store for 256x256 tiles (mirrors the bfgemm fix):
+            # chaining the RNE fp16 conversion inside tl.store inflates the
+            # register peak on this backend; a separate value keeps the
+            # epilogue lean. Official subset arbitration 2026-08-31 confirmed
+            # it helps the K-heavy shapes and is neutral elsewhere. Disabled
+            # for 4096x8192x28672 where the chained store measured faster.
+            out = (alpha * acc).to(tl.float16)
+            tl.store(c_ptr + offs_m[:, None] * ldc + offs_n[None, :], out)
+        else:
+            tl.store(c_ptr + offs_m[:, None] * ldc + offs_n[None, :], (alpha * acc).to(tl.float16))
 
 
 @triton.jit
@@ -283,7 +293,7 @@ def _hgemm_nn_pipe_kernel(
     a_ptr, b_ptr, c_ptr, alpha: tl.float32, m, n, k, lda, ldb, ldc,
     NUM_SMS: tl.constexpr, GRID_STRIDE: tl.constexpr, BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr, GROUP_M: tl.constexpr,
-    CACHE_MOD: tl.constexpr, NS: tl.constexpr,
+    CACHE_MOD: tl.constexpr, NS: tl.constexpr, TWO_STEP: tl.constexpr,
 ):
     # Persistent variant with an explicit software-pipelined K loop
     # (tl.range(..., num_stages=NS)). Found on GPU1 to beat the plain
@@ -318,7 +328,17 @@ def _hgemm_nn_pipe_kernel(
                 a = tl.load(a_ptrs, cache_modifier=".cg")
                 b = tl.load(b_ptrs, cache_modifier=".cg")
             acc = tl.dot(a, b, acc, out_dtype=tl.float32, allow_tf32=False)
-        tl.store(c_ptr + offs_m[:, None] * ldc + offs_n[None, :], (alpha * acc).to(tl.float16))
+        if BLOCK_M == 256 and BLOCK_N == 256 and TWO_STEP:
+            # Two-step store for 256x256 tiles (mirrors the bfgemm fix):
+            # chaining the RNE fp16 conversion inside tl.store inflates the
+            # register peak on this backend; a separate value keeps the
+            # epilogue lean. Official subset arbitration 2026-08-31 confirmed
+            # it helps the K-heavy shapes and is neutral elsewhere. Disabled
+            # for 16384^3 where the chained store measured faster.
+            out = (alpha * acc).to(tl.float16)
+            tl.store(c_ptr + offs_m[:, None] * ldc + offs_n[None, :], out)
+        else:
+            tl.store(c_ptr + offs_m[:, None] * ldc + offs_n[None, :], (alpha * acc).to(tl.float16))
 
 
 @triton.jit
@@ -1125,13 +1145,13 @@ def _select_hgemm_nn_persistent_config(m: int, n: int, k: int):
     if m == 512 and n == 16384 and k == 4096:
         return 256, 256, 64, 16, 2, 4, 16, 0
     if m == 8192 and n == 256 and k == 2048:
-        return 256, 256, 64, 16, 8, 2, 4, 2
+        return 256, 256, 64, 16, 8, 1, 4, 2
     if m == 16384 and n == 512 and k == 4096:
-        return 256, 256, 64, 16, 4, 2, 4, 1
+        return 256, 256, 64, 16, 4, 1, 4, 2
     if m == 2048 and n == 12288 and k == 4096:
         return 256, 256, 64, 16, 4, 2, 8, 1
     if m == 2048 and n == 11008 and k == 4096:
-        return 256, 256, 64, 16, 2, 4, 16, 2
+        return 256, 256, 64, 16, 2, 1, 8, 0
     if m == 2048 and n == 4096 and k == 11008:
         return 256, 256, 64, 16, 4, 1, 8, 2
     if m == 4096 and n == 24576 and k == 8192:
@@ -1139,13 +1159,13 @@ def _select_hgemm_nn_persistent_config(m: int, n: int, k: int):
     if m == 4096 and n == 8192 and k == 28672:
         return 256, 256, 64, 16, 4, 1, 4, 2
     if m == 8192 and n == 28672 and k == 8192:
-        return 256, 256, 64, 16, 4, 1, 2, 1
+        return 256, 256, 64, 16, 4, 1, 8, 2
     if m == 16384 and n == 2048 and k == 2048:
         return 256, 256, 64, 16, 4, 1, 2, 2
     if m == 2048 and n == 16384 and k == 2048:
         return 256, 256, 64, 16, 4, 2, 2, 0
     if m == 2048 and n == 2048 and k == 16384:
-        return 256, 256, 64, 16, 2, 2, 4, 2
+        return 256, 256, 64, 16, 8, 1, 4, 2
     if m == 32768 and n == 1024 and k == 1024:
         return 256, 256, 64, 16, 2, 1, 8, 2
     return None
@@ -1169,8 +1189,10 @@ def _select_hgemm_nn_pipe_config(m: int, n: int, k: int):
     # 2048x11008x4096 (0.951 vs 0.922), so cm was switched to 0.
     if m == 512 and n == 16384 and k == 4096:
         return 256, 256, 64, 16, 2, 16, 0, 3
-    if m == 2048 and n == 11008 and k == 4096:
-        return 256, 256, 64, 16, 2, 2, 0, 4
+    # 2048x11008x4096 moved to the plain persistent kernel (256x256 two-step
+    # store, gm=2 wave=8 cm=0) after the 2026-08-31 cross-op sweep: the pipe
+    # config lost to the bfgemm-style persistent config in-process and the
+    # official arbitration kept the switch.
     if m == 2048 and n == 12288 and k == 4096:
         return 256, 256, 64, 16, 4, 2, 1, 3
     if m == 16384 and n == 16384 and k == 16384:
@@ -1802,11 +1824,12 @@ def _launch_hgemm_nn_persistent(
     num_sms: int,
     grid_stride: int,
     cache_mod: int = 2,
+    two_step: bool = True,
 ) -> None:
     _hgemm_nn_persistent_kernel[grid](
         A, B, C, alpha, m, n, k, lda, ldb, ldc, NUM_SMS=num_sms, GRID_STRIDE=grid_stride,
         BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k, GROUP_M=group_m,
-        CACHE_MOD=cache_mod,
+        CACHE_MOD=cache_mod, TWO_STEP=two_step,
         num_warps=num_warps, num_stages=num_stages,
     )
 
@@ -1832,11 +1855,12 @@ def _launch_hgemm_nn_pipe(
     grid_stride: int,
     cache_mod: int,
     num_pipe_stages: int,
+    two_step: bool = True,
 ) -> None:
     _hgemm_nn_pipe_kernel[grid](
         A, B, C, alpha, m, n, k, lda, ldb, ldc, NUM_SMS=num_sms, GRID_STRIDE=grid_stride,
         BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k, GROUP_M=group_m,
-        CACHE_MOD=cache_mod, NS=num_pipe_stages,
+        CACHE_MOD=cache_mod, NS=num_pipe_stages, TWO_STEP=two_step,
         num_warps=num_warps, num_stages=3,
     )
 
@@ -2251,6 +2275,9 @@ def hgemm(
                     grid, A, B, C, alpha, m, n, k, lda, ldb, ldc,
                     block_m, block_n, block_k, num_warps, group_m,
                     num_sms, grid_stride, cache_mod, pipe_stages,
+                    # Two-step store regressed 16384^3 in the same-process A/B
+                    # (chained 0.953 vs two-step 0.905), so keep chained there.
+                    two_step=not (m == 16384 and n == 16384 and k == 16384),
                 )
             return
 
@@ -2268,6 +2295,9 @@ def hgemm(
                     grid, A, B, C, alpha, m, n, k, lda, ldb, ldc,
                     block_m, block_n, block_k, num_warps, group_m, num_stages,
                     num_sms, grid_stride, cache_mod,
+                    # Two-step store regressed 4096x8192x28672 in the same-process
+                    # A/B (chained 1.126 vs two-step 1.082), keep chained there.
+                    two_step=not (m == 4096 and n == 8192 and k == 28672),
                 )
             return
 
