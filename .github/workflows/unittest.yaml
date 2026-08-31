@@ -109,7 +109,7 @@ jobs:
     uses: ./.github/workflows/backend-test.yaml
     with:
       vendor: 'ascend'
-      runner_label: 'cann9'
+      runner_label: 'ascend'
       gpu_check_script: 'tools/check_ascend_gpu.sh'
       pr_id: ${{ needs.preprocess.outputs.pr_id }}
       changed_files: ${{ join(needs.preprocess.outputs.changed_files, ' ') }}
