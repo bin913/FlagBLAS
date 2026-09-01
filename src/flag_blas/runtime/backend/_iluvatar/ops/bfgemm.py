@@ -1444,7 +1444,8 @@ def _select_bfgemm_tn_transpose_dot_persistent_config(m: int, n: int, k: int):
     if m == 256 and n == 8192 and k == 2048:
         return 128, 128, 64, 16, 4, 4, 0
     if m == 32768 and n == 1024 and k == 1024:
-        return 128, 128, 64, 16, 8, 8, 0
+        # 2026-08-31: gm 8->2, wave 8->4 (same-process interleaved A/B d=0.963)
+        return 128, 128, 64, 16, 2, 4, 0
     if m == 2048 and n == 2048 and k == 16384:
         return 128, 128, 64, 16, 4, 16, 1
     if m == 2048 and n == 2048 and k == 2048:
@@ -1488,9 +1489,11 @@ def _select_bfgemm_tt_transpose_dot_persistent_config(m: int, n: int, k: int):
     if m == 32768 and n == 1024 and k == 1024:
         return 128, 128, 64, 16, 8, 4, 0
     if m == 2048 and n == 2048 and k == 2048:
-        return 128, 128, 64, 16, 8, 16, 0
+        # 2026-08-31: gm 8->2, wave 16->8, cm 0->1 (interleaved A/B d=0.959)
+        return 128, 128, 64, 16, 2, 8, 1
     if m == 2048 and n == 11008 and k == 4096:
-        return 128, 128, 64, 16, 8, 16, 0
+        # 2026-08-31: wave 16->8, cm 0->1 (interleaved A/B d=0.979)
+        return 128, 128, 64, 16, 8, 8, 1
     if m == 2048 and n == 4096 and k == 11008:
         return 128, 128, 64, 16, 4, 8, 0
     # 2026-08-31: 4096x24576x8192 / 2048x16384x2048 intercepts removed. The
@@ -1531,7 +1534,8 @@ def _select_bfgemm_nt_transpose_dot_persistent_config(m: int, n: int, k: int):
     if m == 2048 and n == 11008 and k == 4096:
         return 128, 128, 64, 16, 8, 4, 1
     if m == 8192 and n == 256 and k == 2048:
-        return 128, 128, 64, 16, 4, 4, 0
+        # 2026-08-31: gm 4->2, wave 4->8, cm 0->1 (interleaved A/B d=0.984)
+        return 128, 128, 64, 16, 2, 8, 1
     return None
 
 
