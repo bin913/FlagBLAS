@@ -1481,7 +1481,9 @@ def _select_bfgemm_tt_transpose_dot_persistent_config(m: int, n: int, k: int):
     if m == 256 and n == 8192 and k == 2048:
         return 128, 128, 64, 16, 2, 8, 0
     if m == 512 and n == 16384 and k == 4096:
-        return 128, 128, 64, 16, 8, 8, 0
+        # 2026-09-01 (GPU2 retune): wave 8->8, gm 8->4 (td (4,8,0) d=1.056 vs
+        # (8,8,0), same-process official-param).
+        return 128, 128, 64, 16, 4, 8, 0
     if m == 16384 and n == 512 and k == 4096:
         return 128, 128, 64, 16, 2, 16, 0
     if m == 2048 and n == 2048 and k == 16384:
@@ -1509,6 +1511,9 @@ def _select_bfgemm_tt_transpose_dot_persistent_config(m: int, n: int, k: int):
     # 8192x28672x8192 keeps pretranspose -> NN: the persistent td kernel is
     # context-sensitive (subset bench 0.81-0.85, full core run 0.629 vs
     # pretranspose 0.755 baseline).
+    # 2026-09-01 (GPU2 clean full-core retune): 2048x16384x2048 td (8,4,0)
+    # d=1.042 in single-shape probe but full-core regressed flag 2.134->2.191
+    # (sp 0.798->0.778); reverted, keeps pretranspose -> NN.
     return None
 
 

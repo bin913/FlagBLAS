@@ -1461,7 +1461,9 @@ def _select_hgemm_tn_transpose_dot_persistent_config(m: int, n: int, k: int):
     if m == 2048 and n == 2048 and k == 16384:
         return 128, 128, 64, 16, 4, 16, 1
     if m == 2048 and n == 2048 and k == 2048:
-        return 128, 128, 64, 16, 2, 4, 0
+        # 2026-09-01 (GPU2 retune): wave 4->8 (td (2,8,0) d=1.111 vs (2,4,0),
+        # same-process official-param).
+        return 128, 128, 64, 16, 2, 8, 0
     return None
 
 
@@ -1497,12 +1499,16 @@ def _select_hgemm_tt_transpose_dot_persistent_config(m: int, n: int, k: int):
     if m == 16384 and n == 512 and k == 4096:
         return 128, 128, 64, 16, 2, 16, 0
     if m == 2048 and n == 2048 and k == 16384:
+        # 2026-09-01 (GPU2 retune): wave 4->16 (8,16,0) showed d=1.039 in a
+        # single-shape probe but regressed full-core R10 0.797 -> 0.766
+        # (-3.11%); reverted to wave 4 (8,4,0).
         return 128, 128, 64, 16, 8, 4, 0
     if m == 32768 and n == 1024 and k == 1024:
         return 128, 128, 64, 16, 8, 4, 0
     if m == 2048 and n == 2048 and k == 2048:
-        # 2026-08-31: gm 8->2, wave 16->8, cm 0->1 (interleaved A/B d=0.962)
-        return 128, 128, 64, 16, 2, 8, 1
+        # 2026-09-01 (GPU2 retune): gm 2->4, wave 8->4, cm 1->0 (td (4,8,0)
+        # d=1.143 vs (2,8,1) d=1.083, same-process official-param).
+        return 128, 128, 64, 16, 4, 4, 0
     if m == 2048 and n == 11008 and k == 4096:
         # 2026-08-31: wave 16->4, cm 0->1 (interleaved A/B d=0.976)
         return 128, 128, 64, 16, 8, 4, 1
@@ -1543,11 +1549,12 @@ def _select_hgemm_nt_transpose_dot_persistent_config(m: int, n: int, k: int):
     # 8192x256x2048 td-44 (sweep-F 0.839 vs full-ps 0.807, same harness) was
     # added; official full core 0.804 vs pretranspose mean 0.78, neutral.
     if m == 256 and n == 8192 and k == 2048:
-        return 128, 128, 64, 16, 4, 16, 0
-    # 2026-08-27 (round 4, sweep5 official-param do_bench): 512x16384x4096
-    # wave 8 -> 16 (0.828 vs 0.804).
+        return 128, 128, 64, 16, 4, 4, 0
+    # 2026-09-01 (GPU2 clean full-core retune, td_nttt_probe): 512x16384x4096
+    # (8,8,0) d=1.129 vs (4,16,0) d=1.071; 256x8192x2048 (4,4,0) d=1.106 vs
+    # (4,16,0) d=1.021 (same-process official-param do_bench).
     if m == 512 and n == 16384 and k == 4096:
-        return 128, 128, 64, 16, 4, 16, 0
+        return 128, 128, 64, 16, 8, 8, 0
     if m == 2048 and n == 11008 and k == 4096:
         return 128, 128, 64, 16, 8, 4, 1
     if m == 8192 and n == 256 and k == 2048:
