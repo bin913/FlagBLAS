@@ -47,14 +47,34 @@ case $VENDOR in
   nvidia)
     # Install PyTorch and Triton with CUDA support
     uv pip install torch==2.9.1 torchvision==0.24.1 torchaudio==2.9.1 \
-        --index-url https://download.pytorch.org/whl/cu128
-    # Install FlagBLAS in editable mode
+        --index-url https://download.pytorch.org/whl/cu128 || {
+          echo "::error title=nvidia torch install failed::uv pip install torch==2.9.1 torchvision==0.24.1 torchaudio==2.9.1 (index: https://download.pytorch.org/whl/cu128)"
+          exit 1
+        }
 
-    uv pip uninstall triton
+    # Install FlagBLAS in editable mode
+    uv pip uninstall triton || true
     RES="--index-url=https://resource.flagos.net/repository/flagos-pypi-hosted/simple"
-    python3.12 -m pip install flagtree===0.5.0 $RES
-    uv pip install -e .
-    uv pip install ".[test]"
+    python3.12 -m pip install flagtree===0.5.0 $RES || {
+          echo "::error title=nvidia flagtree install failed::python3.12 -m pip install flagtree===0.5.0"
+          exit 1
+        }
+    uv pip install -e . || {
+          echo "::error title=nvidia flagblas install failed::uv pip install -e ."
+          exit 1
+        }
+    uv pip install ".[test]" || {
+          echo "::error title=nvidia test deps install failed::uv pip install \".[test]\""
+          exit 1
+        }
+
+    # Sanity check: torch must be importable, otherwise the failure only
+    # surfaces later as "ModuleNotFoundError: No module named 'torch'" in the
+    # backend tests (with the Setup step already reported as success).
+    python -c "import torch; print('nvidia torch:', torch.__version__)" || {
+          echo "::error title=nvidia torch sanity check failed::import torch"
+          exit 1
+        }
     ;;
 
   iluvatar)
@@ -68,18 +88,47 @@ case $VENDOR in
     ;;
 
   ascend)
+    # Guard every install step: setup.sh only checks the return value of the
+    # LAST command of this sourced script, so without explicit guards a failed
+    # torch install is silently masked by the (torch-independent) `-e .` and
+    # `.[test]` installs, and only surfaces later as
+    # "ModuleNotFoundError: No module named 'torch'" in the backend tests.
     # Install PyTorch (CPU build) and torch-npu for Ascend NPU
     uv pip install torch==2.10.0+cpu torch-npu==2.10.0 \
-        --index-url https://resource.flagos.net/repository/flagos-pypi-ascend/simple
+        --index-url https://resource.flagos.net/repository/flagos-pypi-ascend/simple || {
+          echo "::error title=ascend torch install failed::uv pip install torch==2.10.0+cpu torch-npu==2.10.0 (index: ${FLAGOS_PYPI})"
+          exit 1
+        }
 
     # Install FlagTree compiler for Ascend
     uv pip uninstall triton || true
     uv pip install flagtree==0.6.0+ascend3.5 \
-        --index-url https://resource.flagos.net/repository/flagos-pypi-ascend/simple
+        --index-url https://resource.flagos.net/repository/flagos-pypi-ascend/simple || {
+          echo "::error title=ascend flagtree install failed::uv pip install flagtree==0.6.0+ascend3.5 (index: ${FLAGOS_PYPI})"
+          exit 1
+        }
 
     # Install FlagBLAS in editable mode
-    uv pip install -e .
-    uv pip install ".[test]"
+    uv pip install -e . || {
+          echo "::error title=ascend flagblas install failed::uv pip install -e ."
+          exit 1
+        }
+    uv pip install ".[test]" || {
+          echo "::error title=ascend test deps install failed::uv pip install \".[test]\""
+          exit 1
+        }
+
+    # Sanity check: torch/torch-npu must be present in the venv before Setup
+    # reports success (import torch_npu is deferred to runtime since it needs
+    # the CANN environment; metadata check does not).
+    python -c "import torch; print('ascend torch:', torch.__version__)" || {
+          echo "::error title=ascend torch sanity check failed::import torch"
+          exit 1
+        }
+    python -c "import importlib.metadata as m; print('ascend torch_npu:', m.version('torch_npu'))" || {
+          echo "::error title=ascend torch_npu sanity check failed::torch_npu distribution missing"
+          exit 1
+        }
     ;;
   hygon)
     # Install PyTorch for Hygon DCU (ROCm/HIP).
