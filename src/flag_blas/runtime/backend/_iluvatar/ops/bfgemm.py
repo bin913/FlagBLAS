@@ -1551,6 +1551,18 @@ def _select_bfgemm_nt_transpose_dot_persistent_config(m: int, n: int, k: int):
     # reverted -- full-core 47-shape A/B showed no net gain (+3.6% / +0.4%,
     # inside noise; td kernel is context-sensitive in full-core, cf. the
     # 8192x28672x8192 note above), despite single-shape d=0.939 / 0.946.
+    # 2026-09-01 (round-2 kernel-level work): 2048^3 re-tested with gm=2
+    # configs -- td (2,8,0) / (2,16,0) / (2,8,1) all ~234.5us raw vs public
+    # 248-273us with default do_bench (25ms warmup). BUT full-core official
+    # re-run (do_bench warmup=1000ms): NT 2048^3 = 265.0us (r10 pretranspose
+    # 263.7us), no gain. Root cause (verified): the gather-heavy td kernel is
+    # power/thermal sensitive -- with 1s warmup it throttles 13-17% (234.5 ->
+    # 266-275us) while the contiguous-load NN path drops only ~5%. The old
+    # "context-sensitivity" was a warmup-length artifact, not L2 context.
+    # Software pipelining (tl.range num_stages=2/3) does not help. td path for
+    # NT pretranspose shapes is CLOSED. NOTE: future kernel-candidate sweeps
+    # must use official do_bench params (warmup=1000, rep=100, median), not
+    # the 25ms default, or power-sensitive kernels will look falsely good.
     return None
 
 
