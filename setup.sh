@@ -63,17 +63,21 @@ UV_MIRROR="https://resource.flagos.net/repository/flagos-filestore/utils"
 
 printf "Checking uv ... "
 export PATH="${HOME}/.local/bin:${PATH}"
-if command -v uv &>/dev/null; then
+# self-hosted runner 的 $HOME 持久化：上一轮下载中断可能在 ~/.local/bin 残留
+# 损坏的 uv（command -v 能找到但无法执行），因此除存在性外还必须验证可运行，
+# 损坏时删除残留并重装。
+if command -v uv &>/dev/null && uv --version &>/dev/null; then
   printf "uv $(uv --version | cut -d ' ' -f 2) $GREEN[OK]$NC\n"
 else
-  printf "${RED}NOT FOUND${NC}, installing ... "
+  printf "${RED}NOT FOUND or BROKEN${NC}, installing ... "
   ARCH=$(uname -m)
   mkdir -p "$HOME/.local/bin"
+  rm -f "$HOME/.local/bin/uv" "$HOME/.local/bin/uvx"
   curl -sSf --connect-timeout 10 --retry 3 --retry-delay 2 \
     "${UV_MIRROR}/uv-${ARCH}-${UV_VERSION}-linux-gnu.tar.gz" \
     | tar xz -C "$HOME/.local/bin" 2>/dev/null \
     || { echo; echo "uv download failed from ${UV_MIRROR}, trying astral.sh ..."; curl -LsSf https://astral.sh/uv/install.sh | sh; }
-  command -v uv &>/dev/null || { printf "$RED[FAILED]$NC\n"; exit 1; }
+  command -v uv &>/dev/null && uv --version &>/dev/null || { printf "$RED[FAILED]$NC\n"; exit 1; }
   printf "$GREEN[OK]$NC\n"
 fi
 # Persist PATH for subsequent GitHub Actions steps
