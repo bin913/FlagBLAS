@@ -1508,6 +1508,11 @@ def _select_hgemm_tt_transpose_dot_persistent_config(m: int, n: int, k: int):
         return 128, 128, 64, 16, 8, 4, 1
     if m == 2048 and n == 4096 and k == 11008:
         return 128, 128, 64, 16, 4, 8, 0
+    # 2026-09-01: TT 2048x12288x4096 / 2048x16384x2048 td intercepts were
+    # added but reverted -- full-core 47-shape A/B showed no net gain
+    # (-1.0% / +0.5%, inside noise; td kernel is context-sensitive in
+    # full-core, cf. the 8192x28672x8192 note below), despite single-shape
+    # d=0.926 / 0.948.
     # 2026-08-31: 4096x24576x8192 / 2048x16384x2048 intercepts removed. The
     # 256x256 two-step-store NN persistent kernel now beats the td kernel on
     # the pretranspose -> NN route (same-process A/B: 0.92 / 0.84 vs 0.81 /
@@ -1548,6 +1553,9 @@ def _select_hgemm_nt_transpose_dot_persistent_config(m: int, n: int, k: int):
     if m == 8192 and n == 256 and k == 2048:
         # 2026-08-31: gm 4->2, wave 4->8, cm 0->1 (interleaved A/B d=0.983)
         return 128, 128, 64, 16, 2, 8, 1
+    # 2026-09-01: NT 2048^3 td intercept was added but reverted -- full-core
+    # 47-shape A/B showed no net gain (-0.8%, inside noise; td kernel is
+    # context-sensitive in full-core), despite single-shape d=0.930.
     return None
 
 
