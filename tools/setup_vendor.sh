@@ -63,7 +63,7 @@ case $VENDOR in
           echo "::error title=nvidia flagblas install failed::uv pip install -e ."
           exit 1
         }
-    uv pip install ".[test]" || {
+    uv pip install ".[test, nvidia-cuda128]" || {
           echo "::error title=nvidia test deps install failed::uv pip install \".[test]\""
           exit 1
         }
