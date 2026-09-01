@@ -55,7 +55,10 @@ case $VENDOR in
     ;;
   ascend)
     if [ -f /usr/local/Ascend/cann/set_env.sh ]; then
-      source /usr/local/Ascend/cann/set_env.sh || true
+      # CANN 的 set_env.sh 内部可能调用 exit（如环境检查失败），直接 source 时
+      # `|| true` 拦不住内部 exit，会终结整个 CI step。先把 exit 降级为 return
+      # 再 source：既保住环境变量导出，又避免 step 被秒杀。
+      source <(sed 's/\bexit\b/return/g' /usr/local/Ascend/cann/set_env.sh) || true
     fi
     ;;
   hygon)
