@@ -288,6 +288,117 @@ def _bfgemm_nn_persistent_kernel(
 
 
 @triton.jit
+def _bfgemm_nt_native_persistent_kernel(
+    a_ptr, b_ptr, c_ptr, alpha: tl.float32, m, n, k, lda, ldb, ldc,
+    NUM_SMS: tl.constexpr, GRID_STRIDE: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr, GROUP_M: tl.constexpr, CACHE_MOD: tl.constexpr,
+):
+    """Persistent NT kernel that reads B in its native (n, k) layout (ldb == k),
+    i.e. C = A @ B^T without materializing B^T first. 2026-09-02: same structure
+    as the NN persistent kernel; the only difference is the B-tile addressing
+    (offs_k has stride 1, offs_n walks ldb). On GPU1 this wins on the NT shapes
+    that used to pay a B-transpose copy (-> NN) or a thermal-sensitive
+    transposed-dot kernel (configs in _select_bfgemm_nt_native_persistent_config)."""
+    start_pid = tl.program_id(0)
+    grid_m = tl.cdiv(m, BLOCK_M)
+    grid_n = tl.cdiv(n, BLOCK_N)
+    num_tiles = grid_m * grid_n
+    width = GROUP_M * grid_n
+    offs_k_base = tl.arange(0, BLOCK_K)
+    tiles_per_program = tl.cdiv(num_tiles - start_pid, GRID_STRIDE)
+    for idx in range(0, tiles_per_program):
+        tile_id = start_pid + idx * GRID_STRIDE
+        group_id = tile_id // width
+        group_size = tl.minimum(grid_m - group_id * GROUP_M, GROUP_M)
+        pid_m = group_id * GROUP_M + (tile_id % group_size)
+        pid_n = (tile_id % width) // group_size
+        offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+        acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+        for k_start in range(0, k, BLOCK_K):
+            offs_k = k_start + offs_k_base
+            a_ptrs = a_ptr + offs_m[:, None] * lda + offs_k[None, :]
+            b_ptrs = b_ptr + offs_k[:, None] + offs_n[None, :] * ldb
+            if CACHE_MOD == 0:
+                a = tl.load(a_ptrs)
+                b = tl.load(b_ptrs)
+            elif CACHE_MOD == 1:
+                a = tl.load(a_ptrs, cache_modifier=".ca")
+                b = tl.load(b_ptrs, cache_modifier=".ca")
+            else:
+                a = tl.load(a_ptrs, cache_modifier=".cg")
+                b = tl.load(b_ptrs, cache_modifier=".cg")
+            acc = tl.dot(a, b, acc, out_dtype=tl.float32, allow_tf32=False)
+        if BLOCK_M == 256 and BLOCK_N == 256:
+            # Two-step store: same register-lean epilogue as the NN 256x256 path.
+            out = (alpha * acc).to(tl.bfloat16)
+            tl.store(c_ptr + offs_m[:, None] * ldc + offs_n[None, :], out)
+        else:
+            tl.store(c_ptr + offs_m[:, None] * ldc + offs_n[None, :], (alpha * acc).to(tl.bfloat16))
+
+
+@triton.jit
+def _bfgemm_tntt_native_persistent_kernel(
+    a_ptr, b_ptr, c_ptr, alpha: tl.float32, m, n, k, lda, ldb, ldc,
+    NUM_SMS: tl.constexpr, GRID_STRIDE: tl.constexpr, BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr, GROUP_M: tl.constexpr,
+    CACHE_MOD: tl.constexpr, LAYOUT: tl.constexpr,
+):
+    """Persistent TN/TT kernel for transa == T that reads A^T and B in their
+    native row-major layouts (A is stored (k, m), lda == m), so neither the
+    one-time operand copy (pretranspose -> NN) nor the per-tile tl.trans of the
+    transposed-dot kernel is needed: an A^T tile is loaded as (M, K) with stride
+    1 along M (the column-major-style leading read this backend favors), the
+    accumulator keeps the ordinary (M, N) orientation, and C is stored directly.
+    LAYOUT == 0: TN (C = A^T @ B, B stored (k, n), ldb == n); LAYOUT == 1: TT
+    (C = A^T @ B^T, B stored (n, k), ldb == k). 2026-09-03: same-process
+    3-round interleaved official-param A/B on GPU1 wins on all whitelisted
+    shapes (see the config selectors); same persistent grid-stride /
+    two-step-store family as the NN and NT-native persistent kernels."""
+    start_pid = tl.program_id(0)
+    grid_m = tl.cdiv(m, BLOCK_M)
+    grid_n = tl.cdiv(n, BLOCK_N)
+    num_tiles = grid_m * grid_n
+    width = GROUP_M * grid_n
+    offs_k_base = tl.arange(0, BLOCK_K)
+    tiles_per_program = tl.cdiv(num_tiles - start_pid, GRID_STRIDE)
+    for idx in range(0, tiles_per_program):
+        tile_id = start_pid + idx * GRID_STRIDE
+        group_id = tile_id // width
+        group_size = tl.minimum(grid_m - group_id * GROUP_M, GROUP_M)
+        pid_m = group_id * GROUP_M + (tile_id % group_size)
+        pid_n = (tile_id % width) // group_size
+        offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+        acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+        for k_start in range(0, k, BLOCK_K):
+            offs_k = k_start + offs_k_base
+            # (M, K) A^T tile: stride 1 along M, stride lda along K.
+            a_ptrs = a_ptr + offs_m[:, None] + offs_k[None, :] * lda
+            if LAYOUT == 1:  # TT: B (n, k) row-major, inner k contiguous
+                b_ptrs = b_ptr + offs_k[:, None] + offs_n[None, :] * ldb
+            else:  # TN: B (k, n) row-major, inner n contiguous
+                b_ptrs = b_ptr + offs_k[:, None] * ldb + offs_n[None, :]
+            if CACHE_MOD == 0:
+                a = tl.load(a_ptrs)
+                b = tl.load(b_ptrs)
+            elif CACHE_MOD == 1:
+                a = tl.load(a_ptrs, cache_modifier=".ca")
+                b = tl.load(b_ptrs, cache_modifier=".ca")
+            else:
+                a = tl.load(a_ptrs, cache_modifier=".cg")
+                b = tl.load(b_ptrs, cache_modifier=".cg")
+            acc = tl.dot(a, b, acc, out_dtype=tl.float32, allow_tf32=False)
+        if BLOCK_M == 256 and BLOCK_N == 256:
+            # Two-step store: same register-lean epilogue as the NN 256x256 path.
+            out = (alpha * acc).to(tl.bfloat16)
+            tl.store(c_ptr + offs_m[:, None] * ldc + offs_n[None, :], out)
+        else:
+            tl.store(c_ptr + offs_m[:, None] * ldc + offs_n[None, :], (alpha * acc).to(tl.bfloat16))
+
+
+
+@triton.jit
 def _bfgemm_nn_pipe_kernel(
     a_ptr, b_ptr, c_ptr, alpha: tl.float32, m, n, k, lda, ldb, ldc,
     NUM_SMS: tl.constexpr, GRID_STRIDE: tl.constexpr, BLOCK_M: tl.constexpr,
@@ -1175,7 +1286,12 @@ def _select_bfgemm_nn_persistent_config(m: int, n: int, k: int):
     if m == 4096 and n == 8192 and k == 28672:
         return 256, 256, 64, 16, 4, 1, 4, 2
     if m == 8192 and n == 28672 and k == 8192:
-        return 256, 256, 64, 16, 4, 1, 8, 2
+        # bf16-tuned 2026-09-03: 13 interleaved official-param A/B rounds on
+        # GPU1 -> wave_count 4 (grid_stride 64) beats wave 8 by ~-1.4%
+        # (cand ~49.7 vs prod ~50.5 ms); wv2/+regressed, wv16/cache_mod
+        # neutral-or-worse at official arbitration. Isolation puts this shape
+        # at ~0.91 vs cublas; official 0.73 runs are run-tail heat inflation.
+        return 256, 256, 64, 16, 4, 1, 4, 2
     return None
 
 
@@ -1566,6 +1682,91 @@ def _select_bfgemm_nt_transpose_dot_persistent_config(m: int, n: int, k: int):
     return None
 
 
+def _select_bfgemm_nt_native_persistent_config(m: int, n: int, k: int):
+    """(BLOCK_M, BLOCK_N, BLOCK_K, num_warps, group_m, num_stages, wave_count,
+    cache_mod) for the persistent NT kernel that reads B in its native (n, k)
+    layout (no B^T copy, no gather td kernel). 2026-09-02: same-process 3-round
+    official do_bench A/B on GPU1 vs the then-current dispatch (B-pretranspose
+    -> NN persistent, or the NT td-persistent intercept), one process per shape:
+      shape              dsp sp | native-nt cfg        nt sp
+      (2048,16384,2048)  .822  | 256x256 k64 w16 g4 wv2 cm0  .904
+      (2048,12288,4096)  .794  | 256x256 k64 w16 g4 wv2 cm0  .879
+      (512,16384,4096)   .764  | 256x256 k64 w16 g4 wv8 cm0  .927
+      (256,8192,2048)    .800  | 256x256 k64 w16 g4 wv8 cm0  .887
+      (8192,256,2048)    .815  | 256x256 k64 w16 g2 wv8 cm0  .935
+      (2048,2048,2048)   .741  | 256x256 k64 w16 g4 wv8 cm0  .890
+    (sp = cublas median / kernel median, same process.) cm0 (no cache
+    modifier) beats the cm2 used by the NN persistent path on the native read;
+    wave 2 wins on m=2048 wide shapes, wave 8 on the skinny shapes."""
+    if (m, n, k) in (
+        (2048, 16384, 2048),
+        (2048, 12288, 4096),
+    ):
+        return 256, 256, 64, 16, 4, 1, 2, 0
+    if (m, n, k) in (
+        (512, 16384, 4096),
+        (256, 8192, 2048),
+        (2048, 2048, 2048),
+    ):
+        return 256, 256, 64, 16, 4, 1, 8, 0
+    if (m, n, k) == (8192, 256, 2048):
+        return 256, 256, 64, 16, 2, 1, 8, 0
+    return None
+
+
+def _select_bfgemm_tn_native_persistent_config(m: int, n: int, k: int):
+    """(BLOCK_M, BLOCK_N, BLOCK_K, num_warps, group_m, num_stages, wave_count,
+    cache_mod) for the persistent TN native kernel (LAYOUT == 0, C = A^T @ B,
+    A stored (k, m) / B stored (k, n); no A-copy, no per-tile tl.trans).
+    2026-09-03: same-process 3-round interleaved official-param do_bench A/B on
+    GPU1 vs the then-current dispatch (TN td-persistent intercept, or
+    A-pretranspose -> NN persistent for the wide-N shape), one process per shape:
+      (8192,28672,8192)   route preA->NN   | 256x256 k64 w16 g4 wv8 cm2 d=-8.22%
+      (2048,2048,2048)    route td-pers    | 256x256 k64 w16 g4 wv4 cm0 d=-18.35%
+      (4096,24576,8192)   route preA->NN   | 256x256 k64 w16 g4 wv4 cm0 d=-5.53%
+      (2048,11008,4096)   route preA->NN   | 256x256 k64 w16 g4 wv2 cm0 d=-7.08%
+    """
+    if (m, n, k) == (8192, 28672, 8192):
+        return 256, 256, 64, 16, 4, 1, 8, 2
+    if (m, n, k) == (2048, 2048, 2048):
+        return 256, 256, 64, 16, 4, 1, 4, 0
+    if (m, n, k) == (4096, 24576, 8192):
+        return 256, 256, 64, 16, 4, 1, 4, 0
+    if (m, n, k) == (2048, 11008, 4096):
+        return 256, 256, 64, 16, 4, 1, 2, 0
+    return None
+
+
+def _select_bfgemm_tt_native_persistent_config(m: int, n: int, k: int):
+    """(BLOCK_M, BLOCK_N, BLOCK_K, num_warps, group_m, num_stages, wave_count,
+    cache_mod) for the persistent TT native kernel (LAYOUT == 1, C = A^T @ B^T,
+    A stored (k, m) / B stored (n, k)). 2026-09-03 same-process A/B on GPU1 vs
+    the then-current dispatch (tt td-persistent intercept, or pretranspose
+    both -> NN persistent for the wide-N/K-heavy shapes), one process per shape:
+      (2048,2048,2048)    route td-pers    | 256x256 k64 w16 g4 wv4 cm0 d=-15.85%
+      (16384,16384,16384) route pre-both   | 256x256 k64 w16 g4 wv4 cm0 d=-6.34%
+      (2048,16384,2048)   route pre-both   | 256x256 k64 w16 g4 wv2 cm2 d=-10.44%
+      (256,8192,2048)     route td-pers    | 256x256 k64 w16 g2 wv8 cm0 d=-9.63%
+      (512,16384,4096)    route td-pers    | 256x256 k64 w16 g4 wv2 cm0 d=-8.96%
+      (4096,24576,8192)   route pre-both   | 256x256 k64 w16 g4 wv2 cm0 d=-7.35%
+      (2048,12288,4096)   route td-pers    | 256x256 k64 w16 g4 wv2 cm2 d=-9.54%
+    """
+    if (m, n, k) == (256, 8192, 2048):
+        return 256, 256, 64, 16, 2, 1, 8, 0
+    if (m, n, k) == (512, 16384, 4096):
+        return 256, 256, 64, 16, 4, 1, 2, 0
+    if (m, n, k) == (2048, 16384, 2048):
+        return 256, 256, 64, 16, 4, 1, 2, 2
+    if (m, n, k) in ((2048, 2048, 2048), (16384, 16384, 16384)):
+        return 256, 256, 64, 16, 4, 1, 4, 0
+    if (m, n, k) == (4096, 24576, 8192):
+        return 256, 256, 64, 16, 4, 1, 2, 0
+    if (m, n, k) == (2048, 12288, 4096):
+        return 256, 256, 64, 16, 4, 1, 2, 2
+    return None
+
+
+
 def _can_use_fast_bfgemm(m: int, n: int, k: int, block_m: int, block_n: int, block_k: int) -> bool:
     return (m % block_m == 0) and (n % block_n == 0) and (k % block_k == 0)
 
@@ -1851,6 +2052,97 @@ def _launch_bfgemm_nn_persistent(
     )
 
 
+def _launch_bfgemm_nt_native_persistent(
+    grid,
+    A: torch.Tensor,
+    B: torch.Tensor,
+    C: torch.Tensor,
+    alpha: float,
+    m: int,
+    n: int,
+    k: int,
+    lda: int,
+    ldb: int,
+    ldc: int,
+    block_m: int,
+    block_n: int,
+    block_k: int,
+    num_warps: int,
+    group_m: int,
+    num_stages: int,
+    num_sms: int,
+    grid_stride: int,
+    cache_mod: int = 0,
+) -> None:
+    _bfgemm_nt_native_persistent_kernel[grid](
+        A, B, C, alpha, m, n, k, lda, ldb, ldc, NUM_SMS=num_sms, GRID_STRIDE=grid_stride,
+        BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k, GROUP_M=group_m,
+        CACHE_MOD=cache_mod,
+        num_warps=num_warps, num_stages=num_stages,
+    )
+
+
+def _launch_bfgemm_tn_native_persistent(
+    grid,
+    A: torch.Tensor,
+    B: torch.Tensor,
+    C: torch.Tensor,
+    alpha: float,
+    m: int,
+    n: int,
+    k: int,
+    lda: int,
+    ldb: int,
+    ldc: int,
+    block_m: int,
+    block_n: int,
+    block_k: int,
+    num_warps: int,
+    group_m: int,
+    num_stages: int,
+    num_sms: int,
+    grid_stride: int,
+    cache_mod: int = 0,
+) -> None:
+    _bfgemm_tntt_native_persistent_kernel[grid](
+        A, B, C, alpha, m, n, k, lda, ldb, ldc, NUM_SMS=num_sms, GRID_STRIDE=grid_stride,
+        BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k, GROUP_M=group_m,
+        CACHE_MOD=cache_mod, LAYOUT=0,
+        num_warps=num_warps, num_stages=num_stages,
+    )
+
+
+def _launch_bfgemm_tt_native_persistent(
+    grid,
+    A: torch.Tensor,
+    B: torch.Tensor,
+    C: torch.Tensor,
+    alpha: float,
+    m: int,
+    n: int,
+    k: int,
+    lda: int,
+    ldb: int,
+    ldc: int,
+    block_m: int,
+    block_n: int,
+    block_k: int,
+    num_warps: int,
+    group_m: int,
+    num_stages: int,
+    num_sms: int,
+    grid_stride: int,
+    cache_mod: int = 0,
+) -> None:
+    _bfgemm_tntt_native_persistent_kernel[grid](
+        A, B, C, alpha, m, n, k, lda, ldb, ldc, NUM_SMS=num_sms, GRID_STRIDE=grid_stride,
+        BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k, GROUP_M=group_m,
+        CACHE_MOD=cache_mod, LAYOUT=1,
+        num_warps=num_warps, num_stages=num_stages,
+    )
+
+
+
 def _launch_bfgemm_nn_pipe(
     grid,
     A: torch.Tensor,
@@ -2133,6 +2425,41 @@ def bfgemm(
     # the timed region), so those are intercepted BEFORE the pretranspose branch.
     beta_is_zero = beta == 0.0
 
+    # A few TN/TT shapes are fastest with the transpose-free native persistent
+    # kernel (A^T / B read in native row-major layouts, acc kept (M, N): no
+    # operand copy and no per-tile tl.trans). Intercept BEFORE the td-persistent
+    # and pretranspose branches; see the _select_bfgemm_{tn,tt}_native_persistent_config
+    # docstrings for the 2026-09-03 same-process A/B data.
+    native_persistent_config = None
+    if transa == CUBLAS_OP_T and transb == CUBLAS_OP_N:
+        native_persistent_config = _select_bfgemm_tn_native_persistent_config(m, n, k)
+    elif transa == CUBLAS_OP_T and transb == CUBLAS_OP_T:
+        native_persistent_config = _select_bfgemm_tt_native_persistent_config(m, n, k)
+    if native_persistent_config is not None:
+        (
+            block_m, block_n, block_k, num_warps, group_m, num_stages, wave_count, cache_mod,
+        ) = native_persistent_config
+        ldb_ok = (ldb == n) if transb == CUBLAS_OP_N else (ldb == k)
+        if beta_is_zero and lda == m and ldb_ok and _can_use_fast_bfgemm(
+                m, n, k, block_m, block_n, block_k):
+            num_sms = torch.cuda.get_device_properties(A.device).multi_processor_count
+            grid_stride = num_sms * wave_count
+            grid = (min(grid_stride, triton.cdiv(m, block_m) * triton.cdiv(n, block_n)),)
+            with torch_device_fn.device(A.device):
+                if transb == CUBLAS_OP_T:
+                    _launch_bfgemm_tt_native_persistent(
+                        grid, A, B, C, alpha, m, n, k, lda, ldb, ldc,
+                        block_m, block_n, block_k, num_warps, group_m,
+                        num_stages, num_sms, grid_stride, cache_mod,
+                    )
+                else:
+                    _launch_bfgemm_tn_native_persistent(
+                        grid, A, B, C, alpha, m, n, k, lda, ldb, ldc,
+                        block_m, block_n, block_k, num_warps, group_m,
+                        num_stages, num_sms, grid_stride, cache_mod,
+                    )
+            return
+
     tn_td_persistent_config = None
     if transa == CUBLAS_OP_T and transb == CUBLAS_OP_N:
         tn_td_persistent_config = _select_bfgemm_tn_transpose_dot_persistent_config(m, n, k)
@@ -2168,6 +2495,28 @@ def bfgemm(
                     grid, A, B, C, alpha, m, n, k, lda, ldb, ldc,
                     block_m, block_n, block_k, num_warps, group_m, num_sms,
                     grid_stride, cache_mod,
+                )
+            return
+
+    # NT shapes where reading B in its native (n, k) layout (no B^T copy, no
+    # gather td kernel) is fastest; must intercept before the td / pretranspose
+    # branches. See _select_bfgemm_nt_native_persistent_config for the A/B data.
+    nt_native_persistent_config = None
+    if transa == CUBLAS_OP_N and transb == CUBLAS_OP_T:
+        nt_native_persistent_config = _select_bfgemm_nt_native_persistent_config(m, n, k)
+    if nt_native_persistent_config is not None:
+        (
+            block_m, block_n, block_k, num_warps, group_m, num_stages, wave_count, cache_mod,
+        ) = nt_native_persistent_config
+        if beta_is_zero and ldb == k and _can_use_fast_bfgemm(m, n, k, block_m, block_n, block_k):
+            num_sms = torch.cuda.get_device_properties(A.device).multi_processor_count
+            grid_stride = num_sms * wave_count
+            grid = (min(grid_stride, triton.cdiv(m, block_m) * triton.cdiv(n, block_n)),)
+            with torch_device_fn.device(A.device):
+                _launch_bfgemm_nt_native_persistent(
+                    grid, A, B, C, alpha, m, n, k, lda, ldb, ldc,
+                    block_m, block_n, block_k, num_warps, group_m, num_stages,
+                    num_sms, grid_stride, cache_mod,
                 )
             return
 
