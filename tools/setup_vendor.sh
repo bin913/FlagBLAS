@@ -52,13 +52,18 @@ case $VENDOR in
           exit 1
         }
 
-    # Install FlagBLAS in editable mode
+    # Install FlagTree compiler (plain build, no CUDA)
     uv pip uninstall triton || true
-    RES="--index-url=https://resource.flagos.net/repository/flagos-pypi-hosted/simple"
-    python3.12 -m pip install flagtree===0.5.0 $RES || {
-          echo "::error title=nvidia flagtree install failed::python3.12 -m pip install flagtree===0.5.0"
+    # Use `uv pip` (not `python3.12 -m pip`): the venv is created by `uv venv`,
+    # which does not seed pip, so `-m pip` always fails with
+    # "No module named pip".
+    uv pip install flagtree===0.5.0 \
+        --index-url https://resource.flagos.net/repository/flagos-pypi-hosted/simple || {
+          echo "::error title=nvidia flagtree install failed::uv pip install flagtree===0.5.0 (index: https://resource.flagos.net/repository/flagos-pypi-hosted/simple)"
           exit 1
         }
+
+    # Install FlagBLAS in editable mode
     uv pip install -e . || {
           echo "::error title=nvidia flagblas install failed::uv pip install -e ."
           exit 1
