@@ -93,18 +93,31 @@ case $VENDOR in
     # torch install is silently masked by the (torch-independent) `-e .` and
     # `.[test]` installs, and only surfaces later as
     # "ModuleNotFoundError: No module named 'torch'" in the backend tests.
+    # The flagos-pypi-ascend index only hosts vendor wheels, so add a general
+    # PyPI mirror (same one FlagGems uses) to resolve torch/torch-npu's
+    # transitive deps and to fall back when the intranet nexus is unreachable.
+    # --index-strategy unsafe-best-match is required: under uv's default
+    # first-index strategy, the vendor build is only picked from the first
+    # index that serves a matching version.
+    UV_INDEX_URL="https://resource.flagos.net/repository/flagos-pypi-ascend/simple"
+    UV_EXTRA_INDEX_URL="https://mirrors.aliyun.com/pypi/simple"
+
     # Install PyTorch (CPU build) and torch-npu for Ascend NPU
     uv pip install torch==2.10.0+cpu torch-npu==2.10.0 \
-        --index-url https://resource.flagos.net/repository/flagos-pypi-ascend/simple || {
-          echo "::error title=ascend torch install failed::uv pip install torch==2.10.0+cpu torch-npu==2.10.0 (index: ${FLAGOS_PYPI})"
+        --index-url ${UV_INDEX_URL} \
+        --extra-index-url ${UV_EXTRA_INDEX_URL} \
+        --index-strategy unsafe-best-match || {
+          echo "::error title=ascend torch install failed::uv pip install torch==2.10.0+cpu torch-npu==2.10.0 (indexes: ${UV_INDEX_URL}, ${UV_EXTRA_INDEX_URL})"
           exit 1
         }
 
     # Install FlagTree compiler for Ascend
     uv pip uninstall triton || true
-    uv pip install flagtree==0.6.0+ascend3.5 \
-        --index-url https://resource.flagos.net/repository/flagos-pypi-ascend/simple || {
-          echo "::error title=ascend flagtree install failed::uv pip install flagtree==0.6.0+ascend3.5 (index: ${FLAGOS_PYPI})"
+    uv pip install flagtree==0.6.1+ascend3.5 \
+        --index-url ${UV_INDEX_URL} \
+        --extra-index-url ${UV_EXTRA_INDEX_URL} \
+        --index-strategy unsafe-best-match || {
+          echo "::error title=ascend flagtree install failed::uv pip install flagtree==0.6.1+ascend3.5 (indexes: ${UV_INDEX_URL}, ${UV_EXTRA_INDEX_URL})"
           exit 1
         }
 
