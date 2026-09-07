@@ -51,11 +51,14 @@ case $VENDOR in
     # Install FlagTree compiler (plain build, no CUDA). The flagtree wheel
     # bundles the `triton` package that flag_blas imports at runtime, so it
     # must actually be installed or import fails later.
+    # Version aligned with FlagGems' nvidia backends (flagtree==0.6.1);
+    # `===` pins the exact plain 0.6.1 build (the hosted index also serves
+    # vendor-tagged 0.6.1+<backend>3.6 wheels).
     uv pip uninstall triton || true
     # Use `uv pip` (not `python3.12 -m pip`): the venv is created by `uv venv`,
     # which does not seed pip, so `-m pip` always fails with
     # "No module named pip" and flagtree is never installed.
-    uv pip install flagtree===0.5.0 \
+    uv pip install flagtree===0.6.1 \
         --index-url https://resource.flagos.net/repository/flagos-pypi-hosted/simple
     uv pip install -e .
     uv pip install ".[test,nvidia-cuda128]"

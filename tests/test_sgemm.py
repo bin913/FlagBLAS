@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# NOTE: 本文件正在调试中，用例结果可能尚不稳定。
+
 import cupy as cp
 import numpy as np
 import pytest
