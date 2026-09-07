@@ -48,11 +48,15 @@ case $VENDOR in
     # Install PyTorch and Triton with CUDA support
     uv pip install torch==2.9.1 torchvision==0.24.1 torchaudio==2.9.1 \
         --index-url https://download.pytorch.org/whl/cu128
-    # Install FlagBLAS in editable mode
-
-    uv pip uninstall triton
-    RES="--index-url=https://resource.flagos.net/repository/flagos-pypi-hosted/simple"
-    python3.12 -m pip install flagtree===0.5.0 $RES
+    # Install FlagTree compiler (plain build, no CUDA). The flagtree wheel
+    # bundles the `triton` package that flag_blas imports at runtime, so it
+    # must actually be installed or import fails later.
+    uv pip uninstall triton || true
+    # Use `uv pip` (not `python3.12 -m pip`): the venv is created by `uv venv`,
+    # which does not seed pip, so `-m pip` always fails with
+    # "No module named pip" and flagtree is never installed.
+    uv pip install flagtree===0.5.0 \
+        --index-url https://resource.flagos.net/repository/flagos-pypi-hosted/simple
     uv pip install -e .
     uv pip install ".[test,nvidia-cuda128]"
     ;;
