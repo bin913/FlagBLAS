@@ -87,8 +87,11 @@ case $VENDOR in
       printf '\n# Source bundled corex python env (required by corex PyTorch/CuPy)\nexport PYTHONPATH="%s${PYTHONPATH:+:$PYTHONPATH}"\n' "$ILUVATAR_COREX_PYDIR" >> .venv/bin/activate
       echo "Baked corex python env into .venv/bin/activate: ${ILUVATAR_COREX_PYDIR}"
     else
-      echo "::warning title=iluvatar setup::no bundled corex python env; installing corex torch from the flagos mirror (cp312). Note: no corex cupy wheel is hosted, tests importing cupy will not run."
-      uv pip install torch==2.7.1+corex.4.4.0 torchaudio==2.7.1+corex.4.4.0 torchvision==0.22.1+corex.4.4.0 \
+      echo "::warning title=iluvatar setup::no bundled corex python env; installing corex torch from the flagos mirror (cp312). Note: no corex cupy wheel is hosted, so the test suite will fall back to the CPU reference when cupy is missing."
+      # Mirrors FlagGems backends.yaml (iluvatar): python 3.12 + pinned corex
+      # torch/torchaudio/torchvision + numpy<2 from the flagos-pypi-iluvatar
+      # index (aliyun is only a transitive-deps mirror).
+      uv pip install torch==2.7.1+corex.4.4.0 torchaudio==2.7.1+corex.4.4.0 torchvision==0.22.1+corex.4.4.0 "numpy<2" \
           --index-url https://resource.flagos.net/repository/flagos-pypi-iluvatar/simple \
           --extra-index-url https://mirrors.aliyun.com/pypi/simple \
           --index-strategy unsafe-best-match || {
@@ -113,8 +116,10 @@ case $VENDOR in
     fi
     echo "::warning title=iluvatar setup::testdeps installed"
 
-    # Sanity check: make sure torch/cupy come from the corex build and that
-    # torch.cuda can actually initialize against the corex driver.
+    # Sanity check: make sure torch comes from the corex build and that
+    # torch.cuda can actually initialize against the corex driver. cupy is
+    # optional here: the corex cupy is only available in the bundled python
+    # env, and the test suite falls back to the CPU reference without it.
     set +e
     python - <<'PYEOF'
 import sys, os, importlib.metadata, traceback
@@ -133,8 +138,11 @@ try:
           "| name:", torch.cuda.get_device_name(0))
     if torch.cuda.device_count() == 0:
         raise RuntimeError("no iluvatar device visible to torch")
-    import cupy
-    print("cupy:", cupy.__version__)
+    try:
+        import cupy
+        print("cupy:", cupy.__version__)
+    except Exception as e:
+        print("cupy not importable (expected without the bundled corex env):", e)
 except Exception:
     tb = traceback.format_exc()
     print(tb)
@@ -144,10 +152,30 @@ PYEOF
     SANITY_RC=$?
     set -e
     if [ $SANITY_RC -ne 0 ]; then
-      echo "::error title=iluvatar setup::torch/cupy sanity check failed with rc=${SANITY_RC}"
+      echo "::error title=iluvatar setup::torch sanity check failed with rc=${SANITY_RC}"
       exit 1
     fi
-    echo "::warning title=iluvatar setup::torch/cupy sanity check passed"
+    echo "::warning title=iluvatar setup::torch sanity check passed"
+
+    # Mirror FlagGems: bake the corex runtime env into .venv/bin/activate so
+    # any later `source .venv/bin/activate` (the CI test step) resolves the
+    # CUDA-10.2 runtime shipped with corex (otherwise torch import fails with
+    # "undefined symbol: cudaProfilerInitialize").
+    if [ -n "$COREX_ROOT" ] && [ -d "$COREX_ROOT" ]; then
+      {
+        echo ""
+        echo "# --- FlagBLAS corex runtime env (iluvatar) ---"
+        echo "export COREX_ROOT=\"${COREX_ROOT}\""
+        for _cd in "${COREX_ROOT}/lib64" "${COREX_ROOT}/lib"; do
+          if [ -d "$_cd" ]; then
+            echo "case \":\${LD_LIBRARY_PATH:-}:\" in *\":${_cd}:\"*) ;; *) export LD_LIBRARY_PATH=\"${_cd}\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}\" ;; esac"
+          fi
+        done
+        echo "export PATH=\"${COREX_ROOT}/bin\${PATH:+:\$PATH}\""
+        echo "# --- end FlagBLAS corex runtime env ---"
+      } >> .venv/bin/activate
+      echo "Baked corex runtime env into .venv/bin/activate: ${COREX_ROOT}"
+    fi
     ;;
 
   ascend)
