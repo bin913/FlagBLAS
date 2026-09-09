@@ -123,6 +123,7 @@ case $VENDOR in
     set +e
     python - <<'PYEOF'
 import sys, os, importlib.metadata, traceback
+print("::warning title=iluvatar env::LD_LIBRARY_PATH=" + os.environ.get("LD_LIBRARY_PATH", "<empty>")[:2000])
 try:
     import torch
     tdir = os.path.dirname(torch.__file__)
@@ -160,24 +161,35 @@ PYEOF
     fi
     echo "::warning title=iluvatar setup::torch sanity check passed"
 
-    # Mirror FlagGems: bake the corex runtime env into .venv/bin/activate so
-    # any later `source .venv/bin/activate` (the CI test step) resolves the
-    # CUDA-10.2 runtime shipped with corex (otherwise torch import fails with
-    # "undefined symbol: cudaProfilerInitialize").
-    if [ -n "$COREX_ROOT" ] && [ -d "$COREX_ROOT" ]; then
+    # Mirror FlagGems: bake the corex/CUDA-10.2 runtime env into
+    # .venv/bin/activate so any later `source .venv/bin/activate` (the CI
+    # test step) resolves the CUDA-10.2 runtime shipped with corex
+    # (otherwise torch import fails with "undefined symbol:
+    # cudaProfilerInitialize").
+    if { [ -n "$COREX_ROOT" ] && [ -d "$COREX_ROOT" ]; } || [ -d /usr/local/cuda-10.2 ]; then
       {
         echo ""
         echo "# --- FlagBLAS corex runtime env (iluvatar) ---"
-        echo "export COREX_ROOT=\"${COREX_ROOT}\""
-        for _cd in "${COREX_ROOT}/lib64" "${COREX_ROOT}/lib"; do
+        if [ -n "$COREX_ROOT" ] && [ -d "$COREX_ROOT" ]; then
+          echo "export COREX_ROOT=\"${COREX_ROOT}\""
+          for _cd in "${COREX_ROOT}/lib64" "${COREX_ROOT}/lib"; do
+            if [ -d "$_cd" ]; then
+              echo "case \":\${LD_LIBRARY_PATH:-}:\" in *\":${_cd}:\"*) ;; *) export LD_LIBRARY_PATH=\"${_cd}\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}\" ;; esac"
+            fi
+          done
+          echo "export PATH=\"${COREX_ROOT}/bin\${PATH:+:\$PATH}\""
+        fi
+        for _cd in /usr/local/cuda-10.2/lib64 /usr/local/cuda-10.2/lib; do
           if [ -d "$_cd" ]; then
             echo "case \":\${LD_LIBRARY_PATH:-}:\" in *\":${_cd}:\"*) ;; *) export LD_LIBRARY_PATH=\"${_cd}\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}\" ;; esac"
           fi
         done
-        echo "export PATH=\"${COREX_ROOT}/bin\${PATH:+:\$PATH}\""
+        if [ -d /usr/local/cuda-10.2/include ]; then
+          echo "export CPATH=/usr/local/cuda-10.2/include"
+        fi
         echo "# --- end FlagBLAS corex runtime env ---"
       } >> .venv/bin/activate
-      echo "Baked corex runtime env into .venv/bin/activate: ${COREX_ROOT}"
+      echo "Baked corex runtime env into .venv/bin/activate: ${COREX_ROOT:-/usr/local/cuda-10.2}"
     fi
     ;;
 

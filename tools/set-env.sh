@@ -50,36 +50,88 @@ case $VENDOR in
     ;;
   iluvatar)
     # Locate the real CoreX install. FlagGems' runners use the canonical
-    # unversioned /usr/local/corex, but some bare runners only ship the
-    # versioned dir (/usr/local/corex-4.4.0) without a symlink, so fall back
-    # to globbing. The corex PyTorch wheels link against the CUDA-10.2
-    # runtime shipped inside CoreX; that lib dir must be on LD_LIBRARY_PATH or
-    # `import torch` dies with "undefined symbol: cudaProfilerInitialize"
-    # (the system libcudart is CUDA 12+ and no longer exports that symbol).
+    # unversioned /usr/local/corex, but bare runners may only ship the
+    # versioned dir (/usr/local/corex-4.4.0) without a symlink, so glob.
+    # The corex PyTorch wheels link against the CUDA-10.2 runtime that CoreX
+    # ships (libcudart still exports cudaProfilerInitialize there); that lib
+    # dir MUST be on LD_LIBRARY_PATH before any `import torch`, otherwise the
+    # loader picks the system CUDA 12 libcudart and dies with
+    # "undefined symbol: cudaProfilerInitialize, version CUDART".
     export COREX_ROOT=${COREX_ROOT:-}
-    for _cr in /usr/local/corex /usr/local/corex-*; do
-      if [ -d "$_cr" ] && { [ -d "$_cr/bin" ] || [ -d "$_cr/lib" ] || [ -d "$_cr/lib64" ]; }; then
-        export COREX_ROOT="$_cr"
-        break
+    if [ -z "$COREX_ROOT" ]; then
+      for _cr in /usr/local/corex /usr/local/corex-* /usr/local/CoreX-* /opt/corex-*; do
+        if [ -d "$_cr" ] && { [ -d "$_cr/bin" ] || [ -d "$_cr/lib" ] || [ -d "$_cr/lib64" ]; }; then
+          export COREX_ROOT="$_cr"
+          break
+        fi
+      done
+    fi
+    # Fall back to the prefix of a PATH-resolved ixsmi, if any.
+    if [ -z "$COREX_ROOT" ]; then
+      _ixsmi=$(command -v ixsmi 2>/dev/null || true)
+      if [ -n "$_ixsmi" ]; then
+        _ixroot="$(cd "$(dirname "$_ixsmi")/.." && pwd 2>/dev/null || true)"
+        if [ -n "$_ixroot" ] && { [ -d "$_ixroot/lib" ] || [ -d "$_ixroot/lib64" ]; }; then
+          export COREX_ROOT="$_ixroot"
+        fi
       fi
-    done
+    fi
     if [ -z "$COREX_ROOT" ]; then
       echo "WARNING: no corex install found under /usr/local/corex*; corex torch will not work"
     else
       export PATH="${COREX_ROOT}/bin:${PATH}"
-      for _cd in "${COREX_ROOT}/lib64" "${COREX_ROOT}/lib"; do
-        if [ -d "$_cd" ]; then
-          case ":${LD_LIBRARY_PATH:-}:" in
-            *":$_cd:"*) ;;
-            *) export LD_LIBRARY_PATH="$_cd${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ;;
-          esac
+    fi
+    # Build LD_LIBRARY_PATH: dirs containing a CUDA-10.2-era libcudart must
+    # come first (corex lib dirs, then a local /usr/local/cuda-10.2 install).
+    _libdirs=""
+    for _cr in "${COREX_ROOT}" /usr/local/cuda-10.2; do
+      [ -n "$_cr" ] || continue
+      for _cd in "$_cr/lib64" "$_cr/lib"; do
+        if [ -d "$_cd" ] && ls "$_cd"/libcudart.so.10* >/dev/null 2>&1; then
+          case ":$_libdirs:" in *":$_cd:"*) ;; *) _libdirs="$_libdirs$_cd:" ;; esac
         fi
       done
-      # FlagGems backends.yaml sets CPATH for iluvatar as well.
-      if [ -d /usr/local/cuda-10.2/include ]; then
-        export CPATH=/usr/local/cuda-10.2/include
-      fi
+    done
+    # Sweep /usr/local and /opt for any other dir shipping a CUDA-10.2
+    # libcudart (SONAME libcudart.so.10), in case corex lives elsewhere.
+    while IFS= read -r _cd; do
+      [ -n "$_cd" ] || continue
+      case ":$_libdirs:" in
+        *":$_cd:"*) ;;
+        *) _libdirs="$_libdirs$_cd:" ;;
+      esac
+    done < <(find /usr/local /opt -maxdepth 5 -name 'libcudart.so.10*' -type f 2>/dev/null | sed 's#/[^/]*$##' | sort -u)
+    for _cr in "${COREX_ROOT}" /usr/local/cuda-10.2; do
+      [ -n "$_cr" ] || continue
+      for _cd in "$_cr/lib64" "$_cr/lib"; do
+        if [ -d "$_cd" ]; then
+          case ":$_libdirs:" in *":$_cd:"*) ;; *) _libdirs="$_libdirs$_cd:" ;; esac
+        fi
+      done
+    done
+    _libdirs="${_libdirs%:}"
+    while [ -n "$_libdirs" ]; do
+      case "$_libdirs" in
+        *:*) _cd="${_libdirs%%:*}"; _libdirs="${_libdirs#*:}" ;;
+        *) _cd="$_libdirs"; _libdirs="" ;;
+      esac
+      case ":${LD_LIBRARY_PATH:-}:" in
+        *":$_cd:"*) ;;
+        *) export LD_LIBRARY_PATH="$_cd${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ;;
+      esac
+    done
+    # FlagGems backends.yaml sets CPATH for iluvatar as well.
+    if [ -d /usr/local/cuda-10.2/include ]; then
+      export CPATH=/usr/local/cuda-10.2/include
     fi
+    # Emit the resolved env as a workflow annotation so a CI failure can be
+    # diagnosed from the annotations alone (plain stdout of self-hosted runs
+    # is not fetchable without authentication).
+    if [ -n "${GITHUB_ACTIONS:-}" ]; then
+      echo "::warning title=iluvatar env::COREX_ROOT=${COREX_ROOT:-<none>}; LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-<empty>}"
+    fi
+    echo "COREX_ROOT=${COREX_ROOT:-<none>}"
+    echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-<empty>}"
     ;;
   ascend)
     if [ -f /usr/local/Ascend/cann/set_env.sh ]; then
