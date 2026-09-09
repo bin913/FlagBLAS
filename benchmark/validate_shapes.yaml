@@ -1,9 +1,0 @@
-# Validation shapes for the wave-tuned NN configs
-hgemm:
-  shapes:
-    - [2048, 2048, 2048]
-    - [2048, 12288, 4096]
-    - [2048, 11008, 4096]
-    - [8192, 256, 2048]
-    - [8192, 28672, 8192]
-  shape_desc: "M, N, K"

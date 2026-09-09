@@ -386,11 +386,9 @@ class Syr2Benchmark(Benchmark):
             y = torch.randn(n, dtype=cur_dtype, device=self.device)
             vendor_args = (
                 handle,
-                (
-                    (121 if self.uplo == CUBLAS_FILL_MODE_UPPER else 122)
-                    if IS_HYGON
-                    else ctypes.c_int(self.uplo)
-                ),
+                (121 if self.uplo == CUBLAS_FILL_MODE_UPPER else 122)
+                if IS_HYGON
+                else ctypes.c_int(self.uplo),
                 n if IS_HYGON else ctypes.c_int(n),
                 alpha_ptr,
                 ctypes.c_void_p(x.data_ptr()),
