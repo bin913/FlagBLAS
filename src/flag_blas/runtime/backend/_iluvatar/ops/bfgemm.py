@@ -42,29 +42,20 @@ def _bfgemm_kernel(
     ldb,
     ldc,
     BETA_IS_ZERO: tl.constexpr,
-<<<<<<< HEAD
-=======
     ALPHA_IS_ONE: tl.constexpr,
->>>>>>> iluvatar_gemm
     TRANS_A: tl.constexpr,
     TRANS_B: tl.constexpr,
     CHECK_BOUNDS: tl.constexpr,
     SKIP_FULL: tl.constexpr,
     FULL_GRID_M: tl.constexpr,
     FULL_GRID_N: tl.constexpr,
-<<<<<<< HEAD
-=======
     CACHE: tl.constexpr,
     N_MAJOR_ORDER: tl.constexpr,
->>>>>>> iluvatar_gemm
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
     GROUP_M: tl.constexpr,
-<<<<<<< HEAD
-=======
     UNROLL: tl.constexpr,
->>>>>>> iluvatar_gemm
 ):
     pid = tl.program_id(0)
     grid_m = tl.cdiv(m, BLOCK_M)
