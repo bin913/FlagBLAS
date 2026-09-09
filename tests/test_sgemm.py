@@ -25,6 +25,7 @@ from flag_blas.ops import CUBLAS_OP_N, CUBLAS_OP_T
 from . import accuracy_utils as utils
 from .conftest import TO_CPU
 
+
 # add iluvater test
 def cublas_sgemm_reference(
     transa, transb, m, n, k, alpha, A, lda, B, ldb, beta, C, ldc

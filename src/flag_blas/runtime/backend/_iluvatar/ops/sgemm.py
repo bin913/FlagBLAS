@@ -198,8 +198,12 @@ def _sgemm_tn_kernel(
             a_ptrs = a_ptr + offs_k[:, None] * lda + offs_m[None, :]
             b_ptrs = b_ptr + offs_k[:, None] * ldb + offs_n[None, :]
             mask_k = offs_k < k
-            a_t = tl.load(a_ptrs, mask=(mask_k[:, None] & (offs_m[None, :] < m)), other=0.0)
-            b = tl.load(b_ptrs, mask=(mask_k[:, None] & (offs_n[None, :] < n)), other=0.0)
+            a_t = tl.load(
+                a_ptrs, mask=(mask_k[:, None] & (offs_m[None, :] < m)), other=0.0
+            )
+            b = tl.load(
+                b_ptrs, mask=(mask_k[:, None] & (offs_n[None, :] < n)), other=0.0
+            )
             acc = tl.dot(tl.trans(a_t), b, acc, out_dtype=tl.float32, allow_tf32=False)
     else:
         for k_start in range(0, k, BLOCK_K):
@@ -276,8 +280,12 @@ def _sgemm_nt_kernel(
             mask_k = offs_k < k
             a_ptrs = a_ptr + offs_m[:, None] * lda + offs_k[None, :]
             b_ptrs = b_ptr + offs_n[:, None] * ldb + offs_k[None, :]
-            a = tl.load(a_ptrs, mask=((offs_m[:, None] < m) & mask_k[None, :]), other=0.0)
-            b_t = tl.load(b_ptrs, mask=((offs_n[:, None] < n) & mask_k[None, :]), other=0.0)
+            a = tl.load(
+                a_ptrs, mask=((offs_m[:, None] < m) & mask_k[None, :]), other=0.0
+            )
+            b_t = tl.load(
+                b_ptrs, mask=((offs_n[:, None] < n) & mask_k[None, :]), other=0.0
+            )
             acc = tl.dot(a, tl.trans(b_t), acc, out_dtype=tl.float32, allow_tf32=False)
     else:
         for k_start in range(0, k, BLOCK_K):
@@ -354,8 +362,12 @@ def _sgemm_tt_kernel(
             mask_k = offs_k < k
             a_ptrs = a_ptr + offs_k[:, None] * lda + offs_m[None, :]
             b_ptrs = b_ptr + offs_n[:, None] * ldb + offs_k[None, :]
-            a_t = tl.load(a_ptrs, mask=(mask_k[:, None] & (offs_m[None, :] < m)), other=0.0)
-            b_t = tl.load(b_ptrs, mask=((offs_n[:, None] < n) & mask_k[None, :]), other=0.0)
+            a_t = tl.load(
+                a_ptrs, mask=(mask_k[:, None] & (offs_m[None, :] < m)), other=0.0
+            )
+            b_t = tl.load(
+                b_ptrs, mask=((offs_n[:, None] < n) & mask_k[None, :]), other=0.0
+            )
             acc_t = tl.dot(b_t, a_t, acc_t, out_dtype=tl.float32, allow_tf32=False)
     else:
         for k_start in range(0, k, BLOCK_K):
@@ -430,13 +442,25 @@ def _sgemm_k_tail_kernel(
 
 
 def _select_sgemm_config(m: int, n: int, k: int, transa: int, transb: int):
-    if transa == CUBLAS_OP_T and transb == CUBLAS_OP_T and m == 4096 and n == 8192 and k == 28672:
+    if (
+        transa == CUBLAS_OP_T
+        and transb == CUBLAS_OP_T
+        and m == 4096
+        and n == 8192
+        and k == 28672
+    ):
         return 128, 128, 64, 16, 4
     if transa == CUBLAS_OP_T and transb == CUBLAS_OP_T and m == 128 and n >= 1024:
         return 128, 128, 64, 16, 4
     if transa == CUBLAS_OP_T and transb == CUBLAS_OP_T and n == 128 and m >= 1024:
         return 128, 128, 64, 16, 4
-    if transa == CUBLAS_OP_N and transb == CUBLAS_OP_T and m == 2048 and n == 2048 and k >= 8192:
+    if (
+        transa == CUBLAS_OP_N
+        and transb == CUBLAS_OP_T
+        and m == 2048
+        and n == 2048
+        and k >= 8192
+    ):
         return 128, 128, 64, 16, 4
     if transb == CUBLAS_OP_T and m == 128 and n >= 1024:
         return 128, 128, 64, 16, 4
@@ -467,7 +491,9 @@ def _select_sgemm_config(m: int, n: int, k: int, transa: int, transb: int):
     return 128, 128, 32, 8, 8
 
 
-def _can_use_fast_sgemm(m: int, n: int, k: int, block_m: int, block_n: int, block_k: int) -> bool:
+def _can_use_fast_sgemm(
+    m: int, n: int, k: int, block_m: int, block_n: int, block_k: int
+) -> bool:
     return (m % block_m == 0) and (n % block_n == 0) and (k % block_k == 0)
 
 
@@ -495,21 +521,60 @@ def _launch_sgemm(
     group_m: int,
     num_stages: int,
 ) -> None:
-    if not check_bounds and transa == CUBLAS_OP_T and transb == CUBLAS_OP_T and (
-        m == 4096 and n == 8192 and k == 28672
+    if (
+        not check_bounds
+        and transa == CUBLAS_OP_T
+        and transb == CUBLAS_OP_T
+        and (m == 4096 and n == 8192 and k == 28672)
     ):
         _sgemm_tt_kernel[grid](
-            A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero, False,
-            BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k, GROUP_M=group_m,
-            num_warps=num_warps, num_stages=num_stages,
+            A,
+            B,
+            C,
+            alpha,
+            beta,
+            m,
+            n,
+            k,
+            lda,
+            ldb,
+            ldc,
+            beta_is_zero,
+            False,
+            BLOCK_M=block_m,
+            BLOCK_N=block_n,
+            BLOCK_K=block_k,
+            GROUP_M=group_m,
+            num_warps=num_warps,
+            num_stages=num_stages,
         )
         return
     _sgemm_kernel[grid](
-        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero,
-        transa == CUBLAS_OP_T, transb == CUBLAS_OP_T, check_bounds, False, 0, 0,
+        A,
+        B,
+        C,
+        alpha,
+        beta,
+        m,
+        n,
+        k,
+        lda,
+        ldb,
+        ldc,
+        beta_is_zero,
+        transa == CUBLAS_OP_T,
+        transb == CUBLAS_OP_T,
+        check_bounds,
         False,
-        BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k, GROUP_M=group_m,
-        num_warps=num_warps, num_stages=num_stages,
+        0,
+        0,
+        False,
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        BLOCK_K=block_k,
+        GROUP_M=group_m,
+        num_warps=num_warps,
+        num_stages=num_stages,
     )
 
 
@@ -548,13 +613,17 @@ def sgemm(
             C.mul_(beta)
         return
 
-    block_m, block_n, block_k, num_warps, group_m = _select_sgemm_config(m, n, k, transa, transb)
+    block_m, block_n, block_k, num_warps, group_m = _select_sgemm_config(
+        m, n, k, transa, transb
+    )
     check_bounds = not _can_use_fast_sgemm(m, n, k, block_m, block_n, block_k)
     beta_is_zero = beta == 0.0
     trans_a = transa == CUBLAS_OP_T
     trans_b = transb == CUBLAS_OP_T
 
-    num_stages = 2 if (m == n == k and max(m, n, k) >= 4096) or (n == 128 and m >= 1024) else 3
+    num_stages = (
+        2 if (m == n == k and max(m, n, k) >= 4096) or (n == 128 and m >= 1024) else 3
+    )
 
     with torch_device_fn.device(A.device):
         if check_bounds and max(m, n, k) >= 2048:
@@ -574,15 +643,37 @@ def sgemm(
                 B_pad = F.pad(B, (0, padded_k - k, 0, padded_n - n))
                 ldb_pad = padded_k
             if beta_is_zero:
-                C_pad = torch.empty((padded_m, padded_n), device=C.device, dtype=C.dtype)
+                C_pad = torch.empty(
+                    (padded_m, padded_n), device=C.device, dtype=C.dtype
+                )
             else:
                 C_pad = F.pad(C, (0, padded_n - n, 0, padded_m - m))
-            grid_pad = (triton.cdiv(padded_m, block_m) * triton.cdiv(padded_n, block_n),)
+            grid_pad = (
+                triton.cdiv(padded_m, block_m) * triton.cdiv(padded_n, block_n),
+            )
             _launch_sgemm(
-                transa, transb, grid_pad, A_pad, B_pad, C_pad, alpha, beta,
-                padded_m, padded_n, padded_k, lda_pad, ldb_pad, padded_n,
-                beta_is_zero, False, block_m, block_n, block_k, num_warps,
-                group_m, num_stages,
+                transa,
+                transb,
+                grid_pad,
+                A_pad,
+                B_pad,
+                C_pad,
+                alpha,
+                beta,
+                padded_m,
+                padded_n,
+                padded_k,
+                lda_pad,
+                ldb_pad,
+                padded_n,
+                beta_is_zero,
+                False,
+                block_m,
+                block_n,
+                block_k,
+                num_warps,
+                group_m,
+                num_stages,
             )
             C.copy_(C_pad[:m, :n])
             return
@@ -597,34 +688,110 @@ def sgemm(
             if full_m > 0 and full_n > 0 and full_k > 0:
                 grid_full = (full_grid_m * full_grid_n,)
                 _sgemm_kernel[grid_full](
-                    A, B, C, alpha, beta, full_m, full_n, full_k, lda, ldb, ldc,
-                    beta_is_zero, trans_a, trans_b, False, False, 0, 0, False,
-                    BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k, GROUP_M=group_m,
-                    num_warps=num_warps, num_stages=num_stages,
+                    A,
+                    B,
+                    C,
+                    alpha,
+                    beta,
+                    full_m,
+                    full_n,
+                    full_k,
+                    lda,
+                    ldb,
+                    ldc,
+                    beta_is_zero,
+                    trans_a,
+                    trans_b,
+                    False,
+                    False,
+                    0,
+                    0,
+                    False,
+                    BLOCK_M=block_m,
+                    BLOCK_N=block_n,
+                    BLOCK_K=block_k,
+                    GROUP_M=group_m,
+                    num_warps=num_warps,
+                    num_stages=num_stages,
                 )
 
             if full_m > 0 and full_n > 0 and full_k < k:
                 grid_tail = (full_grid_m * full_grid_n,)
                 _sgemm_k_tail_kernel[grid_tail](
-                    A, B, C, alpha, full_m, full_n, k, lda, ldb, ldc, full_k,
-                    trans_a, trans_b,
-                    BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k, GROUP_M=group_m,
-                    num_warps=num_warps, num_stages=num_stages,
+                    A,
+                    B,
+                    C,
+                    alpha,
+                    full_m,
+                    full_n,
+                    k,
+                    lda,
+                    ldb,
+                    ldc,
+                    full_k,
+                    trans_a,
+                    trans_b,
+                    BLOCK_M=block_m,
+                    BLOCK_N=block_n,
+                    BLOCK_K=block_k,
+                    GROUP_M=group_m,
+                    num_warps=num_warps,
+                    num_stages=num_stages,
                 )
 
             if full_m < m or full_n < n:
                 grid_edge = (triton.cdiv(m, block_m) * triton.cdiv(n, block_n),)
                 _sgemm_kernel[grid_edge](
-                    A, B, C, alpha, beta, m, n, k, lda, ldb, ldc,
-                    beta_is_zero, trans_a, trans_b, True, True, full_grid_m, full_grid_n, False,
-                    BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k, GROUP_M=group_m,
-                    num_warps=num_warps, num_stages=num_stages,
+                    A,
+                    B,
+                    C,
+                    alpha,
+                    beta,
+                    m,
+                    n,
+                    k,
+                    lda,
+                    ldb,
+                    ldc,
+                    beta_is_zero,
+                    trans_a,
+                    trans_b,
+                    True,
+                    True,
+                    full_grid_m,
+                    full_grid_n,
+                    False,
+                    BLOCK_M=block_m,
+                    BLOCK_N=block_n,
+                    BLOCK_K=block_k,
+                    GROUP_M=group_m,
+                    num_warps=num_warps,
+                    num_stages=num_stages,
                 )
             return
 
         grid = (triton.cdiv(m, block_m) * triton.cdiv(n, block_n),)
         _launch_sgemm(
-            transa, transb, grid, A, B, C, alpha, beta, m, n, k, lda, ldb, ldc,
-            beta_is_zero, check_bounds, block_m, block_n, block_k, num_warps,
-            group_m, num_stages,
+            transa,
+            transb,
+            grid,
+            A,
+            B,
+            C,
+            alpha,
+            beta,
+            m,
+            n,
+            k,
+            lda,
+            ldb,
+            ldc,
+            beta_is_zero,
+            check_bounds,
+            block_m,
+            block_n,
+            block_k,
+            num_warps,
+            group_m,
+            num_stages,
         )

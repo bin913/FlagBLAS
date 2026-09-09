@@ -12,12 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .nrm2 import dnrm2, dznrm2, scnrm2, snrm2
-from .tbsv import stbsv
 from .bfgemm import bfgemm
 from .cgemm import cgemm
 from .hgemm import hgemm
+from .nrm2 import dnrm2, dznrm2, scnrm2, snrm2
 from .sgemm import sgemm
+from .tbsv import stbsv
 
 __all__ = [
     "stbsv",

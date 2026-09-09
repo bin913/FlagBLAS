@@ -99,8 +99,12 @@ def _hgemm_kernel(
                 a = tl.load(a_ptrs, cache_modifier=CACHE)
                 b = tl.load(b_ptrs, cache_modifier=CACHE)
             else:
-                a = tl.load(a_ptrs, mask=offs_m[:, None] < m, other=0.0, cache_modifier=CACHE)
-                b = tl.load(b_ptrs, mask=offs_n[None, :] < n, other=0.0, cache_modifier=CACHE)
+                a = tl.load(
+                    a_ptrs, mask=offs_m[:, None] < m, other=0.0, cache_modifier=CACHE
+                )
+                b = tl.load(
+                    b_ptrs, mask=offs_n[None, :] < n, other=0.0, cache_modifier=CACHE
+                )
             acc = tl.dot(a, b, acc, out_dtype=tl.float32, allow_tf32=False)
 
         if k_remainder > 0:
@@ -187,7 +191,6 @@ def _hgemm_kernel(
                 b = tl.load(b_ptrs, cache_modifier=CACHE)
                 acc = tl.dot(a, b, acc, out_dtype=tl.float32, allow_tf32=False)
 
-
     c_ptrs = c_ptr + offs_m[:, None] * ldc + offs_n[None, :]
     if ALPHA_IS_ONE:
         result = acc
@@ -233,17 +236,36 @@ def _hgemm_nn_2048_square_persistent_kernel(
         acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
         for k_start in tl.static_range(0, 2048, BLOCK_K):
             offs_k = k_start + offs_k_base
-            a = tl.load(a_ptr + offs_m[:, None] * 2048 + offs_k[None, :], cache_modifier=".cg")
-            b = tl.load(b_ptr + offs_k[:, None] * 2048 + offs_n[None, :], cache_modifier=".cg")
+            a = tl.load(
+                a_ptr + offs_m[:, None] * 2048 + offs_k[None, :], cache_modifier=".cg"
+            )
+            b = tl.load(
+                b_ptr + offs_k[:, None] * 2048 + offs_n[None, :], cache_modifier=".cg"
+            )
             acc = tl.dot(a, b, acc, out_dtype=tl.float32, allow_tf32=False)
         tl.store(c_ptr + offs_m[:, None] * 2048 + offs_n[None, :], acc.to(tl.float16))
 
 
 @triton.jit
 def _hgemm_nn_persistent_kernel(
-    a_ptr, b_ptr, c_ptr, alpha: tl.float32, m, n, k, lda, ldb, ldc,
-    NUM_SMS: tl.constexpr, GRID_STRIDE: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
-    BLOCK_K: tl.constexpr, GROUP_M: tl.constexpr, CACHE_MOD: tl.constexpr, TWO_STEP: tl.constexpr,
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    NUM_SMS: tl.constexpr,
+    GRID_STRIDE: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+    CACHE_MOD: tl.constexpr,
+    TWO_STEP: tl.constexpr,
 ):
     start_pid = tl.program_id(0)
     grid_m = tl.cdiv(m, BLOCK_M)
@@ -285,14 +307,32 @@ def _hgemm_nn_persistent_kernel(
             out = (alpha * acc).to(tl.float16)
             tl.store(c_ptr + offs_m[:, None] * ldc + offs_n[None, :], out)
         else:
-            tl.store(c_ptr + offs_m[:, None] * ldc + offs_n[None, :], (alpha * acc).to(tl.float16))
+            tl.store(
+                c_ptr + offs_m[:, None] * ldc + offs_n[None, :],
+                (alpha * acc).to(tl.float16),
+            )
 
 
 @triton.jit
 def _hgemm_nt_native_persistent_kernel(
-    a_ptr, b_ptr, c_ptr, alpha: tl.float32, m, n, k, lda, ldb, ldc,
-    NUM_SMS: tl.constexpr, GRID_STRIDE: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
-    BLOCK_K: tl.constexpr, GROUP_M: tl.constexpr, CACHE_MOD: tl.constexpr, TWO_STEP: tl.constexpr,
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    NUM_SMS: tl.constexpr,
+    GRID_STRIDE: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+    CACHE_MOD: tl.constexpr,
+    TWO_STEP: tl.constexpr,
 ):
     """Persistent NT kernel that reads B in its native (n, k) layout (ldb == k),
     i.e. C = A @ B^T without materializing B^T first. Same structure as the NN
@@ -335,15 +375,32 @@ def _hgemm_nt_native_persistent_kernel(
             out = (alpha * acc).to(tl.float16)
             tl.store(c_ptr + offs_m[:, None] * ldc + offs_n[None, :], out)
         else:
-            tl.store(c_ptr + offs_m[:, None] * ldc + offs_n[None, :], (alpha * acc).to(tl.float16))
+            tl.store(
+                c_ptr + offs_m[:, None] * ldc + offs_n[None, :],
+                (alpha * acc).to(tl.float16),
+            )
 
 
 @triton.jit
 def _hgemm_tntt_native_persistent_kernel(
-    a_ptr, b_ptr, c_ptr, alpha: tl.float32, m, n, k, lda, ldb, ldc,
-    NUM_SMS: tl.constexpr, GRID_STRIDE: tl.constexpr, BLOCK_M: tl.constexpr,
-    BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr, GROUP_M: tl.constexpr,
-    CACHE_MOD: tl.constexpr, LAYOUT: tl.constexpr,
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    NUM_SMS: tl.constexpr,
+    GRID_STRIDE: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+    CACHE_MOD: tl.constexpr,
+    LAYOUT: tl.constexpr,
 ):
     """Persistent TN/TT kernel for transa == T that reads A^T and B in their
     native row-major layouts (A is stored (k, m), lda == m), so neither the
@@ -395,16 +452,33 @@ def _hgemm_tntt_native_persistent_kernel(
             out = (alpha * acc).to(tl.float16)
             tl.store(c_ptr + offs_m[:, None] * ldc + offs_n[None, :], out)
         else:
-            tl.store(c_ptr + offs_m[:, None] * ldc + offs_n[None, :], (alpha * acc).to(tl.float16))
-
+            tl.store(
+                c_ptr + offs_m[:, None] * ldc + offs_n[None, :],
+                (alpha * acc).to(tl.float16),
+            )
 
 
 @triton.jit
 def _hgemm_nn_pipe_kernel(
-    a_ptr, b_ptr, c_ptr, alpha: tl.float32, m, n, k, lda, ldb, ldc,
-    NUM_SMS: tl.constexpr, GRID_STRIDE: tl.constexpr, BLOCK_M: tl.constexpr,
-    BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr, GROUP_M: tl.constexpr,
-    CACHE_MOD: tl.constexpr, NS: tl.constexpr, TWO_STEP: tl.constexpr,
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    NUM_SMS: tl.constexpr,
+    GRID_STRIDE: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+    CACHE_MOD: tl.constexpr,
+    NS: tl.constexpr,
+    TWO_STEP: tl.constexpr,
 ):
     # Persistent variant with an explicit software-pipelined K loop
     # (tl.range(..., num_stages=NS)). Found on GPU1 to beat the plain
@@ -449,7 +523,10 @@ def _hgemm_nn_pipe_kernel(
             out = (alpha * acc).to(tl.float16)
             tl.store(c_ptr + offs_m[:, None] * ldc + offs_n[None, :], out)
         else:
-            tl.store(c_ptr + offs_m[:, None] * ldc + offs_n[None, :], (alpha * acc).to(tl.float16))
+            tl.store(
+                c_ptr + offs_m[:, None] * ldc + offs_n[None, :],
+                (alpha * acc).to(tl.float16),
+            )
 
 
 @triton.jit
@@ -799,9 +876,21 @@ def _hgemm_nn_m2_blockptr_fast_kernel(
 
 @triton.jit
 def _hgemm_nn_descriptor_kernel(
-    a_ptr, b_ptr, c_ptr, alpha: tl.float32, beta: tl.float32,
-    m, n, k, lda, ldb, ldc, BETA_IS_ZERO: tl.constexpr,
-    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    alpha: tl.float32,
+    beta: tl.float32,
+    m,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
+    BETA_IS_ZERO: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
     GROUP_M: tl.constexpr,
 ):
     pid = tl.program_id(0)
@@ -885,7 +974,9 @@ def _hgemm_nn_splitk_kernel(
         )
         acc = tl.dot(a, b, acc, out_dtype=tl.float32, allow_tf32=False)
 
-    partial_ptrs = partial_ptr + split_id * m * n + offs_m[:, None] * n + offs_n[None, :]
+    partial_ptrs = (
+        partial_ptr + split_id * m * n + offs_m[:, None] * n + offs_n[None, :]
+    )
     tl.store(partial_ptrs, acc)
 
 
@@ -1221,8 +1312,6 @@ def _hgemm_nt_transpose_dot_persistent_kernel(
             acc_t = tl.dot(b, a, acc_t, out_dtype=tl.float32, allow_tf32=False)
         c_ptrs = c_ptr + offs_m[:, None] * ldc + offs_n[None, :]
         tl.store(c_ptrs, (alpha * tl.trans(acc_t)).to(tl.float16))
-
-
 
 
 def _select_hgemm_nn_descriptor_config(m: int, n: int, k: int):
@@ -1722,8 +1811,9 @@ def _select_hgemm_tt_native_persistent_config(m: int, n: int, k: int):
     return None
 
 
-
-def _can_use_fast_hgemm(m: int, n: int, k: int, block_m: int, block_n: int, block_k: int) -> bool:
+def _can_use_fast_hgemm(
+    m: int, n: int, k: int, block_m: int, block_n: int, block_k: int
+) -> bool:
     return (m % block_m == 0) and (n % block_n == 0) and (k % block_k == 0)
 
 
@@ -1761,7 +1851,9 @@ def _select_hgemm_nt_native_persistent_config(m: int, n: int, k: int):
     return None
 
 
-def _select_hgemm_n_major_order(m: int, n: int, k: int, transa: int, transb: int) -> bool:
+def _select_hgemm_n_major_order(
+    m: int, n: int, k: int, transa: int, transb: int
+) -> bool:
     if transa != CUBLAS_OP_N or transb != CUBLAS_OP_N:
         return False
     if m == 512 and n == 16384 and k == 4096:
@@ -1844,11 +1936,34 @@ def _launch_hgemm(
     n_major_order: bool = False,
 ) -> None:
     _hgemm_kernel[grid](
-        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero, alpha == 1.0,
-        transa == CUBLAS_OP_T, transb == CUBLAS_OP_T, check_bounds, False, 0, 0,
-        ".cg", n_major_order,
-        BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k, GROUP_M=group_m,
-        UNROLL=unroll, num_warps=num_warps, num_stages=num_stages,
+        A,
+        B,
+        C,
+        alpha,
+        beta,
+        m,
+        n,
+        k,
+        lda,
+        ldb,
+        ldc,
+        beta_is_zero,
+        alpha == 1.0,
+        transa == CUBLAS_OP_T,
+        transb == CUBLAS_OP_T,
+        check_bounds,
+        False,
+        0,
+        0,
+        ".cg",
+        n_major_order,
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        BLOCK_K=block_k,
+        GROUP_M=group_m,
+        UNROLL=unroll,
+        num_warps=num_warps,
+        num_stages=num_stages,
     )
 
 
@@ -1874,9 +1989,26 @@ def _launch_hgemm_nn_blockptr(
     n_major_order: bool = False,
 ) -> None:
     _hgemm_nn_blockptr_kernel[grid](
-        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta == 0.0, alpha == 1.0,
-        n_major_order, BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k,
-        GROUP_M=group_m, num_warps=num_warps, num_stages=num_stages,
+        A,
+        B,
+        C,
+        alpha,
+        beta,
+        m,
+        n,
+        k,
+        lda,
+        ldb,
+        ldc,
+        beta == 0.0,
+        alpha == 1.0,
+        n_major_order,
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        BLOCK_K=block_k,
+        GROUP_M=group_m,
+        num_warps=num_warps,
+        num_stages=num_stages,
     )
 
 
@@ -1902,9 +2034,26 @@ def _launch_hgemm_nn_blockptr_fast(
     n_major_order: bool = False,
 ) -> None:
     _hgemm_nn_blockptr_fast_kernel[grid](
-        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta == 0.0, alpha == 1.0,
-        n_major_order, BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k,
-        GROUP_M=group_m, num_warps=num_warps, num_stages=num_stages,
+        A,
+        B,
+        C,
+        alpha,
+        beta,
+        m,
+        n,
+        k,
+        lda,
+        ldb,
+        ldc,
+        beta == 0.0,
+        alpha == 1.0,
+        n_major_order,
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        BLOCK_K=block_k,
+        GROUP_M=group_m,
+        num_warps=num_warps,
+        num_stages=num_stages,
     )
 
 
@@ -1928,9 +2077,22 @@ def _launch_hgemm_nn_ab1_blockptr_fast(
     n_major_order: bool = False,
 ) -> None:
     _hgemm_nn_blockptr_ab1_kernel[grid](
-        A, B, C, m, n, k, lda, ldb, ldc, n_major_order,
-        BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k,
-        GROUP_M=group_m, num_warps=num_warps, num_stages=num_stages,
+        A,
+        B,
+        C,
+        m,
+        n,
+        k,
+        lda,
+        ldb,
+        ldc,
+        n_major_order,
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        BLOCK_K=block_k,
+        GROUP_M=group_m,
+        num_warps=num_warps,
+        num_stages=num_stages,
     )
 
 
@@ -1951,9 +2113,20 @@ def _launch_hgemm_nn_static_ab1(
     n_major_order: bool = False,
 ) -> None:
     _hgemm_nn_static_ab1_kernel[grid](
-        A, B, C, n_major_order, M=m, N=n, K=k,
-        BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k,
-        GROUP_M=group_m, LOOP_STAGES=num_stages, num_warps=num_warps, num_stages=num_stages,
+        A,
+        B,
+        C,
+        n_major_order,
+        M=m,
+        N=n,
+        K=k,
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        BLOCK_K=block_k,
+        GROUP_M=group_m,
+        LOOP_STAGES=num_stages,
+        num_warps=num_warps,
+        num_stages=num_stages,
     )
 
 
@@ -1979,9 +2152,26 @@ def _launch_hgemm_nn_m2_blockptr_fast(
     n_major_order: bool = False,
 ) -> None:
     _hgemm_nn_m2_blockptr_fast_kernel[grid](
-        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta == 0.0, alpha == 1.0,
-        n_major_order, BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k,
-        GROUP_M=group_m, num_warps=num_warps, num_stages=num_stages,
+        A,
+        B,
+        C,
+        alpha,
+        beta,
+        m,
+        n,
+        k,
+        lda,
+        ldb,
+        ldc,
+        beta == 0.0,
+        alpha == 1.0,
+        n_major_order,
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        BLOCK_K=block_k,
+        GROUP_M=group_m,
+        num_warps=num_warps,
+        num_stages=num_stages,
     )
 
 
@@ -2006,9 +2196,24 @@ def _launch_hgemm_nn_descriptor(
     num_stages: int,
 ) -> None:
     _hgemm_nn_descriptor_kernel[grid](
-        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta == 0.0,
-        BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k, GROUP_M=group_m,
-        num_warps=num_warps, num_stages=num_stages,
+        A,
+        B,
+        C,
+        alpha,
+        beta,
+        m,
+        n,
+        k,
+        lda,
+        ldb,
+        ldc,
+        beta == 0.0,
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        BLOCK_K=block_k,
+        GROUP_M=group_m,
+        num_warps=num_warps,
+        num_stages=num_stages,
     )
 
 
@@ -2036,10 +2241,26 @@ def _launch_hgemm_nn_persistent(
     two_step: bool = True,
 ) -> None:
     _hgemm_nn_persistent_kernel[grid](
-        A, B, C, alpha, m, n, k, lda, ldb, ldc, NUM_SMS=num_sms, GRID_STRIDE=grid_stride,
-        BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k, GROUP_M=group_m,
-        CACHE_MOD=cache_mod, TWO_STEP=two_step,
-        num_warps=num_warps, num_stages=num_stages,
+        A,
+        B,
+        C,
+        alpha,
+        m,
+        n,
+        k,
+        lda,
+        ldb,
+        ldc,
+        NUM_SMS=num_sms,
+        GRID_STRIDE=grid_stride,
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        BLOCK_K=block_k,
+        GROUP_M=group_m,
+        CACHE_MOD=cache_mod,
+        TWO_STEP=two_step,
+        num_warps=num_warps,
+        num_stages=num_stages,
     )
 
 
@@ -2067,10 +2288,26 @@ def _launch_hgemm_nt_native_persistent(
     two_step: bool = True,
 ) -> None:
     _hgemm_nt_native_persistent_kernel[grid](
-        A, B, C, alpha, m, n, k, lda, ldb, ldc, NUM_SMS=num_sms, GRID_STRIDE=grid_stride,
-        BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k, GROUP_M=group_m,
-        CACHE_MOD=cache_mod, TWO_STEP=two_step,
-        num_warps=num_warps, num_stages=num_stages,
+        A,
+        B,
+        C,
+        alpha,
+        m,
+        n,
+        k,
+        lda,
+        ldb,
+        ldc,
+        NUM_SMS=num_sms,
+        GRID_STRIDE=grid_stride,
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        BLOCK_K=block_k,
+        GROUP_M=group_m,
+        CACHE_MOD=cache_mod,
+        TWO_STEP=two_step,
+        num_warps=num_warps,
+        num_stages=num_stages,
     )
 
 
@@ -2097,10 +2334,26 @@ def _launch_hgemm_tn_native_persistent(
     cache_mod: int = 0,
 ) -> None:
     _hgemm_tntt_native_persistent_kernel[grid](
-        A, B, C, alpha, m, n, k, lda, ldb, ldc, NUM_SMS=num_sms, GRID_STRIDE=grid_stride,
-        BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k, GROUP_M=group_m,
-        CACHE_MOD=cache_mod, LAYOUT=0,
-        num_warps=num_warps, num_stages=num_stages,
+        A,
+        B,
+        C,
+        alpha,
+        m,
+        n,
+        k,
+        lda,
+        ldb,
+        ldc,
+        NUM_SMS=num_sms,
+        GRID_STRIDE=grid_stride,
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        BLOCK_K=block_k,
+        GROUP_M=group_m,
+        CACHE_MOD=cache_mod,
+        LAYOUT=0,
+        num_warps=num_warps,
+        num_stages=num_stages,
     )
 
 
@@ -2127,12 +2380,27 @@ def _launch_hgemm_tt_native_persistent(
     cache_mod: int = 0,
 ) -> None:
     _hgemm_tntt_native_persistent_kernel[grid](
-        A, B, C, alpha, m, n, k, lda, ldb, ldc, NUM_SMS=num_sms, GRID_STRIDE=grid_stride,
-        BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k, GROUP_M=group_m,
-        CACHE_MOD=cache_mod, LAYOUT=1,
-        num_warps=num_warps, num_stages=num_stages,
+        A,
+        B,
+        C,
+        alpha,
+        m,
+        n,
+        k,
+        lda,
+        ldb,
+        ldc,
+        NUM_SMS=num_sms,
+        GRID_STRIDE=grid_stride,
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        BLOCK_K=block_k,
+        GROUP_M=group_m,
+        CACHE_MOD=cache_mod,
+        LAYOUT=1,
+        num_warps=num_warps,
+        num_stages=num_stages,
     )
-
 
 
 def _launch_hgemm_nn_pipe(
@@ -2159,10 +2427,27 @@ def _launch_hgemm_nn_pipe(
     two_step: bool = True,
 ) -> None:
     _hgemm_nn_pipe_kernel[grid](
-        A, B, C, alpha, m, n, k, lda, ldb, ldc, NUM_SMS=num_sms, GRID_STRIDE=grid_stride,
-        BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k, GROUP_M=group_m,
-        CACHE_MOD=cache_mod, NS=num_pipe_stages, TWO_STEP=two_step,
-        num_warps=num_warps, num_stages=3,
+        A,
+        B,
+        C,
+        alpha,
+        m,
+        n,
+        k,
+        lda,
+        ldb,
+        ldc,
+        NUM_SMS=num_sms,
+        GRID_STRIDE=grid_stride,
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        BLOCK_K=block_k,
+        GROUP_M=group_m,
+        CACHE_MOD=cache_mod,
+        NS=num_pipe_stages,
+        TWO_STEP=two_step,
+        num_warps=num_warps,
+        num_stages=3,
     )
 
 
@@ -2180,9 +2465,16 @@ def _launch_hgemm_nn_2048_square_persistent(
     grid_stride: int,
 ) -> None:
     _hgemm_nn_2048_square_persistent_kernel[grid](
-        A, B, C, GRID_STRIDE=grid_stride,
-        BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k, GROUP_M=group_m,
-        num_warps=num_warps, num_stages=num_stages,
+        A,
+        B,
+        C,
+        GRID_STRIDE=grid_stride,
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        BLOCK_K=block_k,
+        GROUP_M=group_m,
+        num_warps=num_warps,
+        num_stages=num_stages,
     )
 
 
@@ -2211,15 +2503,35 @@ def _launch_hgemm_nn_splitk(
     partial = torch.empty((split_k, m, n), device=C.device, dtype=torch.float32)
     k_tiles_per_split = k // (block_k * split_k)
     _hgemm_nn_splitk_kernel[grid](
-        A, B, partial, m, n, k, lda, ldb,
-        BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k, GROUP_M=group_m,
-        K_TILES_PER_SPLIT=k_tiles_per_split, N_MAJOR_ORDER=n_major_order,
-        num_warps=num_warps, num_stages=num_stages,
+        A,
+        B,
+        partial,
+        m,
+        n,
+        k,
+        lda,
+        ldb,
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        BLOCK_K=block_k,
+        GROUP_M=group_m,
+        K_TILES_PER_SPLIT=k_tiles_per_split,
+        N_MAJOR_ORDER=n_major_order,
+        num_warps=num_warps,
+        num_stages=num_stages,
     )
     _hgemm_nn_splitk_reduce_kernel[reduce_grid](
-        partial, C, alpha, m, n, ldc,
-        BLOCK_M=block_m, BLOCK_N=block_n, SPLIT_K=split_k,
-        num_warps=num_warps, num_stages=1,
+        partial,
+        C,
+        alpha,
+        m,
+        n,
+        ldc,
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        SPLIT_K=split_k,
+        num_warps=num_warps,
+        num_stages=1,
     )
 
 
@@ -2245,10 +2557,26 @@ def _launch_hgemm_tt_transpose_dot(
     num_stages: int,
 ) -> None:
     _hgemm_tt_transpose_dot_kernel[grid](
-        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero,
-        ALPHA_IS_ONE=alpha == 1.0, CACHE=".cg",
-        BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k, GROUP_M=group_m,
-        num_warps=num_warps, num_stages=num_stages,
+        A,
+        B,
+        C,
+        alpha,
+        beta,
+        m,
+        n,
+        k,
+        lda,
+        ldb,
+        ldc,
+        beta_is_zero,
+        ALPHA_IS_ONE=alpha == 1.0,
+        CACHE=".cg",
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        BLOCK_K=block_k,
+        GROUP_M=group_m,
+        num_warps=num_warps,
+        num_stages=num_stages,
     )
 
 
@@ -2274,10 +2602,26 @@ def _launch_hgemm_tn_transpose_dot(
     num_stages: int,
 ) -> None:
     _hgemm_tn_transpose_dot_kernel[grid](
-        A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero,
-        ALPHA_IS_ONE=alpha == 1.0, CACHE=".cg",
-        BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k, GROUP_M=group_m,
-        num_warps=num_warps, num_stages=num_stages,
+        A,
+        B,
+        C,
+        alpha,
+        beta,
+        m,
+        n,
+        k,
+        lda,
+        ldb,
+        ldc,
+        beta_is_zero,
+        ALPHA_IS_ONE=alpha == 1.0,
+        CACHE=".cg",
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        BLOCK_K=block_k,
+        GROUP_M=group_m,
+        num_warps=num_warps,
+        num_stages=num_stages,
     )
 
 
@@ -2303,10 +2647,25 @@ def _launch_hgemm_tn_transpose_dot_persistent(
     cache_mod: int,
 ) -> None:
     _hgemm_tn_transpose_dot_persistent_kernel[grid](
-        A, B, C, alpha, m, n, k, lda, ldb, ldc, NUM_SMS=num_sms,
-        GRID_STRIDE=grid_stride, BLOCK_M=block_m, BLOCK_N=block_n,
-        BLOCK_K=block_k, GROUP_M=group_m, CACHE_MOD=cache_mod,
-        num_warps=num_warps, num_stages=1,
+        A,
+        B,
+        C,
+        alpha,
+        m,
+        n,
+        k,
+        lda,
+        ldb,
+        ldc,
+        NUM_SMS=num_sms,
+        GRID_STRIDE=grid_stride,
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        BLOCK_K=block_k,
+        GROUP_M=group_m,
+        CACHE_MOD=cache_mod,
+        num_warps=num_warps,
+        num_stages=1,
     )
 
 
@@ -2332,10 +2691,25 @@ def _launch_hgemm_tt_transpose_dot_persistent(
     cache_mod: int,
 ) -> None:
     _hgemm_tt_transpose_dot_persistent_kernel[grid](
-        A, B, C, alpha, m, n, k, lda, ldb, ldc, NUM_SMS=num_sms,
-        GRID_STRIDE=grid_stride, BLOCK_M=block_m, BLOCK_N=block_n,
-        BLOCK_K=block_k, GROUP_M=group_m, CACHE_MOD=cache_mod,
-        num_warps=num_warps, num_stages=1,
+        A,
+        B,
+        C,
+        alpha,
+        m,
+        n,
+        k,
+        lda,
+        ldb,
+        ldc,
+        NUM_SMS=num_sms,
+        GRID_STRIDE=grid_stride,
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        BLOCK_K=block_k,
+        GROUP_M=group_m,
+        CACHE_MOD=cache_mod,
+        num_warps=num_warps,
+        num_stages=1,
     )
 
 
@@ -2361,10 +2735,25 @@ def _launch_hgemm_nt_transpose_dot_persistent(
     cache_mod: int,
 ) -> None:
     _hgemm_nt_transpose_dot_persistent_kernel[grid](
-        A, B, C, alpha, m, n, k, lda, ldb, ldc, NUM_SMS=num_sms,
-        GRID_STRIDE=grid_stride, BLOCK_M=block_m, BLOCK_N=block_n,
-        BLOCK_K=block_k, GROUP_M=group_m, CACHE_MOD=cache_mod,
-        num_warps=num_warps, num_stages=1,
+        A,
+        B,
+        C,
+        alpha,
+        m,
+        n,
+        k,
+        lda,
+        ldb,
+        ldc,
+        NUM_SMS=num_sms,
+        GRID_STRIDE=grid_stride,
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        BLOCK_K=block_k,
+        GROUP_M=group_m,
+        CACHE_MOD=cache_mod,
+        num_warps=num_warps,
+        num_stages=1,
     )
 
 
@@ -2430,64 +2819,163 @@ def hgemm(
         native_persistent_config = _select_hgemm_tt_native_persistent_config(m, n, k)
     if native_persistent_config is not None:
         (
-            block_m, block_n, block_k, num_warps, group_m, num_stages, wave_count, cache_mod,
+            block_m,
+            block_n,
+            block_k,
+            num_warps,
+            group_m,
+            num_stages,
+            wave_count,
+            cache_mod,
         ) = native_persistent_config
         ldb_ok = (ldb == n) if transb == CUBLAS_OP_N else (ldb == k)
-        if beta_is_zero and lda == m and ldb_ok and _can_use_fast_hgemm(
-                m, n, k, block_m, block_n, block_k):
+        if (
+            beta_is_zero
+            and lda == m
+            and ldb_ok
+            and _can_use_fast_hgemm(m, n, k, block_m, block_n, block_k)
+        ):
             num_sms = torch.cuda.get_device_properties(A.device).multi_processor_count
             grid_stride = num_sms * wave_count
-            grid = (min(grid_stride, triton.cdiv(m, block_m) * triton.cdiv(n, block_n)),)
+            grid = (
+                min(grid_stride, triton.cdiv(m, block_m) * triton.cdiv(n, block_n)),
+            )
             with torch_device_fn.device(A.device):
                 if transb == CUBLAS_OP_T:
                     _launch_hgemm_tt_native_persistent(
-                        grid, A, B, C, alpha, m, n, k, lda, ldb, ldc,
-                        block_m, block_n, block_k, num_warps, group_m,
-                        num_stages, num_sms, grid_stride, cache_mod,
+                        grid,
+                        A,
+                        B,
+                        C,
+                        alpha,
+                        m,
+                        n,
+                        k,
+                        lda,
+                        ldb,
+                        ldc,
+                        block_m,
+                        block_n,
+                        block_k,
+                        num_warps,
+                        group_m,
+                        num_stages,
+                        num_sms,
+                        grid_stride,
+                        cache_mod,
                     )
                 else:
                     _launch_hgemm_tn_native_persistent(
-                        grid, A, B, C, alpha, m, n, k, lda, ldb, ldc,
-                        block_m, block_n, block_k, num_warps, group_m,
-                        num_stages, num_sms, grid_stride, cache_mod,
+                        grid,
+                        A,
+                        B,
+                        C,
+                        alpha,
+                        m,
+                        n,
+                        k,
+                        lda,
+                        ldb,
+                        ldc,
+                        block_m,
+                        block_n,
+                        block_k,
+                        num_warps,
+                        group_m,
+                        num_stages,
+                        num_sms,
+                        grid_stride,
+                        cache_mod,
                     )
             return
 
     tn_td_persistent_config = None
     if transa == CUBLAS_OP_T and transb == CUBLAS_OP_N:
-        tn_td_persistent_config = _select_hgemm_tn_transpose_dot_persistent_config(m, n, k)
+        tn_td_persistent_config = _select_hgemm_tn_transpose_dot_persistent_config(
+            m, n, k
+        )
     if tn_td_persistent_config is not None:
         (
-            block_m, block_n, block_k, num_warps, group_m, wave_count, cache_mod,
+            block_m,
+            block_n,
+            block_k,
+            num_warps,
+            group_m,
+            wave_count,
+            cache_mod,
         ) = tn_td_persistent_config
         if beta_is_zero and _can_use_fast_hgemm(m, n, k, block_m, block_n, block_k):
             num_sms = torch.cuda.get_device_properties(A.device).multi_processor_count
             grid_stride = num_sms * wave_count
-            grid = (min(grid_stride, triton.cdiv(m, block_m) * triton.cdiv(n, block_n)),)
+            grid = (
+                min(grid_stride, triton.cdiv(m, block_m) * triton.cdiv(n, block_n)),
+            )
             with torch_device_fn.device(A.device):
                 _launch_hgemm_tn_transpose_dot_persistent(
-                    grid, A, B, C, alpha, m, n, k, lda, ldb, ldc,
-                    block_m, block_n, block_k, num_warps, group_m, num_sms,
-                    grid_stride, cache_mod,
+                    grid,
+                    A,
+                    B,
+                    C,
+                    alpha,
+                    m,
+                    n,
+                    k,
+                    lda,
+                    ldb,
+                    ldc,
+                    block_m,
+                    block_n,
+                    block_k,
+                    num_warps,
+                    group_m,
+                    num_sms,
+                    grid_stride,
+                    cache_mod,
                 )
             return
 
     tt_td_persistent_config = None
     if transa == CUBLAS_OP_T and transb == CUBLAS_OP_T:
-        tt_td_persistent_config = _select_hgemm_tt_transpose_dot_persistent_config(m, n, k)
+        tt_td_persistent_config = _select_hgemm_tt_transpose_dot_persistent_config(
+            m, n, k
+        )
     if tt_td_persistent_config is not None:
         (
-            block_m, block_n, block_k, num_warps, group_m, wave_count, cache_mod,
+            block_m,
+            block_n,
+            block_k,
+            num_warps,
+            group_m,
+            wave_count,
+            cache_mod,
         ) = tt_td_persistent_config
         if beta_is_zero and _can_use_fast_hgemm(m, n, k, block_m, block_n, block_k):
             num_sms = torch.cuda.get_device_properties(A.device).multi_processor_count
             grid_stride = num_sms * wave_count
-            grid = (min(grid_stride, triton.cdiv(m, block_m) * triton.cdiv(n, block_n)),)
+            grid = (
+                min(grid_stride, triton.cdiv(m, block_m) * triton.cdiv(n, block_n)),
+            )
             with torch_device_fn.device(A.device):
                 _launch_hgemm_tt_transpose_dot_persistent(
-                    grid, A, B, C, alpha, m, n, k, lda, ldb, ldc,
-                    block_m, block_n, block_k, num_warps, group_m, num_sms,
-                    grid_stride, cache_mod,
+                    grid,
+                    A,
+                    B,
+                    C,
+                    alpha,
+                    m,
+                    n,
+                    k,
+                    lda,
+                    ldb,
+                    ldc,
+                    block_m,
+                    block_n,
+                    block_k,
+                    num_warps,
+                    group_m,
+                    num_sms,
+                    grid_stride,
+                    cache_mod,
                 )
             return
 
@@ -2499,36 +2987,92 @@ def hgemm(
         nt_native_persistent_config = _select_hgemm_nt_native_persistent_config(m, n, k)
     if nt_native_persistent_config is not None:
         (
-            block_m, block_n, block_k, num_warps, group_m, num_stages, wave_count, cache_mod,
+            block_m,
+            block_n,
+            block_k,
+            num_warps,
+            group_m,
+            num_stages,
+            wave_count,
+            cache_mod,
         ) = nt_native_persistent_config
-        if beta_is_zero and ldb == k and _can_use_fast_hgemm(m, n, k, block_m, block_n, block_k):
+        if (
+            beta_is_zero
+            and ldb == k
+            and _can_use_fast_hgemm(m, n, k, block_m, block_n, block_k)
+        ):
             num_sms = torch.cuda.get_device_properties(A.device).multi_processor_count
             grid_stride = num_sms * wave_count
-            grid = (min(grid_stride, triton.cdiv(m, block_m) * triton.cdiv(n, block_n)),)
+            grid = (
+                min(grid_stride, triton.cdiv(m, block_m) * triton.cdiv(n, block_n)),
+            )
             with torch_device_fn.device(A.device):
                 _launch_hgemm_nt_native_persistent(
-                    grid, A, B, C, alpha, m, n, k, lda, ldb, ldc,
-                    block_m, block_n, block_k, num_warps, group_m, num_stages,
-                    num_sms, grid_stride, cache_mod,
+                    grid,
+                    A,
+                    B,
+                    C,
+                    alpha,
+                    m,
+                    n,
+                    k,
+                    lda,
+                    ldb,
+                    ldc,
+                    block_m,
+                    block_n,
+                    block_k,
+                    num_warps,
+                    group_m,
+                    num_stages,
+                    num_sms,
+                    grid_stride,
+                    cache_mod,
                 )
             return
 
     nt_td_persistent_config = None
     if transa == CUBLAS_OP_N and transb == CUBLAS_OP_T:
-        nt_td_persistent_config = _select_hgemm_nt_transpose_dot_persistent_config(m, n, k)
+        nt_td_persistent_config = _select_hgemm_nt_transpose_dot_persistent_config(
+            m, n, k
+        )
     if nt_td_persistent_config is not None:
         (
-            block_m, block_n, block_k, num_warps, group_m, wave_count, cache_mod,
+            block_m,
+            block_n,
+            block_k,
+            num_warps,
+            group_m,
+            wave_count,
+            cache_mod,
         ) = nt_td_persistent_config
         if beta_is_zero and _can_use_fast_hgemm(m, n, k, block_m, block_n, block_k):
             num_sms = torch.cuda.get_device_properties(A.device).multi_processor_count
             grid_stride = num_sms * wave_count
-            grid = (min(grid_stride, triton.cdiv(m, block_m) * triton.cdiv(n, block_n)),)
+            grid = (
+                min(grid_stride, triton.cdiv(m, block_m) * triton.cdiv(n, block_n)),
+            )
             with torch_device_fn.device(A.device):
                 _launch_hgemm_nt_transpose_dot_persistent(
-                    grid, A, B, C, alpha, m, n, k, lda, ldb, ldc,
-                    block_m, block_n, block_k, num_warps, group_m, num_sms,
-                    grid_stride, cache_mod,
+                    grid,
+                    A,
+                    B,
+                    C,
+                    alpha,
+                    m,
+                    n,
+                    k,
+                    lda,
+                    ldb,
+                    ldc,
+                    block_m,
+                    block_n,
+                    block_k,
+                    num_warps,
+                    group_m,
+                    num_sms,
+                    grid_stride,
+                    cache_mod,
                 )
             return
 
@@ -2555,14 +3099,32 @@ def hgemm(
     if transa == CUBLAS_OP_T and transb == CUBLAS_OP_T:
         tt_transpose_dot_config = _select_hgemm_tt_transpose_dot_config(m, n, k)
     if tt_transpose_dot_config is not None:
-        block_m, block_n, block_k, num_warps, group_m, num_stages = tt_transpose_dot_config
+        block_m, block_n, block_k, num_warps, group_m, num_stages = (
+            tt_transpose_dot_config
+        )
         if _can_use_fast_hgemm(m, n, k, block_m, block_n, block_k):
             grid = (triton.cdiv(m, block_m) * triton.cdiv(n, block_n),)
             with torch_device_fn.device(A.device):
                 _launch_hgemm_tt_transpose_dot(
-                    grid, A, B, C, alpha, beta, m, n, k, lda, ldb, ldc,
-                    beta_is_zero, block_m, block_n, block_k, num_warps,
-                    group_m, num_stages,
+                    grid,
+                    A,
+                    B,
+                    C,
+                    alpha,
+                    beta,
+                    m,
+                    n,
+                    k,
+                    lda,
+                    ldb,
+                    ldc,
+                    beta_is_zero,
+                    block_m,
+                    block_n,
+                    block_k,
+                    num_warps,
+                    group_m,
+                    num_stages,
                 )
             return
 
@@ -2570,14 +3132,32 @@ def hgemm(
     if transa == CUBLAS_OP_T and transb == CUBLAS_OP_N:
         tn_transpose_dot_config = _select_hgemm_tn_transpose_dot_config(m, n, k)
     if tn_transpose_dot_config is not None:
-        block_m, block_n, block_k, num_warps, group_m, num_stages = tn_transpose_dot_config
+        block_m, block_n, block_k, num_warps, group_m, num_stages = (
+            tn_transpose_dot_config
+        )
         if _can_use_fast_hgemm(m, n, k, block_m, block_n, block_k):
             grid = (triton.cdiv(m, block_m) * triton.cdiv(n, block_n),)
             with torch_device_fn.device(A.device):
                 _launch_hgemm_tn_transpose_dot(
-                    grid, A, B, C, alpha, beta, m, n, k, lda, ldb, ldc,
-                    beta_is_zero, block_m, block_n, block_k, num_warps,
-                    group_m, num_stages,
+                    grid,
+                    A,
+                    B,
+                    C,
+                    alpha,
+                    beta,
+                    m,
+                    n,
+                    k,
+                    lda,
+                    ldb,
+                    ldc,
+                    beta_is_zero,
+                    block_m,
+                    block_n,
+                    block_k,
+                    num_warps,
+                    group_m,
+                    num_stages,
                 )
             return
 
@@ -2591,22 +3171,43 @@ def hgemm(
         and ldb == n
         and ldc == n
     ):
-        nn_square_persistent_config = _select_hgemm_nn_2048_square_persistent_config(m, n, k)
+        nn_square_persistent_config = _select_hgemm_nn_2048_square_persistent_config(
+            m, n, k
+        )
     if nn_square_persistent_config is not None:
-        block_m, block_n, block_k, num_warps, group_m, num_stages, wave_count = nn_square_persistent_config
+        block_m, block_n, block_k, num_warps, group_m, num_stages, wave_count = (
+            nn_square_persistent_config
+        )
         if _can_use_fast_hgemm(m, n, k, block_m, block_n, block_k):
             num_sms = torch.cuda.get_device_properties(A.device).multi_processor_count
             grid_stride = num_sms * wave_count
-            grid = (min(grid_stride, triton.cdiv(m, block_m) * triton.cdiv(n, block_n)),)
+            grid = (
+                min(grid_stride, triton.cdiv(m, block_m) * triton.cdiv(n, block_n)),
+            )
             with torch_device_fn.device(A.device):
                 _launch_hgemm_nn_2048_square_persistent(
-                    grid, A, B, C, block_m, block_n, block_k,
-                    num_warps, group_m, num_stages, grid_stride,
+                    grid,
+                    A,
+                    B,
+                    C,
+                    block_m,
+                    block_n,
+                    block_k,
+                    num_warps,
+                    group_m,
+                    num_stages,
+                    grid_stride,
                 )
             return
 
     nn_descriptor_config = None
-    if transa == CUBLAS_OP_N and transb == CUBLAS_OP_N and lda == k and ldb == n and ldc == n:
+    if (
+        transa == CUBLAS_OP_N
+        and transb == CUBLAS_OP_N
+        and lda == k
+        and ldb == n
+        and ldc == n
+    ):
         nn_descriptor_config = _select_hgemm_nn_descriptor_config(m, n, k)
     if nn_descriptor_config is not None:
         block_m, block_n, block_k, num_warps, group_m, num_stages = nn_descriptor_config
@@ -2614,25 +3215,76 @@ def hgemm(
             grid = (triton.cdiv(m, block_m) * triton.cdiv(n, block_n),)
             with torch_device_fn.device(A.device):
                 _launch_hgemm_nn_descriptor(
-                    grid, A, B, C, alpha, beta, m, n, k, lda, ldb, ldc,
-                    block_m, block_n, block_k, num_warps, group_m, num_stages,
+                    grid,
+                    A,
+                    B,
+                    C,
+                    alpha,
+                    beta,
+                    m,
+                    n,
+                    k,
+                    lda,
+                    ldb,
+                    ldc,
+                    block_m,
+                    block_n,
+                    block_k,
+                    num_warps,
+                    group_m,
+                    num_stages,
                 )
             return
 
     nn_pipe_config = None
-    if transa == CUBLAS_OP_N and transb == CUBLAS_OP_N and beta_is_zero and lda == k and ldb == n and ldc == n:
+    if (
+        transa == CUBLAS_OP_N
+        and transb == CUBLAS_OP_N
+        and beta_is_zero
+        and lda == k
+        and ldb == n
+        and ldc == n
+    ):
         nn_pipe_config = _select_hgemm_nn_pipe_config(m, n, k)
     if nn_pipe_config is not None:
-        block_m, block_n, block_k, num_warps, group_m, wave_count, cache_mod, pipe_stages = nn_pipe_config
+        (
+            block_m,
+            block_n,
+            block_k,
+            num_warps,
+            group_m,
+            wave_count,
+            cache_mod,
+            pipe_stages,
+        ) = nn_pipe_config
         if _can_use_fast_hgemm(m, n, k, block_m, block_n, block_k):
             num_sms = torch.cuda.get_device_properties(A.device).multi_processor_count
             grid_stride = num_sms * wave_count
-            grid = (min(grid_stride, triton.cdiv(m, block_m) * triton.cdiv(n, block_n)),)
+            grid = (
+                min(grid_stride, triton.cdiv(m, block_m) * triton.cdiv(n, block_n)),
+            )
             with torch_device_fn.device(A.device):
                 _launch_hgemm_nn_pipe(
-                    grid, A, B, C, alpha, m, n, k, lda, ldb, ldc,
-                    block_m, block_n, block_k, num_warps, group_m,
-                    num_sms, grid_stride, cache_mod, pipe_stages,
+                    grid,
+                    A,
+                    B,
+                    C,
+                    alpha,
+                    m,
+                    n,
+                    k,
+                    lda,
+                    ldb,
+                    ldc,
+                    block_m,
+                    block_n,
+                    block_k,
+                    num_warps,
+                    group_m,
+                    num_sms,
+                    grid_stride,
+                    cache_mod,
+                    pipe_stages,
                     # Two-step store regressed 16384^3 in the same-process A/B
                     # (chained 0.953 vs two-step 0.905), so keep chained there.
                     two_step=not (m == 16384 and n == 16384 and k == 16384),
@@ -2640,19 +3292,54 @@ def hgemm(
             return
 
     nn_persistent_config = None
-    if transa == CUBLAS_OP_N and transb == CUBLAS_OP_N and beta_is_zero and lda == k and ldb == n and ldc == n:
+    if (
+        transa == CUBLAS_OP_N
+        and transb == CUBLAS_OP_N
+        and beta_is_zero
+        and lda == k
+        and ldb == n
+        and ldc == n
+    ):
         nn_persistent_config = _select_hgemm_nn_persistent_config(m, n, k)
     if nn_persistent_config is not None:
-        block_m, block_n, block_k, num_warps, group_m, num_stages, wave_count, cache_mod = nn_persistent_config
+        (
+            block_m,
+            block_n,
+            block_k,
+            num_warps,
+            group_m,
+            num_stages,
+            wave_count,
+            cache_mod,
+        ) = nn_persistent_config
         if _can_use_fast_hgemm(m, n, k, block_m, block_n, block_k):
             num_sms = torch.cuda.get_device_properties(A.device).multi_processor_count
             grid_stride = num_sms * wave_count
-            grid = (min(grid_stride, triton.cdiv(m, block_m) * triton.cdiv(n, block_n)),)
+            grid = (
+                min(grid_stride, triton.cdiv(m, block_m) * triton.cdiv(n, block_n)),
+            )
             with torch_device_fn.device(A.device):
                 _launch_hgemm_nn_persistent(
-                    grid, A, B, C, alpha, m, n, k, lda, ldb, ldc,
-                    block_m, block_n, block_k, num_warps, group_m, num_stages,
-                    num_sms, grid_stride, cache_mod,
+                    grid,
+                    A,
+                    B,
+                    C,
+                    alpha,
+                    m,
+                    n,
+                    k,
+                    lda,
+                    ldb,
+                    ldc,
+                    block_m,
+                    block_n,
+                    block_k,
+                    num_warps,
+                    group_m,
+                    num_stages,
+                    num_sms,
+                    grid_stride,
+                    cache_mod,
                     # Two-step store regressed 4096x8192x28672 in the same-process
                     # A/B (chained 1.126 vs two-step 1.082), keep chained there.
                     two_step=not (m == 4096 and n == 8192 and k == 28672),
@@ -2685,74 +3372,189 @@ def hgemm(
             grid = (triton.cdiv(m, block_m) * triton.cdiv(n, block_n),)
             with torch_device_fn.device(A.device):
                 _launch_hgemm(
-                    transa, transb, grid, A, B, C, alpha, beta,
-                    m, n, k, lda, ldb, ldc, beta_is_zero, False,
-                    block_m, block_n, block_k, num_warps, group_m,
-                    num_stages, unroll, n_major_order,
+                    transa,
+                    transb,
+                    grid,
+                    A,
+                    B,
+                    C,
+                    alpha,
+                    beta,
+                    m,
+                    n,
+                    k,
+                    lda,
+                    ldb,
+                    ldc,
+                    beta_is_zero,
+                    False,
+                    block_m,
+                    block_n,
+                    block_k,
+                    num_warps,
+                    group_m,
+                    num_stages,
+                    unroll,
+                    n_major_order,
                 )
             return
 
     nn_static_ab1_config = None
-    if transa == CUBLAS_OP_N and transb == CUBLAS_OP_N and alpha == 1.0 and beta_is_zero and lda == k and ldb == n and ldc == n:
+    if (
+        transa == CUBLAS_OP_N
+        and transb == CUBLAS_OP_N
+        and alpha == 1.0
+        and beta_is_zero
+        and lda == k
+        and ldb == n
+        and ldc == n
+    ):
         nn_static_ab1_config = _select_hgemm_nn_static_ab1_config(m, n, k)
     if nn_static_ab1_config is not None:
-        block_m, block_n, block_k, num_warps, group_m, num_stages, n_major_order = nn_static_ab1_config
+        block_m, block_n, block_k, num_warps, group_m, num_stages, n_major_order = (
+            nn_static_ab1_config
+        )
         if _can_use_fast_hgemm(m, n, k, block_m, block_n, block_k):
             grid = (triton.cdiv(m, block_m) * triton.cdiv(n, block_n),)
             with torch_device_fn.device(A.device):
                 _launch_hgemm_nn_static_ab1(
-                    grid, A, B, C, m, n, k, block_m, block_n, block_k,
-                    num_warps, group_m, num_stages, n_major_order,
+                    grid,
+                    A,
+                    B,
+                    C,
+                    m,
+                    n,
+                    k,
+                    block_m,
+                    block_n,
+                    block_k,
+                    num_warps,
+                    group_m,
+                    num_stages,
+                    n_major_order,
                 )
             return
 
     nn_ab1_blockptr_config = None
-    if transa == CUBLAS_OP_N and transb == CUBLAS_OP_N and alpha == 1.0 and beta_is_zero and lda == k and ldb == n and ldc == n:
+    if (
+        transa == CUBLAS_OP_N
+        and transb == CUBLAS_OP_N
+        and alpha == 1.0
+        and beta_is_zero
+        and lda == k
+        and ldb == n
+        and ldc == n
+    ):
         nn_ab1_blockptr_config = _select_hgemm_nn_ab1_blockptr_config(m, n, k)
     if nn_ab1_blockptr_config is not None:
-        block_m, block_n, block_k, num_warps, group_m, num_stages, n_major_order = nn_ab1_blockptr_config
+        block_m, block_n, block_k, num_warps, group_m, num_stages, n_major_order = (
+            nn_ab1_blockptr_config
+        )
         if _can_use_fast_hgemm(m, n, k, block_m, block_n, block_k):
             grid = (triton.cdiv(m, block_m) * triton.cdiv(n, block_n),)
             with torch_device_fn.device(A.device):
                 _launch_hgemm_nn_ab1_blockptr_fast(
-                    grid, A, B, C, m, n, k, lda, ldb, ldc,
-                    block_m, block_n, block_k, num_warps, group_m, num_stages,
+                    grid,
+                    A,
+                    B,
+                    C,
+                    m,
+                    n,
+                    k,
+                    lda,
+                    ldb,
+                    ldc,
+                    block_m,
+                    block_n,
+                    block_k,
+                    num_warps,
+                    group_m,
+                    num_stages,
                     n_major_order,
                 )
             return
 
     nn_m2_blockptr_config = None
-    if transa == CUBLAS_OP_N and transb == CUBLAS_OP_N and beta_is_zero and lda == k and ldb == n and ldc == n:
+    if (
+        transa == CUBLAS_OP_N
+        and transb == CUBLAS_OP_N
+        and beta_is_zero
+        and lda == k
+        and ldb == n
+        and ldc == n
+    ):
         nn_m2_blockptr_config = _select_hgemm_nn_m2_blockptr_config(m, n, k)
     if nn_m2_blockptr_config is not None:
-        block_m, block_n, block_k, num_warps, group_m, num_stages, n_major_order = nn_m2_blockptr_config
+        block_m, block_n, block_k, num_warps, group_m, num_stages, n_major_order = (
+            nn_m2_blockptr_config
+        )
         if _can_use_fast_hgemm(m, n, k, block_m * 2, block_n, block_k):
             grid = ((triton.cdiv(m, block_m) // 2) * triton.cdiv(n, block_n),)
             with torch_device_fn.device(A.device):
                 _launch_hgemm_nn_m2_blockptr_fast(
-                    grid, A, B, C, alpha, beta, m, n, k, lda, ldb, ldc,
-                    block_m, block_n, block_k, num_warps, group_m, num_stages,
+                    grid,
+                    A,
+                    B,
+                    C,
+                    alpha,
+                    beta,
+                    m,
+                    n,
+                    k,
+                    lda,
+                    ldb,
+                    ldc,
+                    block_m,
+                    block_n,
+                    block_k,
+                    num_warps,
+                    group_m,
+                    num_stages,
                     n_major_order,
                 )
             return
 
     nn_blockptr_config = None
-    if transa == CUBLAS_OP_N and transb == CUBLAS_OP_N and lda == k and ldb == n and ldc == n:
+    if (
+        transa == CUBLAS_OP_N
+        and transb == CUBLAS_OP_N
+        and lda == k
+        and ldb == n
+        and ldc == n
+    ):
         nn_blockptr_config = _select_hgemm_nn_blockptr_config(m, n, k)
     if nn_blockptr_config is not None:
-        block_m, block_n, block_k, num_warps, group_m, num_stages, n_major_order = nn_blockptr_config
+        block_m, block_n, block_k, num_warps, group_m, num_stages, n_major_order = (
+            nn_blockptr_config
+        )
         if _can_use_fast_hgemm(m, n, k, block_m, block_n, block_k):
             grid = (triton.cdiv(m, block_m) * triton.cdiv(n, block_n),)
             with torch_device_fn.device(A.device):
                 _launch_hgemm_nn_blockptr_fast(
-                    grid, A, B, C, alpha, beta, m, n, k, lda, ldb, ldc,
-                    block_m, block_n, block_k, num_warps, group_m, num_stages,
+                    grid,
+                    A,
+                    B,
+                    C,
+                    alpha,
+                    beta,
+                    m,
+                    n,
+                    k,
+                    lda,
+                    ldb,
+                    ldc,
+                    block_m,
+                    block_n,
+                    block_k,
+                    num_warps,
+                    group_m,
+                    num_stages,
                     n_major_order,
                 )
             return
 
-    block_m, block_n, block_k, num_warps, group_m, num_stages, unroll = _select_hgemm_config(
-        m, n, k, transa, transb
+    block_m, block_n, block_k, num_warps, group_m, num_stages, unroll = (
+        _select_hgemm_config(m, n, k, transa, transb)
     )
     check_bounds = not _can_use_fast_hgemm(m, n, k, block_m, block_n, block_k)
     n_major_order = _select_hgemm_n_major_order(m, n, k, transa, transb)
@@ -2776,15 +3578,39 @@ def hgemm(
                 B_pad = F.pad(B, (0, padded_k - k, 0, padded_n - n))
                 ldb_pad = padded_k
             if beta_is_zero:
-                C_pad = torch.empty((padded_m, padded_n), device=C.device, dtype=C.dtype)
+                C_pad = torch.empty(
+                    (padded_m, padded_n), device=C.device, dtype=C.dtype
+                )
             else:
                 C_pad = F.pad(C, (0, padded_n - n, 0, padded_m - m))
-            grid_pad = (triton.cdiv(padded_m, block_m) * triton.cdiv(padded_n, block_n),)
+            grid_pad = (
+                triton.cdiv(padded_m, block_m) * triton.cdiv(padded_n, block_n),
+            )
             _launch_hgemm(
-                transa, transb, grid_pad, A_pad, B_pad, C_pad, alpha, beta,
-                padded_m, padded_n, padded_k, lda_pad, ldb_pad, padded_n,
-                beta_is_zero, False, block_m, block_n, block_k, num_warps,
-                group_m, num_stages, unroll, n_major_order,
+                transa,
+                transb,
+                grid_pad,
+                A_pad,
+                B_pad,
+                C_pad,
+                alpha,
+                beta,
+                padded_m,
+                padded_n,
+                padded_k,
+                lda_pad,
+                ldb_pad,
+                padded_n,
+                beta_is_zero,
+                False,
+                block_m,
+                block_n,
+                block_k,
+                num_warps,
+                group_m,
+                num_stages,
+                unroll,
+                n_major_order,
             )
             C.copy_(C_pad[:m, :n])
             return
@@ -2792,7 +3618,28 @@ def hgemm(
         # ---- Simple path ----
         grid = (triton.cdiv(m, block_m) * triton.cdiv(n, block_n),)
         _launch_hgemm(
-            transa, transb, grid, A, B, C, alpha, beta, m, n, k, lda, ldb, ldc,
-            beta_is_zero, check_bounds, block_m, block_n, block_k, num_warps,
-            group_m, num_stages, unroll, n_major_order,
+            transa,
+            transb,
+            grid,
+            A,
+            B,
+            C,
+            alpha,
+            beta,
+            m,
+            n,
+            k,
+            lda,
+            ldb,
+            ldc,
+            beta_is_zero,
+            check_bounds,
+            block_m,
+            block_n,
+            block_k,
+            num_warps,
+            group_m,
+            num_stages,
+            unroll,
+            n_major_order,
         )

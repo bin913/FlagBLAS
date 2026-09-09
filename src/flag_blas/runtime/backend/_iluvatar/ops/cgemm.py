@@ -25,7 +25,6 @@ from flag_blas.ops.level3.cgemm import (
 from flag_blas.runtime import torch_device_fn
 from flag_blas.runtime.backend._iluvatar.ops.sgemm import sgemm as _sgemm_iluvatar
 
-
 _CGEMM_WORKSPACE = {"key": None, "buffers": None}
 _CGEMM_AUG_WORKSPACE = {"key": None, "buffers": None, "pack_key": None}
 
@@ -260,7 +259,6 @@ def _cgemm_3m_nomask_kernel(
     c_elem = offs_m[:, None] * SIZE + offs_n[None, :]
     tl.store(c_ptr + 2 * c_elem, prod_r - prod_i)
     tl.store(c_ptr + 2 * c_elem + 1, prod_sum - prod_r - prod_i)
-
 
 
 def _get_cgemm_workspace(A: torch.Tensor, m: int, n: int, k: int):
@@ -517,6 +515,7 @@ def _launch_cgemm_pack_sgemm(
     _cgemm_merge_3m_kernel[merge_grid](
         C_real, prod_r, prod_i, prod_sum, m * n, BLOCK=pack_block
     )
+
 
 def _try_cgemm_pack_sgemm(
     transa: int,
