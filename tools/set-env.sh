@@ -15,6 +15,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# GitHub Actions runs steps with `bash -e -o pipefail`, so an unexpected
+# nonzero return aborts the whole job. Surface the exact failing command via
+# a workflow annotation so CI failures can be diagnosed from annotations.
+if [ -n "${GITHUB_ACTIONS:-}" ]; then
+  trap 'echo "::error title=set-env ::line ${LINENO} rc=$? cmd: ${BASH_COMMAND}"' ERR
+fi
+
 SUPPORTED_VENDORS=(
   "nvidia"
   "iluvatar"
