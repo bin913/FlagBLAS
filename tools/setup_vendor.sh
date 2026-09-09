@@ -89,9 +89,9 @@ case $VENDOR in
     else
       echo "::warning title=iluvatar setup::no bundled corex python env; installing corex torch from the flagos mirror (cp312). Note: no corex cupy wheel is hosted, so the test suite will fall back to the CPU reference when cupy is missing."
       # Mirrors FlagGems backends.yaml (iluvatar): python 3.12 + pinned corex
-      # torch/torchaudio/torchvision + numpy<2 from the flagos-pypi-iluvatar
-      # index (aliyun is only a transitive-deps mirror).
-      uv pip install torch==2.7.1+corex.4.4.0 torchaudio==2.7.1+corex.4.4.0 torchvision==0.22.1+corex.4.4.0 "numpy<2" \
+      # torch/torchaudio/torchvision/triton + numpy<2 from the
+      # flagos-pypi-iluvatar index (aliyun is only a transitive-deps mirror).
+      uv pip install torch==2.7.1+corex.4.4.0 torchaudio==2.7.1+corex.4.4.0 torchvision==0.22.1+corex.4.4.0 triton==3.1.0+corex.4.4.0 "numpy<2" \
           --index-url https://resource.flagos.net/repository/flagos-pypi-iluvatar/simple \
           --extra-index-url https://mirrors.aliyun.com/pypi/simple \
           --index-strategy unsafe-best-match || {
