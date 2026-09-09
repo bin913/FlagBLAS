@@ -65,13 +65,89 @@ case $VENDOR in
     ;;
 
   iluvatar)
-    # Install PyTorch with Corex support
-    uv pip install \
-      "torch>=2.6.0"
+    # Iluvatar PyTorch/CuPy are bundled with the corex driver (cp310 wheels
+    # under /usr/local/corex-*/lib64/python3/dist-packages, reachable through
+    # the global PYTHONPATH or by baking it into the venv). Reusing that env is
+    # the only way to get a working cupy (no corex cupy wheel is hosted on the
+    # flagos mirror), so detect it first and skip any vanilla-torch install.
+    if [ -z "$ILUVATAR_COREX_PYDIR" ]; then
+      for _cpd in /usr/local/corex-*/lib64/python3/dist-packages /usr/local/corex-*/lib/python3/dist-packages; do
+        if [ -d "$_cpd/torch" ] && [ -d "$_cpd/cupy" ]; then
+          export ILUVATAR_COREX_PYDIR="$_cpd"
+          break
+        fi
+      done
+    fi
 
-    # Install FlagBLAS in editable mode
-    uv pip install -e .
-    uv pip install ".[test]"
+    if [ -n "$ILUVATAR_COREX_PYDIR" ]; then
+      echo "Using bundled corex python env: ${ILUVATAR_COREX_PYDIR}"
+      # Make the bundled torch/cupy reachable from the venv in every later
+      # step (the CI test step only does `source .venv/bin/activate`).
+      export PYTHONPATH="${ILUVATAR_COREX_PYDIR}${PYTHONPATH:+:$PYTHONPATH}"
+      printf '\n# Source bundled corex python env (required by corex PyTorch/CuPy)\nexport PYTHONPATH="%s${PYTHONPATH:+:$PYTHONPATH}"\n' "$ILUVATAR_COREX_PYDIR" >> .venv/bin/activate
+      echo "Baked corex python env into .venv/bin/activate: ${ILUVATAR_COREX_PYDIR}"
+    else
+      echo "::warning title=iluvatar setup::no bundled corex python env; installing corex torch from the flagos mirror (cp312). Note: no corex cupy wheel is hosted, tests importing cupy will not run."
+      uv pip install torch==2.7.1+corex.4.4.0 torchaudio==2.7.1+corex.4.4.0 torchvision==0.22.1+corex.4.4.0 \
+          --index-url https://resource.flagos.net/repository/flagos-pypi-iluvatar/simple \
+          --extra-index-url https://mirrors.aliyun.com/pypi/simple \
+          --index-strategy unsafe-best-match || {
+            echo "::error title=iluvatar torch install failed::uv pip install corex torch from flagos-pypi-iluvatar"
+            exit 1
+          }
+    fi
+
+    # Install FlagBLAS editable. Base deps do not include torch, so a normal
+    # install cannot replace the bundled/corex torch.
+    if ! uv pip install -e . 2>&1 | tee /tmp/iluvatar-flagblas-install.log; then
+      echo "::error title=iluvatar flagblas install failed::$(tail -8 /tmp/iluvatar-flagblas-install.log | tr '\n' ' ' | head -c 1500)"
+      exit 1
+    fi
+
+    # Test deps. numpy is pinned <2 explicitly: the corex-bundled numpy is 1.x
+    # and the corex torch/cupy are built against the numpy 1.x C API.
+    if ! uv pip install pytest "numpy<2" scipy distro gitpython pyyaml coverage pytest-md-report \
+         --index-url https://mirrors.aliyun.com/pypi/simple 2>&1 | tee /tmp/iluvatar-testdeps.log; then
+      echo "::error title=iluvatar test deps install failed::$(tail -8 /tmp/iluvatar-testdeps.log | tr '\n' ' ' | head -c 1500)"
+      exit 1
+    fi
+    echo "::warning title=iluvatar setup::testdeps installed"
+
+    # Sanity check: make sure torch/cupy come from the corex build and that
+    # torch.cuda can actually initialize against the corex driver.
+    set +e
+    python - <<'PYEOF'
+import sys, os, importlib.metadata, traceback
+try:
+    import torch
+    tdir = os.path.dirname(torch.__file__)
+    is_corex = "/corex" in tdir
+    print("torch dir:", tdir, "| corex:", is_corex)
+    dist = importlib.metadata.version("torch")
+    print("torch dist:", dist)
+    if not is_corex:
+        raise RuntimeError(f"vanilla torch in venv, expected corex build (dist={dist})")
+    torch.cuda.init()
+    print("torch.cuda available:", torch.cuda.is_available(),
+          "| count:", torch.cuda.device_count(),
+          "| name:", torch.cuda.get_device_name(0))
+    if torch.cuda.device_count() == 0:
+        raise RuntimeError("no iluvatar device visible to torch")
+    import cupy
+    print("cupy:", cupy.__version__)
+except Exception:
+    tb = traceback.format_exc()
+    print(tb)
+    print("::error title=iluvatar torch sanity check failed::" + tb.replace("%", "%25").replace("\n", "%0A"))
+    sys.exit(1)
+PYEOF
+    SANITY_RC=$?
+    set -e
+    if [ $SANITY_RC -ne 0 ]; then
+      echo "::error title=iluvatar setup::torch/cupy sanity check failed with rc=${SANITY_RC}"
+      exit 1
+    fi
+    echo "::warning title=iluvatar setup::torch/cupy sanity check passed"
     ;;
 
   ascend)
