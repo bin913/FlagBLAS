@@ -59,7 +59,11 @@ case $VENDOR in
     # "undefined symbol: cudaProfilerInitialize, version CUDART".
     export COREX_ROOT=${COREX_ROOT:-}
     if [ -z "$COREX_ROOT" ]; then
-      for _cr in /usr/local/corex /usr/local/corex-* /usr/local/CoreX-* /opt/corex-*; do
+      # torch==2.7.1+corex.4.4.0 needs the corex 4.4.0 runtime: some runners
+      # ship several corex versions (e.g. corex-4.4.0 and corex-4.5.0) with
+      # /usr/local/corex symlinked to the newest, so prefer the explicit
+      # 4.4.0 install over the symlink.
+      for _cr in /usr/local/corex-4.4.0 /usr/local/corex /usr/local/corex-* /usr/local/CoreX-* /opt/corex-*; do
         if [ -d "$_cr" ] && { [ -d "$_cr/bin" ] || [ -d "$_cr/lib" ] || [ -d "$_cr/lib64" ]; }; then
           export COREX_ROOT="$_cr"
           break
@@ -81,8 +85,11 @@ case $VENDOR in
     else
       export PATH="${COREX_ROOT}/bin:${PATH}"
     fi
-    # Build LD_LIBRARY_PATH: dirs containing a CUDA-10.2-era libcudart must
-    # come first (corex lib dirs, then a local /usr/local/cuda-10.2 install).
+    # Build LD_LIBRARY_PATH in priority order: lib dirs of the corex install
+    # that actually ship a CUDA-10.2 libcudart (SONAME libcudart.so.10, which
+    # still exports cudaProfilerInitialize) MUST come first, so the loader
+    # binds them instead of a same-named lib from another corex version or
+    # the CUDA 12 system libcudart.
     _libdirs=""
     for _cr in "${COREX_ROOT}" /usr/local/cuda-10.2; do
       [ -n "$_cr" ] || continue
@@ -101,6 +108,8 @@ case $VENDOR in
         *) _libdirs="$_libdirs$_cd:" ;;
       esac
     done < <(find /usr/local /opt -maxdepth 5 -name 'libcudart.so.10*' -type f 2>/dev/null | sed 's#/[^/]*$##' | sort -u)
+    # Remaining lib dirs of the corex install / cuda-10.2 (other runtime
+    # libs beyond cudart).
     for _cr in "${COREX_ROOT}" /usr/local/cuda-10.2; do
       [ -n "$_cr" ] || continue
       for _cd in "$_cr/lib64" "$_cr/lib"; do
@@ -109,17 +118,37 @@ case $VENDOR in
         fi
       done
     done
-    _libdirs="${_libdirs%:}"
-    while [ -n "$_libdirs" ]; do
-      case "$_libdirs" in
-        *:*) _cd="${_libdirs%%:*}"; _libdirs="${_libdirs#*:}" ;;
-        *) _cd="$_libdirs"; _libdirs="" ;;
+    # Drop any dir whose libcudart.so.10 does NOT export
+    # cudaProfilerInitialize (some corex installs ship a cudart that keeps
+    # the libcudart.so.10 SONAME but drops the deprecated profiler entry
+    # point, which would still produce the undefined-symbol crash).
+    _filtered=""
+    _rest="$_libdirs"
+    while [ -n "$_rest" ]; do
+      case "$_rest" in
+        *:*) _cd="${_rest%%:*}"; _rest="${_rest#*:}" ;;
+        *) _cd="$_rest"; _rest="" ;;
       esac
-      case ":${LD_LIBRARY_PATH:-}:" in
-        *":$_cd:"*) ;;
-        *) export LD_LIBRARY_PATH="$_cd${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ;;
-      esac
+      [ -n "$_cd" ] || continue
+      _keep=1
+      _lib=$(ls "$_cd"/libcudart.so.10* 2>/dev/null | head -1)
+      if [ -n "$_lib" ]; then
+        if command -v nm >/dev/null 2>&1; then
+          nm -D "$_lib" 2>/dev/null | grep -q "cudaProfilerInitialize" || _keep=0
+        elif command -v objdump >/dev/null 2>&1; then
+          objdump -T "$_lib" 2>/dev/null | grep -q "cudaProfilerInitialize" || _keep=0
+        fi
+      fi
+      if [ "$_keep" = 1 ]; then
+        case ":$_filtered:" in *":$_cd:"*) ;; *) _filtered="$_filtered$_cd:" ;; esac
+      else
+        echo "::warning title=iluvatar env::drop lib dir (libcudart.so.10 lacks cudaProfilerInitialize): ${_cd}"
+      fi
     done
+    _libdirs="${_filtered%:}"
+    if [ -n "$_libdirs" ]; then
+      export LD_LIBRARY_PATH="${_libdirs}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    fi
     # FlagGems backends.yaml sets CPATH for iluvatar as well.
     if [ -d /usr/local/cuda-10.2/include ]; then
       export CPATH=/usr/local/cuda-10.2/include
