@@ -138,7 +138,7 @@ case $VENDOR in
       esac
       [ -n "$_cd" ] || continue
       _keep=1
-      _lib=$(ls "$_cd"/libcudart.so.10* 2>/dev/null | head -1)
+      _lib=$(ls "$_cd"/libcudart.so.10* 2>/dev/null | head -1 || true)
       if [ -n "$_lib" ]; then
         if command -v nm >/dev/null 2>&1; then
           nm -D "$_lib" 2>/dev/null | grep -q "cudaProfilerInitialize" || _keep=0
