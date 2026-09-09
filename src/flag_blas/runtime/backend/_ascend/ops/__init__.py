@@ -14,6 +14,7 @@ from .syr2 import ssyr2
 from .tbmv import ctbmv, stbmv
 from .tbsv import ctbsv, stbsv
 from .tpmv import ctpmv, stpmv
+from .tpsv import ctpsv, stpsv
 from .trsv import ctrsv, strsv
 
 __all__ = [
@@ -40,6 +41,8 @@ __all__ = [
     "ctbsv",
     "stpmv",
     "ctpmv",
+    "stpsv",
+    "ctpsv",
     "strsv",
     "ctrsv",
 ]
