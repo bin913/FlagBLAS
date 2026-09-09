@@ -18,29 +18,71 @@
 # Configuration parameters
 mem_threshold=30000     # Minimum free memory required (MB)
 sleep_time=120          # Wait time between retries (seconds)
-max_wait=600           # Maximum total wait time (seconds)
+max_wait=600            # Maximum total wait time (seconds)
 
-export LD_LIBRARY_PATH=/usr/local/corex/lib:$LD_LIBRARY_PATH
+# Locate ixsmi without relying on PATH: CI runners may not put the corex
+# bin directory on PATH in non-interactive shells.
+find_ixsmi() {
+    local cmd
+    cmd=$(command -v ixsmi 2>/dev/null || true)
+    if [ -z "$cmd" ]; then
+        for dir in /usr/local/corex/bin /usr/local/corex-*/bin; do
+            if [ -x "$dir/ixsmi" ]; then
+                cmd="$dir/ixsmi"
+                break
+            fi
+        done
+    fi
+    if [ -z "$cmd" ]; then
+        echo "Error: ixsmi not found (searched PATH and /usr/local/corex*/bin)." >&2
+        return 1
+    fi
+    echo "$cmd"
+}
+
+IXSMI=$(find_ixsmi) || exit 1
+
+# Add the corex library directory matching the found ixsmi (and the common
+# unversioned one, if present) so that ixsmi can find its libraries.
+corex_lib="$(dirname "$(dirname "$IXSMI")")/lib"
+for lib_dir in /usr/local/corex/lib "$corex_lib"; do
+    if [ -d "$lib_dir" ]; then
+        export LD_LIBRARY_PATH="$lib_dir:$LD_LIBRARY_PATH"
+    fi
+done
 
 # Get the number of GPUs
-gpu_count=$(ixsmi --query-gpu=name --format=csv,noheader 2>/dev/null | wc -l)
+gpu_list=$("$IXSMI" --query-gpu=name --format=csv,noheader 2>&1)
+rc=$?
+if [ $rc -ne 0 ]; then
+    echo "Error: failed to run $IXSMI (exit code $rc):" >&2
+    echo "$gpu_list" >&2
+    exit 1
+fi
+gpu_count=$(printf '%s\n' "$gpu_list" | sed '/^[[:space:]]*$/d' | wc -l)
 
 if [ "$gpu_count" -eq 0 ]; then
     echo "No Iluvatar GPUs detected. Please ensure you have Iluvatar GPUs installed and properly configured."
+    echo "Debug: $IXSMI returned the following output:" >&2
+    echo "$gpu_list" >&2
     exit 1
 fi
 
 echo "Detected $gpu_count Iluvatar GPU(s)."
 
-ixsmi
+"$IXSMI"
 
 waited_time=0
 while true; do
-    memory_usage=$(ixsmi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null)
-    memory_total=$(ixsmi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null)
+    memory_usage=$("$IXSMI" --query-gpu=memory.used --format=csv,noheader,nounits 2>&1)
+    rc=$?
+    memory_total=$("$IXSMI" --query-gpu=memory.total --format=csv,noheader,nounits 2>&1)
+    rc=$((rc + $?))
 
-    if [ $? -ne 0 ]; then
+    if [ $rc -ne 0 ]; then
         echo "Failed to query GPU memory information."
+        echo "$memory_usage" >&2
+        echo "$memory_total" >&2
         exit 1
     fi
 
