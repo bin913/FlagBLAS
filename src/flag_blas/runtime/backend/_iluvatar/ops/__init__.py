@@ -14,7 +14,7 @@
 
 from .nrm2 import dnrm2, dznrm2, scnrm2, snrm2
 from .tbsv import stbsv
-from .bfgemm import bgemm, bfgemm
+from .bfgemm import bfgemm
 from .cgemm import cgemm
 from .hgemm import hgemm
 from .sgemm import sgemm
@@ -28,6 +28,5 @@ __all__ = [
     "sgemm",
     "hgemm",
     "bfgemm",
-    "bgemm",
     "cgemm",
 ]

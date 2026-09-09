@@ -430,12 +430,18 @@ def _sgemm_k_tail_kernel(
 
 
 def _select_sgemm_config(m: int, n: int, k: int, transa: int, transb: int):
-    if transb == CUBLAS_OP_T and m == 128 and n >= 1024:
-        return 64, 64, 32, 8, 16
-    if transb == CUBLAS_OP_T and n == 128 and m >= 1024:
-        return 64, 64, 64, 8, 8
+    if transa == CUBLAS_OP_T and transb == CUBLAS_OP_T and m == 4096 and n == 8192 and k == 28672:
+        return 128, 128, 64, 16, 4
     if transa == CUBLAS_OP_T and transb == CUBLAS_OP_T and m == 128 and n >= 1024:
-        return 64, 64, 64, 8, 4
+        return 128, 128, 64, 16, 4
+    if transa == CUBLAS_OP_T and transb == CUBLAS_OP_T and n == 128 and m >= 1024:
+        return 128, 128, 64, 16, 4
+    if transa == CUBLAS_OP_N and transb == CUBLAS_OP_T and m == 2048 and n == 2048 and k >= 8192:
+        return 128, 128, 64, 16, 4
+    if transb == CUBLAS_OP_T and m == 128 and n >= 1024:
+        return 128, 128, 64, 16, 4
+    if transb == CUBLAS_OP_T and n == 128 and m >= 1024:
+        return 128, 128, 64, 16, 4
     if m == 64 and n == 64 and k == 64:
         return 32, 32, 64, 4, 8
     if min(m, n) <= 64:
@@ -489,6 +495,15 @@ def _launch_sgemm(
     group_m: int,
     num_stages: int,
 ) -> None:
+    if not check_bounds and transa == CUBLAS_OP_T and transb == CUBLAS_OP_T and (
+        m == 4096 and n == 8192 and k == 28672
+    ):
+        _sgemm_tt_kernel[grid](
+            A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero, False,
+            BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k, GROUP_M=group_m,
+            num_warps=num_warps, num_stages=num_stages,
+        )
+        return
     _sgemm_kernel[grid](
         A, B, C, alpha, beta, m, n, k, lda, ldb, ldc, beta_is_zero,
         transa == CUBLAS_OP_T, transb == CUBLAS_OP_T, check_bounds, False, 0, 0,
