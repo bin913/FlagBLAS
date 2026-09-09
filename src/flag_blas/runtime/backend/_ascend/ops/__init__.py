@@ -12,6 +12,7 @@ from .symv import csymv, ssymv
 from .syr import csyr, ssyr
 from .syr2 import ssyr2
 from .tbmv import ctbmv, stbmv
+from .tbsv import ctbsv, stbsv
 from .tpmv import ctpmv, stpmv
 from .trsv import ctrsv, strsv
 
@@ -35,6 +36,8 @@ __all__ = [
     "chpmv",
     "stbmv",
     "ctbmv",
+    "stbsv",
+    "ctbsv",
     "stpmv",
     "ctpmv",
     "strsv",
