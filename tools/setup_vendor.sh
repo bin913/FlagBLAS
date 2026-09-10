@@ -65,6 +65,117 @@ case $VENDOR in
     ;;
 
   iluvatar)
+    # --- CI diagnostic: which iluvatar toolchains already exist on this runner?
+    # Temporary probe (until the runner provisioning is settled). It runs before
+    # anything is installed, so it reports the pristine image, and it only uses
+    # find_spec / subprocess, so it is immune to this script's PATH/PYTHONPATH.
+    # For every torch/triton/cupy installation it finds it also runs a two-line
+    # smoke test, because the presence of a package says nothing about it being
+    # usable (the iluvatar IX Triton plugins for cp310 are known to fail at
+    # load_dialects, and stock cupy cannot load against corex's libcudart).
+    if [ -n "${GITHUB_ACTIONS:-}" ]; then
+      python - <<'PYEOF' || true
+import glob, os, re, subprocess, sys
+
+VENV = sys.executable
+
+
+def interp_version(exe):
+    try:
+        return subprocess.run(
+            [exe, "-c", "import sys;print('%d.%d'%sys.version_info[:2])"],
+            capture_output=True, text=True, timeout=60,
+        ).stdout.strip()
+    except Exception:
+        return ""
+
+
+# interpreter per python X.Y (the venv one first: that is what CI runs on)
+interps = {}
+for exe in [VENV] + sorted(
+    glob.glob("/usr/bin/python3") + glob.glob("/usr/bin/python3.*")
+    + glob.glob("/usr/local/bin/python3") + glob.glob("/usr/local/bin/python3.*")
+    + glob.glob("/opt/*/bin/python3")
+):
+    if not os.path.isfile(exe) or not re.fullmatch(r"python3(\.\d+)?", os.path.basename(exe)):
+        continue
+    v = interp_version(exe)
+    if v and v not in interps:
+        interps[v] = exe
+
+out = ["venv=%s(py%s)" % (VENV, interp_version(VENV))]
+out.append("interps=" + ",".join("%s:%s" % (v, e) for v, e in sorted(interps.items())))
+
+PKG_DIRS = (
+    "/usr/local/lib/python3*/site-packages", "/usr/local/lib/python3*/dist-packages",
+    "/usr/lib/python3/dist-packages", "/usr/lib/python3*/dist-packages",
+    "/usr/local/corex-*/lib64/python3/dist-packages",
+    "/usr/local/corex-*/lib64/python3.*/dist-packages",
+    "/usr/local/corex-*/lib64/python3/site-packages",
+    "/usr/local/corex-*/lib64/python3.*/site-packages",
+    "/opt/*/lib/python3*/site-packages", "/usr/local/apps_whl",
+)
+found = {}
+for pat in PKG_DIRS:
+    for d in sorted(glob.glob(pat)):
+        hits = [n for n in ("torch", "triton", "cupy", "flagtree") if os.path.isdir(os.path.join(d, n))]
+        if hits:
+            found[d] = hits
+
+
+def pyver_of(path):
+    m = re.search(r"python3\.(\d+)", path)
+    return "3.%s" % m.group(1) if m else ""
+
+
+def smoke(path, code):
+    exe = interps.get(pyver_of(path), VENV)
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.path.dirname(path) + (
+        ":" + env["PYTHONPATH"] if env.get("PYTHONPATH") else ""
+    )
+    env["LD_LIBRARY_PATH"] = "/usr/local/corex-4.4.0/lib64:/usr/local/corex/lib64:" + env.get("LD_LIBRARY_PATH", "")
+    try:
+        r = subprocess.run([exe, "-c", code], capture_output=True, text=True, timeout=300, env=env)
+    except Exception as exc:
+        return "%s[%s] EXC:%s" % (path, exe, type(exc).__name__)
+    if r.returncode == 0:
+        return "%s[%s] OK:%s" % (path, exe, r.stdout.strip().splitlines()[-1][:60] if r.stdout.strip() else "?")
+    tail = (r.stdout + r.stderr).strip().splitlines()
+    return "%s[%s] FAIL:%s" % (path, exe, (tail[-1] if tail else "?")[:140])
+
+
+TRITON_CODE = (
+    "import triton;"
+    "from triton._C.libtriton import ir, iluvatar;"
+    "mk = getattr(ir, 'context', None) or getattr(ir, 'MLIRContext');"
+    "iluvatar.load_dialects(mk());"
+    "print('triton', triton.__version__, 'IX load_dialects ok')"
+)
+CUPY_CODE = "import cupy;print('cupy', cupy.__version__)"
+
+for d, hits in sorted(found.items()):
+    if "triton" in hits:
+        out.append(smoke(os.path.join(d, "triton"), TRITON_CODE))
+    if "cupy" in hits:
+        out.append(smoke(os.path.join(d, "cupy"), CUPY_CODE))
+    if "torch" in hits:
+        out.append("%s[t] = %s" % (os.path.join(d, "torch"), ",".join(sorted(glob.glob(os.path.join(d, "torch-*.dist-info"))))))
+
+for d in sorted(found):
+    c = os.path.join(d, "triton", "_C")
+    if os.path.isdir(c):
+        out.append("_C %s = %s" % (c, ",".join(sorted(os.listdir(c)))))
+
+out.append("corex=" + ",".join(sorted(glob.glob("/usr/local/corex*") + glob.glob("/usr/local/cuda*"))))
+out.append("corexpy=" + ",".join(sorted(glob.glob("/usr/local/corex-*/lib*/python3*"))))
+out.append("pythons=" + ",".join(sorted(glob.glob("/usr/local/lib/python3*") + glob.glob("/usr/lib/python3*"))))
+
+msg = "\n".join(out)
+print("::warning title=iluvatar runner probe::" + msg.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))
+PYEOF
+    fi
+
     # Iluvatar PyTorch/CuPy are bundled with the corex driver (cp310 wheels
     # under /usr/local/corex-*/lib64/python3/dist-packages, reachable through
     # the global PYTHONPATH or by baking it into the venv). Reusing that env is
@@ -89,6 +200,21 @@ case $VENDOR in
       export PYTHONPATH="${ILUVATAR_COREX_PYDIR}${PYTHONPATH:+:$PYTHONPATH}"
       printf '\n# Source bundled corex python env (required by corex PyTorch/CuPy)\nexport PYTHONPATH="%s${PYTHONPATH:+:$PYTHONPATH}"\n' "$ILUVATAR_COREX_PYDIR" >> .venv/bin/activate
       echo "Baked corex python env into .venv/bin/activate: ${ILUVATAR_COREX_PYDIR}"
+
+      # The bundled env carries torch/cupy but no Triton compiler, and
+      # flag_blas imports triton while loading. FlagTree bundles the triton
+      # package for the IX backend (same as FlagGems uses for iluvatar); take
+      # the iluvatar build, which is also published for the cp310 the bundled
+      # env runs on (the corex triton wheel on the iluvatar index is cp312).
+      uv pip uninstall triton || true
+      uv pip install "flagtree==0.5.1+iluvatar3.1" \
+          --index-url https://resource.flagos.net/repository/flagos-pypi-hosted/simple \
+          --extra-index-url https://mirrors.aliyun.com/pypi/simple \
+          --index-strategy unsafe-best-match || {
+            echo "::error title=iluvatar flagtree install failed::uv pip install flagtree==0.5.1+iluvatar3.1"
+            exit 1
+          }
+      echo "::warning title=iluvatar setup::flagtree installed"
     else
       echo "::warning title=iluvatar setup::no bundled corex python env; installing corex torch + cupy from the flagos/aliyun mirrors (cp312)."
       # Mirrors FlagGems backends.yaml (iluvatar): python 3.12 + pinned corex
