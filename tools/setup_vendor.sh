@@ -131,9 +131,12 @@ case $VENDOR in
     LLVM_DIR="${HOME}/.flagtree/iluvatar/iluvatar-llvm22-x86_64"
     if [ ! -d "${LLVM_DIR}" ]; then
       mkdir -p "$(dirname "${LLVM_DIR}")"
-      if ! curl -fSL --retry 5 --retry-delay 5 --connect-timeout 30 -C - \
+      if ! curl -fsSL --retry 5 --retry-delay 5 --connect-timeout 30 -C - \
            -o /tmp/iluvatar-llvm22.tar.gz "${FLAGTREE_LLVM_URL}" \
            > /tmp/flagtree-llvm-fetch.log 2>&1; then
+        # -s keeps curl's progress meter out of the log so that the error
+        # ("curl: (7) Failed to connect ...", "(28) ...", "(22) ...") is the
+        # last line and therefore survives the truncation below.
         echo "::error title=iluvatar LLVM download failed::curl ${FLAGTREE_LLVM_URL} failed -> $(tail -3 /tmp/flagtree-llvm-fetch.log | tr '\n' ' ' | tail -c 900)"
         exit 1
       fi
