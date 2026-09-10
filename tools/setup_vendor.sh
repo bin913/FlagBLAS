@@ -133,7 +133,9 @@ case $VENDOR in
       echo "----- last 30 lines of /tmp/flagtree-build.log -----"
       tail -30 /tmp/flagtree-build.log
       echo "----- end of tail (full log on the runner: /tmp/flagtree-build.log) -----"
-      echo "::error title=flagtree source build failed::$(tail -6 /tmp/flagtree-build.log | tr '\n' ' ' | tail -c 1000)"
+      # pip's summary is the very last thing in the log and the traceback sits
+      # a few lines above it, so take a window and keep its end.
+      echo "::error title=flagtree source build failed::$(tail -25 /tmp/flagtree-build.log | tr '\n' ' ' | tail -c 1800)"
       exit 1
     fi
     tail -3 /tmp/flagtree-build.log
