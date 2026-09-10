@@ -1,15 +1,8 @@
-try:
-    import cupy as cp
-    from cupy_backends.cuda.libs import cublas
-
-    HAVE_CUPY = True
-except Exception:  # cupy is optional (no corex cupy wheel exists for iluvatar)
-    cp = None
-    cublas = None
-    HAVE_CUPY = False
+import cupy as cp
 import numpy as np
 import pytest
 import torch
+from cupy_backends.cuda.libs import cublas
 from scipy.linalg import blas
 
 import flag_blas
@@ -18,19 +11,12 @@ from flag_blas.ops import CUBLAS_OP_C, CUBLAS_OP_N, CUBLAS_OP_T
 from . import accuracy_utils as utils
 from .conftest import TO_CPU
 
-if flag_blas.vendor_name == "iluvatar":
-    pytest.skip(
-        "zgemm is not supported on the iluvatar backend", allow_module_level=True
-    )
-
 ZGEMM_SHAPES = [(32, 32, 32), (64, 64, 64), (127, 65, 33)]
 
 
 def cublas_zgemm_reference(
     transa, transb, m, n, k, alpha, A, lda, B, ldb, beta, C, ldc
 ):
-    if not HAVE_CUPY:
-        pytest.skip("cupy is unavailable on this platform; run with --ref=cpu")
     if m == 0 or n == 0:
         return
 

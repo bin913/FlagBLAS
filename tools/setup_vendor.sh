@@ -71,7 +71,8 @@ case $VENDOR in
     # the only way to get a working cupy (no corex cupy wheel is hosted on the
     # flagos mirror), so detect it first and skip any vanilla-torch install.
     if [ -z "$ILUVATAR_COREX_PYDIR" ]; then
-      for _cpd in /usr/local/corex-*/lib64/python3/dist-packages /usr/local/corex-*/lib/python3/dist-packages; do
+      for _cpd in /usr/local/corex-*/lib64/python3/dist-packages /usr/local/corex-*/lib/python3/dist-packages \
+                  /usr/local/corex-*/lib64/python3.*/dist-packages /usr/local/corex-*/lib/python3.*/dist-packages; do
         if [ -d "$_cpd/torch" ] && [ -d "$_cpd/cupy" ]; then
           export ILUVATAR_COREX_PYDIR="$_cpd"
           break

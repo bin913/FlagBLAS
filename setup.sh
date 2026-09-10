@@ -89,7 +89,8 @@ expected_version=${PYTHON_SUPPORTED[$VENDOR]}
 # Otherwise fall back to the flagos mirror wheels (cp312).
 export ILUVATAR_COREX_PYDIR=""
 if [ "$VENDOR" == "iluvatar" ]; then
-  for _cpd in /usr/local/corex-*/lib64/python3/dist-packages /usr/local/corex-*/lib/python3/dist-packages; do
+  for _cpd in /usr/local/corex-*/lib64/python3/dist-packages /usr/local/corex-*/lib/python3/dist-packages \
+              /usr/local/corex-*/lib64/python3.*/dist-packages /usr/local/corex-*/lib/python3.*/dist-packages; do
     if [ -d "$_cpd/torch" ] && [ -d "$_cpd/cupy" ]; then
       export ILUVATAR_COREX_PYDIR="$_cpd"
       break
