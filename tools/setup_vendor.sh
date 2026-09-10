@@ -72,7 +72,9 @@ case $VENDOR in
     # flagos mirror), so detect it first and skip any vanilla-torch install.
     if [ -z "$ILUVATAR_COREX_PYDIR" ]; then
       for _cpd in /usr/local/corex-*/lib64/python3/dist-packages /usr/local/corex-*/lib/python3/dist-packages \
-                  /usr/local/corex-*/lib64/python3.*/dist-packages /usr/local/corex-*/lib/python3.*/dist-packages; do
+                  /usr/local/corex-*/lib64/python3/site-packages /usr/local/corex-*/lib/python3/site-packages \
+                  /usr/local/corex-*/lib64/python3.*/dist-packages /usr/local/corex-*/lib/python3.*/dist-packages \
+                  /usr/local/corex-*/lib64/python3.*/site-packages /usr/local/corex-*/lib/python3.*/site-packages; do
         if [ -d "$_cpd/torch" ] && [ -d "$_cpd/cupy" ]; then
           export ILUVATAR_COREX_PYDIR="$_cpd"
           break
@@ -141,7 +143,11 @@ case $VENDOR in
       # `|| true` everywhere: pipefail + set -e would abort on a non-matching
       # grep or an unreadable dir.
       _diag="corex=$(ls -d /usr/local/corex* /opt/corex* 2>/dev/null | tr '\n' ',' || true)"
-      _diag="${_diag} pydirs=$(ls -d /usr/local/corex-*/lib*/python3*/dist-packages 2>/dev/null | tr '\n' ',' || true)"
+      # Locate the corex python packages, if any: they carry the only cupy that
+      # can load against corex's libcudart, so their absence is the first thing
+      # to check when the cupy import below fails.
+      _diag="${_diag} pydirs=$(ls -d /usr/local/corex-*/lib*/python3*/{dist,site}-packages 2>/dev/null | tr '\n' ',' || true)"
+      _diag="${_diag} cupyenvs=$(find /usr/local /opt -maxdepth 8 -type d -name cupy 2>/dev/null | head -4 | tr '\n' ',' || true)"
       _diag="${_diag} ixthunk=$(find /usr/local /opt -maxdepth 6 -name 'libixthunk.so*' 2>/dev/null | tr '\n' ',' || true)"
       _diag="${_diag} unresolved=$(ldd .venv/lib/python*/site-packages/torch/lib/libtorch_python.so 2>/dev/null | grep 'not found' | tr '\n' ',' || true)"
       _diag="${_diag} ldpath=$(printf '%s' "${LD_LIBRARY_PATH:-}" | head -c 1200 || true)"
@@ -168,7 +174,22 @@ try:
           "| name:", torch.cuda.get_device_name(0))
     if torch.cuda.device_count() == 0:
         raise RuntimeError("no iluvatar device visible to torch")
-    import cupy
+    try:
+        import cupy
+    except ImportError as e:
+        if "libcudart.so.10.2" in str(e):
+            raise RuntimeError(
+                "cupy cannot load against this corex runtime: corex's "
+                "libcudart.so.10.2 exports its symbols under the CUDART "
+                "version node, while wheels built against stock CUDA 10.2 "
+                "need them under the libcudart.so.10.2 node. Only the "
+                "corex-built cupy loads here, so install the corex python "
+                "packages on this runner (e.g. "
+                "corex-<ver>/lib64/python3/dist-packages, which ship "
+                "torch/cupy built for corex); setup reuses that env "
+                "automatically."
+            ) from e
+        raise
     print("cupy:", cupy.__version__)
     from cupy_backends.cuda.libs import cublas
     print("cublas wrapper OK:", cublas is not None)

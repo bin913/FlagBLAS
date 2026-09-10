@@ -90,7 +90,9 @@ expected_version=${PYTHON_SUPPORTED[$VENDOR]}
 export ILUVATAR_COREX_PYDIR=""
 if [ "$VENDOR" == "iluvatar" ]; then
   for _cpd in /usr/local/corex-*/lib64/python3/dist-packages /usr/local/corex-*/lib/python3/dist-packages \
-              /usr/local/corex-*/lib64/python3.*/dist-packages /usr/local/corex-*/lib/python3.*/dist-packages; do
+                /usr/local/corex-*/lib64/python3/site-packages /usr/local/corex-*/lib/python3/site-packages \
+                /usr/local/corex-*/lib64/python3.*/dist-packages /usr/local/corex-*/lib/python3.*/dist-packages \
+                /usr/local/corex-*/lib64/python3.*/site-packages /usr/local/corex-*/lib/python3.*/site-packages; do
     if [ -d "$_cpd/torch" ] && [ -d "$_cpd/cupy" ]; then
       export ILUVATAR_COREX_PYDIR="$_cpd"
       break
