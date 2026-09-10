@@ -314,89 +314,6 @@ def _sgemm_nt_kernel(
 
 
 @triton.jit
-def _sgemm_tt_kernel(
-    a_ptr,
-    b_ptr,
-    c_ptr,
-    alpha: tl.float32,
-    beta: tl.float32,
-    m,
-    n,
-    k,
-    lda,
-    ldb,
-    ldc,
-    BETA_IS_ZERO: tl.constexpr,
-    CHECK_BOUNDS: tl.constexpr,
-    BLOCK_M: tl.constexpr,
-    BLOCK_N: tl.constexpr,
-    BLOCK_K: tl.constexpr,
-    GROUP_M: tl.constexpr,
-):
-    pid = tl.program_id(0)
-    grid_m = tl.cdiv(m, BLOCK_M)
-    grid_n = tl.cdiv(n, BLOCK_N)
-    width = GROUP_M * grid_n
-    group_id = pid // width
-    group_size = tl.minimum(grid_m - group_id * GROUP_M, GROUP_M)
-    pid_m = group_id * GROUP_M + (pid % group_size)
-    pid_n = (pid % width) // group_size
-
-    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
-    offs_k_base = tl.arange(0, BLOCK_K)
-    acc_t = tl.zeros((BLOCK_N, BLOCK_M), dtype=tl.float32)
-
-    if CHECK_BOUNDS:
-        is_full_m = (pid_m * BLOCK_M + BLOCK_M) <= m
-        is_full_n = (pid_n * BLOCK_N + BLOCK_N) <= n
-        k_full_iters = k // BLOCK_K
-        k_remainder = k % BLOCK_K
-        for ki in range(k_full_iters):
-            offs_k = ki * BLOCK_K + offs_k_base
-            a_ptrs = a_ptr + offs_k[:, None] * lda + offs_m[None, :]
-            b_ptrs = b_ptr + offs_n[:, None] * ldb + offs_k[None, :]
-            if is_full_m and is_full_n:
-                a_t = tl.load(a_ptrs)
-                b_t = tl.load(b_ptrs)
-            else:
-                a_t = tl.load(a_ptrs, mask=offs_m[None, :] < m, other=0.0)
-                b_t = tl.load(b_ptrs, mask=offs_n[:, None] < n, other=0.0)
-            acc_t = tl.dot(b_t, a_t, acc_t, out_dtype=tl.float32, allow_tf32=False)
-        if k_remainder > 0:
-            offs_k = k_full_iters * BLOCK_K + offs_k_base
-            mask_k = offs_k < k
-            a_ptrs = a_ptr + offs_k[:, None] * lda + offs_m[None, :]
-            b_ptrs = b_ptr + offs_n[:, None] * ldb + offs_k[None, :]
-            a_t = tl.load(
-                a_ptrs, mask=(mask_k[:, None] & (offs_m[None, :] < m)), other=0.0
-            )
-            b_t = tl.load(
-                b_ptrs, mask=((offs_n[:, None] < n) & mask_k[None, :]), other=0.0
-            )
-            acc_t = tl.dot(b_t, a_t, acc_t, out_dtype=tl.float32, allow_tf32=False)
-    else:
-        for k_start in range(0, k, BLOCK_K):
-            offs_k = k_start + offs_k_base
-            a_t = tl.load(a_ptr + offs_k[:, None] * lda + offs_m[None, :])
-            b_t = tl.load(b_ptr + offs_n[:, None] * ldb + offs_k[None, :])
-            acc_t = tl.dot(b_t, a_t, acc_t, out_dtype=tl.float32, allow_tf32=False)
-
-    acc = tl.trans(acc_t)
-    c_ptrs = c_ptr + offs_m[:, None] * ldc + offs_n[None, :]
-    result = alpha * acc
-    if CHECK_BOUNDS:
-        c_mask = (offs_m[:, None] < m) & (offs_n[None, :] < n)
-        if not BETA_IS_ZERO:
-            result += beta * tl.load(c_ptrs, mask=c_mask, other=0.0).to(tl.float32)
-        tl.store(c_ptrs, result.to(tl.float32), mask=c_mask)
-    else:
-        if not BETA_IS_ZERO:
-            result += beta * tl.load(c_ptrs).to(tl.float32)
-        tl.store(c_ptrs, result.to(tl.float32))
-
-
-@triton.jit
 def _sgemm_k_tail_kernel(
     a_ptr,
     b_ptr,
@@ -527,34 +444,6 @@ def _launch_sgemm(
     group_m: int,
     num_stages: int,
 ) -> None:
-    if (
-        not check_bounds
-        and transa == CUBLAS_OP_T
-        and transb == CUBLAS_OP_T
-        and (m == 4096 and n == 8192 and k == 28672)
-    ):
-        _sgemm_tt_kernel[grid](
-            A,
-            B,
-            C,
-            alpha,
-            beta,
-            m,
-            n,
-            k,
-            lda,
-            ldb,
-            ldc,
-            beta_is_zero,
-            False,
-            BLOCK_M=block_m,
-            BLOCK_N=block_n,
-            BLOCK_K=block_k,
-            GROUP_M=group_m,
-            num_warps=num_warps,
-            num_stages=num_stages,
-        )
-        return
     _sgemm_kernel[grid](
         A,
         B,
