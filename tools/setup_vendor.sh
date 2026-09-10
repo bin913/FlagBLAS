@@ -123,7 +123,7 @@ case $VENDOR in
     # FLAGTREE_BACKEND selects the iluvatar backend, MAX_JOBS the native build
     # parallelism (FlagTree's setup.py reads both). The verbose build output
     # goes to a log file (it is huge) and its tail is reported on failure.
-    if ! ( cd "${FLAGTREE_SRC}/" \
+    if ! ( cd "${FLAGTREE_SRC}/python" \
            && export FLAGTREE_BACKEND=iluvatar MAX_JOBS="${MAX_JOBS:-32}" \
            && python3 -m pip install . --no-build-isolation -v ) \
          > /tmp/flagtree-build.log 2>&1; then
