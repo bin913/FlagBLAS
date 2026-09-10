@@ -168,6 +168,15 @@ case $VENDOR in
     if [ -n "$_libdirs" ]; then
       export LD_LIBRARY_PATH="${_libdirs}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
     fi
+    # The stock CUDA-10.2 wheel cupy asks for its runtime symbols under the
+    # `libcudart.so.10.2` version node, which the corex runtime does not
+    # provide (it exports them under `CUDART`); setup_vendor.sh builds a
+    # forwarding shim for it. The shim has to win the lookup, so it goes in
+    # front of everything above -- this is what also makes it effective in the
+    # test step, which sources this script *after* .venv/bin/activate.
+    if [ -f .venv/lib/cudart-shim/libcudart.so.10.2 ]; then
+      export LD_LIBRARY_PATH="$(cd .venv/lib/cudart-shim && pwd)${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    fi
     # FlagGems backends.yaml sets CPATH for iluvatar as well.
     if [ -d /usr/local/cuda-10.2/include ]; then
       export CPATH=/usr/local/cuda-10.2/include

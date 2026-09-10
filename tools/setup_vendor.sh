@@ -241,6 +241,28 @@ PYEOF
             echo "::error title=iluvatar cupy install failed::uv pip install cupy-cuda102==12.3.0"
             exit 1
           }
+      # That cupy is a stock CUDA-10.2 build, so it asks for its runtime
+      # symbols under the `libcudart.so.10.2` version node, while corex exports
+      # them under the newer `CUDART` node: `import cupy` then dies with
+      # "undefined symbol: cudaDeviceCanAccessPeer, version libcudart.so.10.2".
+      # Build a drop-in libcudart.so.10.2 that re-exports the corex runtime
+      # under both nodes; set-env.sh puts its directory ahead of the corex lib
+      # dirs (in this step as well as in the test step).
+      _cudart_cands=""
+      if [ -n "$COREX_ROOT" ]; then
+        for _cd in "$COREX_ROOT/lib64" "$COREX_ROOT/lib"; do
+          if [ -f "$_cd/libcudart.so.10.2" ]; then
+            _cudart_cands="${_cudart_cands} --candidate ${_cd}/libcudart.so.10.2"
+          fi
+        done
+      fi
+      if ! python tools/make_cudart_shim.py --out .venv/lib/cudart-shim \
+               ${_cudart_cands} 2>&1 | tee /tmp/iluvatar-cudart-shim.log; then
+        echo "::error title=iluvatar libcudart shim failed::$(tail -8 /tmp/iluvatar-cudart-shim.log | tr '\n' ' ' | head -c 1500)"
+        exit 1
+      fi
+      export LD_LIBRARY_PATH="$(cd .venv/lib/cudart-shim && pwd)${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+      echo "::warning title=iluvatar setup::libcudart version-node shim built"
     fi
 
     # Install FlagBLAS editable. Base deps do not include torch, so a normal
@@ -276,6 +298,7 @@ PYEOF
       _diag="${_diag} cupyenvs=$(find /usr/local /opt -maxdepth 8 -type d -name cupy 2>/dev/null | head -4 | tr '\n' ',' || true)"
       _diag="${_diag} ixthunk=$(find /usr/local /opt -maxdepth 6 -name 'libixthunk.so*' 2>/dev/null | tr '\n' ',' || true)"
       _diag="${_diag} unresolved=$(ldd .venv/lib/python*/site-packages/torch/lib/libtorch_python.so 2>/dev/null | grep 'not found' | tr '\n' ',' || true)"
+      _diag="${_diag} cudartshim=$(ls .venv/lib/cudart-shim/libcudart.so.10.2 2>/dev/null || echo none)"
       _diag="${_diag} ldpath=$(printf '%s' "${LD_LIBRARY_PATH:-}" | head -c 1200 || true)"
       echo "::warning title=iluvatar diag::${_diag}"
     fi
@@ -308,12 +331,12 @@ try:
                 "cupy cannot load against this corex runtime: corex's "
                 "libcudart.so.10.2 exports its symbols under the CUDART "
                 "version node, while wheels built against stock CUDA 10.2 "
-                "need them under the libcudart.so.10.2 node. Only the "
-                "corex-built cupy loads here, so install the corex python "
-                "packages on this runner (e.g. "
-                "corex-<ver>/lib64/python3/dist-packages, which ship "
-                "torch/cupy built for corex); setup reuses that env "
-                "automatically."
+                "need them under the libcudart.so.10.2 node. "
+                "tools/make_cudart_shim.py builds a forwarding "
+                "libcudart.so.10.2 that exports both nodes, and set-env.sh "
+                "prepends its directory to LD_LIBRARY_PATH; check "
+                "/tmp/iluvatar-cudart-shim.log and that .venv/lib/cudart-shim "
+                "comes before the corex lib dirs."
             ) from e
         raise
     print("cupy:", cupy.__version__)
