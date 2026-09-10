@@ -123,9 +123,9 @@ case $VENDOR in
     # FLAGTREE_BACKEND selects the iluvatar backend, MAX_JOBS the native build
     # parallelism (FlagTree's setup.py reads both). The verbose build output
     # goes to a log file (it is huge) and its tail is echoed verbatim on
-    # failure: the exception is the *last* line, and squeezing the tail into
-    # the error annotation truncated it away (setup.py downloads its deps at
-    # build time with urllib -- e.g. the 1.5 GiB iluvatar LLVM tarball).
+    # failure, with the *end* of that tail (the exception line) repeated in the
+    # annotation: squeezing the whole tail into the annotation truncated the
+    # exception away, and the raw log itself is not readable without a login.
     if ! ( cd "${FLAGTREE_SRC}/" \
            && export FLAGTREE_BACKEND=iluvatar MAX_JOBS="${MAX_JOBS:-32}" \
            && python3 -m pip install . --no-build-isolation -v ) \
@@ -133,7 +133,7 @@ case $VENDOR in
       echo "----- last 30 lines of /tmp/flagtree-build.log -----"
       tail -30 /tmp/flagtree-build.log
       echo "----- end of tail (full log on the runner: /tmp/flagtree-build.log) -----"
-      echo "::error title=flagtree source build failed::see the log tail in this step's output"
+      echo "::error title=flagtree source build failed::$(tail -6 /tmp/flagtree-build.log | tr '\n' ' ' | tail -c 1000)"
       exit 1
     fi
     tail -3 /tmp/flagtree-build.log
