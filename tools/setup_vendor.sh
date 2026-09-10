@@ -114,8 +114,8 @@ case $VENDOR in
     else
       git clone --depth 1 https://github.com/flagos-ai/FlagTree.git "${FLAGTREE_SRC}"
     fi
-    if [ ! -f "${FLAGTREE_SRC}/python/setup.py" ]; then
-      echo "::error title=flagtree checkout failed::${FLAGTREE_SRC} has no python/setup.py (clone/fetch of https://github.com/flagos-ai/FlagTree.git main failed)"
+    if [ ! -f "${FLAGTREE_SRC}/setup.py" ]; then
+      echo "::error title=flagtree checkout failed::${FLAGTREE_SRC} has no setup.py (clone/fetch of https://github.com/flagos-ai/FlagTree.git main failed)"
       exit 1
     fi
     echo "FlagTree source: ${FLAGTREE_SRC} @ $(git -C "${FLAGTREE_SRC}" rev-parse --short HEAD)"
@@ -123,7 +123,7 @@ case $VENDOR in
     # FLAGTREE_BACKEND selects the iluvatar backend, MAX_JOBS the native build
     # parallelism (FlagTree's setup.py reads both). The verbose build output
     # goes to a log file (it is huge) and its tail is reported on failure.
-    if ! ( cd "${FLAGTREE_SRC}/python" \
+    if ! ( cd "${FLAGTREE_SRC}/" \
            && export FLAGTREE_BACKEND=iluvatar MAX_JOBS="${MAX_JOBS:-32}" \
            && python3 -m pip install . --no-build-isolation -v ) \
          > /tmp/flagtree-build.log 2>&1; then
