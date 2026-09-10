@@ -77,7 +77,14 @@ case $VENDOR in
     UV_INDEX_URL="https://resource.flagos.net/repository/flagos-pypi-iluvatar/simple"
     UV_EXTRA_INDEX_URL="https://mirrors.aliyun.com/pypi/simple"
 
-    uv pip install flagtree===0.6.2a3+iluvatar3.6 \
+    # The wheel bundles the `triton` package, so its libtriton.so must be
+    # loadable by the runner's glibc. 0.6.2a3+iluvatar3.6 is built for Ubuntu
+    # 24.04 and needs GLIBC_2.38, which the corex440 runner does not provide
+    # ("version `GLIBC_2.38' not found" on `import triton`). 0.6.1+iluvatar3.6
+    # is built against glibc 2.34 (Ubuntu 22.04) and loads there; it is also
+    # the flagtree version the nvidia backend uses. Both are the iluvatar3.6
+    # backend, which pairs with the corex 4.4.0 + torch 2.7.1 stack below.
+    uv pip install flagtree===0.6.1+iluvatar3.6 \
         --index-url https://resource.flagos.net/repository/flagos-pypi-hosted/simple
 
     uv pip install -e .
@@ -89,9 +96,11 @@ case $VENDOR in
       exit 1
     fi
 
-    # Sanity check: the corex torch must be importable and must see the
-    # Iluvatar device, otherwise the test step fails later with a confusing
-    # ModuleNotFoundError / import error.
+    # Sanity check: the corex torch must be importable, must see the Iluvatar
+    # device, and flagtree's bundled triton must load -- otherwise the test
+    # step fails later with a confusing ModuleNotFoundError / import error.
+    # The glibc version is printed because a flagtree built for a newer glibc
+    # than the runner's is the failure mode behind "import triton" errors.
     set +e
     python - <<'PYEOF'
 import importlib.metadata, traceback
@@ -104,16 +113,20 @@ try:
     print("torch.cuda available:", torch.cuda.is_available(),
           "| count:", torch.cuda.device_count())
     assert torch.cuda.device_count() > 0, "no iluvatar device visible to torch"
+    import platform
+    print("glibc:", platform.libc_ver())
+    import triton
+    print("triton:", triton.__version__, "from", triton.__file__)
 except Exception:
     tb = traceback.format_exc()
     print(tb)
-    print("::error title=iluvatar torch sanity check failed::" + tb.replace("%", "%25").replace("\n", "%0A"))
+    print("::error title=iluvatar runtime sanity check failed::" + tb.replace("%", "%25").replace("\n", "%0A"))
     raise SystemExit(1)
 PYEOF
     SANITY_RC=$?
     set -e
     if [ $SANITY_RC -ne 0 ]; then
-      echo "::error title=iluvatar torch sanity check failed::sanity check failed with rc=${SANITY_RC}"
+      echo "::error title=iluvatar runtime sanity check failed::sanity check failed with rc=${SANITY_RC}"
       exit 1
     fi
     ;;
