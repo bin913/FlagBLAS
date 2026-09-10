@@ -88,7 +88,7 @@ case $VENDOR in
       printf '\n# Source bundled corex python env (required by corex PyTorch/CuPy)\nexport PYTHONPATH="%s${PYTHONPATH:+:$PYTHONPATH}"\n' "$ILUVATAR_COREX_PYDIR" >> .venv/bin/activate
       echo "Baked corex python env into .venv/bin/activate: ${ILUVATAR_COREX_PYDIR}"
     else
-      echo "::warning title=iluvatar setup::no bundled corex python env; installing corex torch from the flagos mirror (cp312). Note: no corex cupy wheel is hosted, so the test suite will fall back to the CPU reference when cupy is missing."
+      echo "::warning title=iluvatar setup::no bundled corex python env; installing corex torch from the flagos mirror (cp312). Note: no corex cupy wheel is hosted, so cupy-based reference tests cannot run on this path."
       # Mirrors FlagGems backends.yaml (iluvatar): python 3.12 + pinned corex
       # torch/torchaudio/torchvision/triton + numpy<2 from the
       # flagos-pypi-iluvatar index (aliyun is only a transitive-deps mirror).

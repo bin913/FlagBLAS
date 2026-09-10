@@ -92,17 +92,20 @@ case $VENDOR in
     else
       export PATH="${COREX_ROOT}/bin:${PATH}"
     fi
-    # Build LD_LIBRARY_PATH in priority order: lib dirs of the corex install
-    # that actually ship a CUDA-10.2 libcudart (SONAME libcudart.so.10, which
-    # still exports cudaProfilerInitialize) MUST come first, so the loader
-    # binds them instead of a same-named lib from another corex version or
-    # the CUDA 12 system libcudart.
-    _libdirs=""
-    for _cr in "${COREX_ROOT}" /usr/local/cuda-10.2; do
-      [ -n "$_cr" ] || continue
+    # Build LD_LIBRARY_PATH with two priorities:
+    #   1) dirs whose libcudart.so.10 exports cudaProfilerInitialize (the corex
+    #      torch build needs it; the system CUDA 12 cudart lacks it) - these
+    #      must win libcudart resolution;
+    #   2) every other corex / CUDA-10.2 lib dir, which still provides runtime
+    #      libraries such as libixthunk.so. Dropping those dirs would make the
+    #      torch import fail with "cannot open shared object file".
+    _good=""
+    _late=""
+    for _cr in "${COREX_ROOT}" /usr/local/cuda-10.2 /usr/local/corex /usr/local/corex-* /opt/corex-*; do
+      [ -n "$_cr" ] && [ -d "$_cr" ] || continue
       for _cd in "$_cr/lib64" "$_cr/lib"; do
         if [ -d "$_cd" ] && ls "$_cd"/libcudart.so.10* >/dev/null 2>&1; then
-          case ":$_libdirs:" in *":$_cd:"*) ;; *) _libdirs="$_libdirs$_cd:" ;; esac
+          case ":$_good:" in *":$_cd:"*) ;; *) _good="$_good$_cd:" ;; esac
         fi
       done
     done
@@ -110,27 +113,13 @@ case $VENDOR in
     # libcudart (SONAME libcudart.so.10), in case corex lives elsewhere.
     while IFS= read -r _cd; do
       [ -n "$_cd" ] || continue
-      case ":$_libdirs:" in
-        *":$_cd:"*) ;;
-        *) _libdirs="$_libdirs$_cd:" ;;
-      esac
+      case ":$_good:" in *":$_cd:"*) ;; *) _good="$_good$_cd:" ;; esac
     done < <(find /usr/local /opt -maxdepth 5 -name 'libcudart.so.10*' -type f 2>/dev/null | sed 's#/[^/]*$##' | sort -u)
-    # Remaining lib dirs of the corex install / cuda-10.2 (other runtime
-    # libs beyond cudart).
-    for _cr in "${COREX_ROOT}" /usr/local/cuda-10.2; do
-      [ -n "$_cr" ] || continue
-      for _cd in "$_cr/lib64" "$_cr/lib"; do
-        if [ -d "$_cd" ]; then
-          case ":$_libdirs:" in *":$_cd:"*) ;; *) _libdirs="$_libdirs$_cd:" ;; esac
-        fi
-      done
-    done
-    # Drop any dir whose libcudart.so.10 does NOT export
-    # cudaProfilerInitialize (some corex installs ship a cudart that keeps
-    # the libcudart.so.10 SONAME but drops the deprecated profiler entry
-    # point, which would still produce the undefined-symbol crash).
-    _filtered=""
-    _rest="$_libdirs"
+    # Demote (not drop) dirs whose libcudart.so.10 misses the symbol: some
+    # corex versions ship a trimmed cudart that keeps the SONAME but drops the
+    # deprecated profiler entry point.
+    _checked=""
+    _rest="$_good"
     while [ -n "$_rest" ]; do
       case "$_rest" in
         *:*) _cd="${_rest%%:*}"; _rest="${_rest#*:}" ;;
@@ -147,12 +136,28 @@ case $VENDOR in
         fi
       fi
       if [ "$_keep" = 1 ]; then
-        case ":$_filtered:" in *":$_cd:"*) ;; *) _filtered="$_filtered$_cd:" ;; esac
+        _checked="$_checked$_cd:"
       else
-        echo "::warning title=iluvatar env::drop lib dir (libcudart.so.10 lacks cudaProfilerInitialize): ${_cd}"
+        case ":$_late:" in *":$_cd:"*) ;; *) _late="$_late$_cd:" ;; esac
+        echo "::warning title=iluvatar env::demote lib dir (libcudart.so.10 lacks cudaProfilerInitialize): ${_cd}"
       fi
     done
-    _libdirs="${_filtered%:}"
+    _good="$_checked"
+    # Every other corex / CUDA-10.2 lib dir, so runtime libs such as
+    # libixthunk.so resolve even when the dir ships no usable cudart.
+    for _cr in "${COREX_ROOT}" /usr/local/cuda-10.2 /usr/local/corex /usr/local/corex-* /opt/corex-*; do
+      [ -n "$_cr" ] && [ -d "$_cr" ] || continue
+      for _cd in "$_cr/lib64" "$_cr/lib"; do
+        if [ -d "$_cd" ]; then
+          case ":$_good:" in
+            *":$_cd:"*) ;;
+            *) case ":$_late:" in *":$_cd:"*) ;; *) _late="$_late$_cd:" ;; esac ;;
+          esac
+        fi
+      done
+    done
+    _libdirs="${_good}${_late}"
+    _libdirs="${_libdirs%:}"
     if [ -n "$_libdirs" ]; then
       export LD_LIBRARY_PATH="${_libdirs}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
     fi
