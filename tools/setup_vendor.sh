@@ -65,11 +65,59 @@ case $VENDOR in
     ;;
 
   iluvatar)
-    uv  pip install flagtree===0.6.2a3+iluvatar3.6 \
+    # Corex PyTorch is published with a local version tag (+corex.4.4.0) that
+    # only exists on the flagos-pypi-iluvatar index, so the `[iluvatar]` extra
+    # can never resolve against plain PyPI. Dropping the index flags makes the
+    # whole `[test,iluvatar]` resolve fail, which silently also skips the
+    # `test` extra -- leaving the venv without torch and without coverage.
+    # The flagos index only hosts vendor wheels, so add a general PyPI mirror
+    # for torch's transitive deps. --index-strategy unsafe-best-match is
+    # required: under uv's default first-index strategy a plain torch from the
+    # mirror is picked and the corex build is never considered.
+    UV_INDEX_URL="https://resource.flagos.net/repository/flagos-pypi-iluvatar/simple"
+    UV_EXTRA_INDEX_URL="https://mirrors.aliyun.com/pypi/simple"
+
+    uv pip install flagtree===0.6.2a3+iluvatar3.6 \
         --index-url https://resource.flagos.net/repository/flagos-pypi-hosted/simple
+
     uv pip install -e .
-    uv pip install ".[test,iluvatar]"
+    if ! uv pip install ".[test,iluvatar]" \
+         --index-url ${UV_INDEX_URL} \
+         --extra-index-url ${UV_EXTRA_INDEX_URL} \
+         --index-strategy unsafe-best-match 2>&1 | tee /tmp/iluvatar-deps.log; then
+      echo "::error title=iluvatar deps install failed::$(tail -8 /tmp/iluvatar-deps.log | tr '\n' ' ' | head -c 1500)"
+      exit 1
+    fi
+
+    # Sanity check: the corex torch must be importable and must see the
+    # Iluvatar device, otherwise the test step fails later with a confusing
+    # ModuleNotFoundError / import error.
+    set +e
+    python - <<'PYEOF'
+import importlib.metadata, traceback
+try:
+    dist = importlib.metadata.version("torch")
+    print("iluvatar torch dist:", dist)
+    assert "+corex" in dist, f"unexpected torch distribution: {dist}"
+    import torch
+    torch.cuda.init()
+    print("torch.cuda available:", torch.cuda.is_available(),
+          "| count:", torch.cuda.device_count())
+    assert torch.cuda.device_count() > 0, "no iluvatar device visible to torch"
+except Exception:
+    tb = traceback.format_exc()
+    print(tb)
+    print("::error title=iluvatar torch sanity check failed::" + tb.replace("%", "%25").replace("\n", "%0A"))
+    raise SystemExit(1)
+PYEOF
+    SANITY_RC=$?
+    set -e
+    if [ $SANITY_RC -ne 0 ]; then
+      echo "::error title=iluvatar torch sanity check failed::sanity check failed with rc=${SANITY_RC}"
+      exit 1
+    fi
     ;;
+
   ascend)
     # Install PyTorch (CPU build) and torch-npu for Ascend NPU
     uv pip install torch==2.10.0+cpu torch-npu==2.10.0 \
