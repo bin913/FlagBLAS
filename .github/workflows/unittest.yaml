@@ -149,7 +149,12 @@ jobs:
     uses: ./.github/workflows/backend-test.yaml
     with:
       vendor: 'iluvatar'
-      runner_label: 'iluvatar'
+      # Pin to the BI-V150 (corex 4.4.0) self-hosted runner. The generic
+      # 'iluvatar' label is shared by three machines -- iluvatar-n15
+      # (corex440), iluvatar-n23 (corex450) and iluvatar-n87 (no corex tag) --
+      # so the job could land on a host without the corex 4.4.0 runtime.
+      # 'corex440' is only registered on the BI-V150 machine (iluvatar-n15).
+      runner_label: 'corex440'
       gpu_check_script: 'tools/check_iluvatar_gpu.sh'
       pr_id: ${{ needs.preprocess.outputs.pr_id }}
       changed_files: ${{ join(needs.preprocess.outputs.changed_files, ' ') }}
