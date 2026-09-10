@@ -27,6 +27,10 @@ CUBLAS_OP_N = 0
 CUBLAS_OP_T = 1
 CUBLAS_OP_C = 2
 
+# Shared memory available to a block on the iluvatar parts (128 KiB on the
+# BI-V150); the tile sizes and the pipeline depth have to stay within it.
+_SHARED_MEMORY_LIMIT = 128 * 1024
+
 
 @triton.jit
 def _sgemm_kernel(
@@ -626,6 +630,12 @@ def sgemm(
     num_stages = (
         2 if (m == n == k and max(m, n, k) >= 4096) or (n == 128 and m >= 1024) else 3
     )
+    # Triton stages one A/B tile pair per pipeline stage, and the iluvatar parts
+    # cap shared memory at 128 KiB: the 256^3 tiles (64x32x128) would need
+    # 3 * (64 + 32) * 128 * 4 = 144 KiB and every launch dies with
+    # triton.runtime.errors.OutOfResources, so drop a stage.
+    if num_stages * (block_m + block_n) * block_k * 4 > _SHARED_MEMORY_LIMIT:
+        num_stages -= 1
 
     with torch_device_fn.device(A.device):
         if check_bounds and max(m, n, k) >= 2048:
