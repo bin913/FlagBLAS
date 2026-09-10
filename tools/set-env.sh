@@ -91,6 +91,18 @@ case $VENDOR in
       echo "WARNING: no corex install found under /usr/local/corex*; corex torch will not work"
     else
       export PATH="${COREX_ROOT}/bin:${PATH}"
+      # Triton's iluvatar backend guesses the CUDA-10.2 toolkit through
+      # `whereis ixsmi` (taking the parent of its parent) unless CUDA_HOME is
+      # set, and it wants corex's own libdevice bitcode (nvvm/libdevice/
+      # libdevice.compute_bi.10.bc, not the NVIDIA filename). On runners where
+      # ixsmi is also installed under /usr/local/bin that guess lands on
+      # /usr/local and every kernel compile dies with
+      # "FileNotFoundError: /usr/local/nvvm/libdevice/libdevice.compute_bi.10.bc".
+      # corex is the CUDA toolkit here, so point both at it explicitly.
+      export CUDA_HOME="${COREX_ROOT}"
+      if [ -f "${COREX_ROOT}/nvvm/libdevice/libdevice.compute_bi.10.bc" ]; then
+        export TRITON_LIBDEVICE_PATH="${COREX_ROOT}/nvvm/libdevice/libdevice.compute_bi.10.bc"
+      fi
     fi
     # Build LD_LIBRARY_PATH with two priorities:
     #   1) dirs whose libcudart.so.10 exports cudaProfilerInitialize (the corex
@@ -186,7 +198,7 @@ case $VENDOR in
     # is not fetchable without authentication). Keep it to ONE line: GitHub
     # keeps at most 10 warning annotations per step.
     if [ -n "${GITHUB_ACTIONS:-}" ]; then
-      echo "::warning title=iluvatar env::COREX_ROOT=${COREX_ROOT:-<none>}; demoted=[${_demoted:-none}]; libdirs=${_libdirs:-<empty>}"
+      echo "::warning title=iluvatar env::COREX_ROOT=${COREX_ROOT:-<none>}; demoted=[${_demoted:-none}]; libdirs=${_libdirs:-<empty>}; cuda_home=${CUDA_HOME:-<none>}; libdevice=${TRITON_LIBDEVICE_PATH:-<none>}"
     fi
     echo "COREX_ROOT=${COREX_ROOT:-<none>}"
     echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-<empty>}"
