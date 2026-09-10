@@ -120,30 +120,19 @@ case $VENDOR in
     fi
     echo "FlagTree source: ${FLAGTREE_SRC} @ $(git -C "${FLAGTREE_SRC}" rev-parse --short HEAD)"
 
-    # The Iluvatar KS3 bucket below is only reachable from the FlagOS
-    # self-hosted iluvatar runners through the proxy declared in ~/env.sh --
-    # that is exactly why FlagTree's own iluvatar CI (workflows/
-    # iluvatar3.6-build-and-test.yml) opens with `source ~/env.sh` and copies
-    # the proxy variables into $GITHUB_ENV. Without them the bucket answers
-    # every request with HTTP 500, which is what makes the download below fail.
-    # Only the proxy variables are imported: ~/env.sh also re-exports a whole
-    # toolchain environment and must not shadow the venv's uv/python on PATH.
-    if [ -f "${HOME}/env.sh" ]; then
-      ( set -a; . "${HOME}/env.sh" >/dev/null 2>&1; env ) \
-        | grep -iE '^(http_proxy|https_proxy|all_proxy|no_proxy)=' > /tmp/flagos-proxy.env || true
-      if [ -s /tmp/flagos-proxy.env ]; then
-        set -a; . /tmp/flagos-proxy.env; set +a
-      fi
-    fi
-    echo "external-download proxy: ${https_proxy:-${http_proxy:-${all_proxy:-<none>}}} (~/env.sh: $([ -f "${HOME}/env.sh" ] && echo yes || echo no))"
-
     # setup.py fetches the iluvatar LLVM toolchain (~1.5 GiB) with urllib while
-    # generating package metadata. On this runner that fails immediately --
-    # "The download failed, probably due to network problems!"
-    # (setup_tools/utils/tools.py, 4 retries, no backoff) -- which aborts the
-    # build before it starts. Fetch the tarball with curl into the directory
-    # FlagTree's cache looks for, so check_file() finds it and the build skips
-    # its own download. Override FLAGTREE_LLVM_URL to use a reachable mirror.
+    # generating package metadata; on this runner that aborts the build before
+    # it starts ("The download failed, probably due to network problems!",
+    # setup_tools/utils/tools.py, 4 retries, no backoff). Pre-fetch the tarball
+    # with curl into the directory FlagTree's cache looks for, so check_file()
+    # finds it and the build skips its own download.
+    #
+    # The runner reaches the network through https_proxy and that proxy answers
+    # every request for this KS3 bucket with HTTP 500 ("curl: (22) The
+    # requested URL returned error: 500"). Which of the possible causes it is
+    # (host missing from the proxy's allow-list, CONNECT refused, ...) cannot
+    # be told from here, so try the alternatives in turn and keep the whole log
+    # for the failure annotation.
     FLAGTREE_LLVM_URL=${FLAGTREE_LLVM_URL:-https://baai-cp-web.ks3-cn-beijing.ksyuncs.com/trans/iluvatar-llvm22-x86_64_v0.6.1.tar.gz}
     LLVM_DIR="${HOME}/.flagtree/iluvatar/iluvatar-llvm22-x86_64"
     # bin/clang rather than a bare -d: FlagTree's check_file() only tests for
@@ -152,15 +141,36 @@ case $VENDOR in
     # toolchain.
     if [ ! -x "${LLVM_DIR}/bin/clang" ]; then
       mkdir -p "$(dirname "${LLVM_DIR}")"
-      if ! curl -fsSL --retry 5 --retry-delay 5 --connect-timeout 30 -C - \
-           -o /tmp/iluvatar-llvm22.tar.gz "${FLAGTREE_LLVM_URL}" \
-           > /tmp/flagtree-llvm-fetch.log 2>&1; then
-        # -s keeps curl's progress meter out of the log so that the error
-        # ("curl: (7) Failed to connect ...", "(28) ...", "(22) ...") is the
-        # last line and therefore survives the truncation below.
-        echo "::error title=iluvatar LLVM download failed::curl ${FLAGTREE_LLVM_URL} failed [proxy=${https_proxy:-${http_proxy:-<none>}}, ~/env.sh=$([ -f "${HOME}/env.sh" ] && echo yes || echo no)] -> $(tail -3 /tmp/flagtree-llvm-fetch.log | tr '\n' ' ' | tail -c 700)"
+      : > /tmp/flagtree-llvm-fetch.log
+      fetched=""
+      for attempt in proxy direct proxy-http; do
+        url="${FLAGTREE_LLVM_URL}"
+        extra=()
+        case "${attempt}" in
+          direct) extra=(--noproxy '*') ;;
+          # Plain HTTP is proxied as an absolute-URI request instead of
+          # CONNECT, which some proxies allow where CONNECT is blocked.
+          proxy-http) url="${url/https:/http:}" ;;
+        esac
+        echo "===== curl [${attempt}] ${url} =====" >> /tmp/flagtree-llvm-fetch.log
+        rm -f /tmp/iluvatar-llvm22.tar.gz
+        if curl -v -fsSL --retry 2 --retry-delay 5 --connect-timeout 30 "${extra[@]}" \
+             -o /tmp/iluvatar-llvm22.tar.gz "${url}" \
+             >> /tmp/flagtree-llvm-fetch.log 2>&1; then
+          fetched="${attempt}"
+          break
+        fi
+      done
+      if [ -z "${fetched}" ]; then
+        echo "----- LLVM fetch log (tail) -----"
+        tail -25 /tmp/flagtree-llvm-fetch.log
+        echo "----- end of tail (full log on the runner: /tmp/flagtree-llvm-fetch.log) -----"
+        # -v puts the proxy's response and curl's last line next to each other,
+        # so the end of the log is the part worth quoting.
+        echo "::error title=iluvatar LLVM download failed::no curl attempt reached ${FLAGTREE_LLVM_URL} [proxy=${https_proxy:-${http_proxy:-<none>}}] -> $(tail -6 /tmp/flagtree-llvm-fetch.log | tr '\n' ' ' | tail -c 900)"
         exit 1
       fi
+      echo "iluvatar LLVM downloaded with curl mode: ${fetched}"
       mkdir -p "${LLVM_DIR}"
       tar xzf /tmp/iluvatar-llvm22.tar.gz -C "${LLVM_DIR}" --strip-components=1
       rm -f /tmp/iluvatar-llvm22.tar.gz
