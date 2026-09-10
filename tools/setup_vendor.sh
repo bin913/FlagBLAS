@@ -77,16 +77,6 @@ case $VENDOR in
     UV_INDEX_URL="https://resource.flagos.net/repository/flagos-pypi-iluvatar/simple"
     UV_EXTRA_INDEX_URL="https://mirrors.aliyun.com/pypi/simple"
 
-    # The wheel bundles the `triton` package, so its libtriton.so must be
-    # loadable by the runner's glibc. 0.6.2a3+iluvatar3.6 is built for Ubuntu
-    # 24.04 and needs GLIBC_2.38, which the corex440 runner does not provide
-    # ("version `GLIBC_2.38' not found" on `import triton`). 0.6.1+iluvatar3.6
-    # is built against glibc 2.34 (Ubuntu 22.04) and loads there; it is also
-    # the flagtree version the nvidia backend uses. Both are the iluvatar3.6
-    # backend, which pairs with the corex 4.4.0 + torch 2.7.1 stack below.
-    uv pip install flagtree===0.6.1+iluvatar3.6 \
-        --index-url https://resource.flagos.net/repository/flagos-pypi-hosted/simple
-
     uv pip install -e .
     if ! uv pip install ".[test,iluvatar]" \
          --index-url ${UV_INDEX_URL} \
@@ -96,11 +86,58 @@ case $VENDOR in
       exit 1
     fi
 
+    # FlagTree (which bundles the `triton` package flag_blas imports) is built
+    # from source instead of installed from the prebuilt `flagtree` wheel:
+    # every iluvatar wheel on the mirror (0.5.1+iluvatar3.1, 0.6.0/0.6.1/
+    # 0.6.2a3+iluvatar3.6) is built on Ubuntu 24.04, so its libtriton.so
+    # needs a newer runtime than this Ubuntu 22.04 runner provides ("version
+    # `GLIBC_2.38' not found", then "version `GLIBCXX_3.4.32' not found" once
+    # a glibc 2.34 wheel is picked). Building the iluvatar backend from source
+    # links libtriton.so against the runner's own toolchain. torch is
+    # installed first (above) because FlagTree's build probes it, and
+    # setup.py downloads the iluvatar LLVM + plugin into ~/.flagtree/iluvatar
+    # when the network is reachable.
+    uv pip uninstall triton flagtree || true
+
+    # `uv venv` does not seed pip, but FlagTree's documented source build runs
+    # `python3 -m pip install . --no-build-isolation`; the pip that runs and
+    # the pip that setup.py shells out to must exist. setuptools is pinned <82
+    # because FlagTree's build-system.requires is `setuptools>=79.0.1,<82`
+    # and --no-build-isolation validates it against the venv -- setup.sh
+    # installs the newest setuptools (>=82), which would abort the build.
+    uv pip install pip wheel "setuptools>=79.0.1,<82"
+
+    FLAGTREE_SRC=${FLAGTREE_SRC:-${HOME}/FlagTree}
+    if [ -d "${FLAGTREE_SRC}/.git" ]; then
+      git -C "${FLAGTREE_SRC}" fetch --depth 1 origin main
+      git -C "${FLAGTREE_SRC}" checkout -f FETCH_HEAD
+    else
+      git clone --depth 1 https://github.com/flagos-ai/FlagTree.git "${FLAGTREE_SRC}"
+    fi
+    if [ ! -f "${FLAGTREE_SRC}/python/setup.py" ]; then
+      echo "::error title=flagtree checkout failed::${FLAGTREE_SRC} has no python/setup.py (clone/fetch of https://github.com/flagos-ai/FlagTree.git main failed)"
+      exit 1
+    fi
+    echo "FlagTree source: ${FLAGTREE_SRC} @ $(git -C "${FLAGTREE_SRC}" rev-parse --short HEAD)"
+
+    # FLAGTREE_BACKEND selects the iluvatar backend, MAX_JOBS the native build
+    # parallelism (FlagTree's setup.py reads both). The verbose build output
+    # goes to a log file (it is huge) and its tail is reported on failure.
+    if ! ( cd "${FLAGTREE_SRC}/python" \
+           && export FLAGTREE_BACKEND=iluvatar MAX_JOBS="${MAX_JOBS:-32}" \
+           && python3 -m pip install . --no-build-isolation -v ) \
+         > /tmp/flagtree-build.log 2>&1; then
+      echo "::error title=flagtree source build failed::$(tail -40 /tmp/flagtree-build.log | tr '\n' ' ' | head -c 1500)"
+      exit 1
+    fi
+    tail -3 /tmp/flagtree-build.log
+
     # Sanity check: the corex torch must be importable, must see the Iluvatar
-    # device, and flagtree's bundled triton must load -- otherwise the test
+    # device, and the flagtree-built triton must load -- otherwise the test
     # step fails later with a confusing ModuleNotFoundError / import error.
-    # The glibc version is printed because a flagtree built for a newer glibc
-    # than the runner's is the failure mode behind "import triton" errors.
+    # glibc/libstdc++ and the resolved flagtree distribution are printed
+    # because a triton linked against a newer toolchain than the runner's is
+    # the failure mode behind "import triton" errors.
     set +e
     python - <<'PYEOF'
 import importlib.metadata, traceback
@@ -115,8 +152,11 @@ try:
     assert torch.cuda.device_count() > 0, "no iluvatar device visible to torch"
     import platform
     print("glibc:", platform.libc_ver())
+    print("flagtree dist:", importlib.metadata.version("flagtree"))
     import triton
     print("triton:", triton.__version__, "from", triton.__file__)
+    import triton._C.libtriton as libtriton
+    print("libtriton:", libtriton.__file__)
 except Exception:
     tb = traceback.format_exc()
     print(tb)
