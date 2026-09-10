@@ -59,7 +59,9 @@ iluvatar = [
     "torchaudio==2.7.1+corex.4.4.0",
     "torchvision==0.22.1+corex.4.4.0",
     "numpy<2",
-    "cupy-cuda12x",
+    # The corex driver reports CUDA 10.2, so the cuda12x/cuda11x cupy builds
+    # abort with "cudaErrorInsufficientDriver"; cuda102 is the only match.
+    "cupy-cuda102",
 ]
 
 test = [

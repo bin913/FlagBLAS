@@ -88,7 +88,7 @@ case $VENDOR in
       printf '\n# Source bundled corex python env (required by corex PyTorch/CuPy)\nexport PYTHONPATH="%s${PYTHONPATH:+:$PYTHONPATH}"\n' "$ILUVATAR_COREX_PYDIR" >> .venv/bin/activate
       echo "Baked corex python env into .venv/bin/activate: ${ILUVATAR_COREX_PYDIR}"
     else
-      echo "::warning title=iluvatar setup::no bundled corex python env; installing corex torch from the flagos mirror (cp312). Note: no corex cupy wheel is hosted, so cupy-based reference tests cannot run on this path."
+      echo "::warning title=iluvatar setup::no bundled corex python env; installing corex torch + cupy from the flagos/aliyun mirrors (cp312)."
       # Mirrors FlagGems backends.yaml (iluvatar): python 3.12 + pinned corex
       # torch/torchaudio/torchvision/triton + numpy<2 from the
       # flagos-pypi-iluvatar index (aliyun is only a transitive-deps mirror).
@@ -97,6 +97,20 @@ case $VENDOR in
           --extra-index-url https://mirrors.aliyun.com/pypi/simple \
           --index-strategy unsafe-best-match || {
             echo "::error title=iluvatar torch install failed::uv pip install corex torch from flagos-pypi-iluvatar"
+            exit 1
+          }
+      # CuPy: the tests build their GPU reference through cupy, so it must be
+      # importable. No corex cupy wheel is hosted on the flagos index, so take
+      # the stock one (via the aliyun mirror). The corex driver reports CUDA
+      # 10.2, which rules out cupy-cuda11x/cuda12x (both need a newer driver
+      # and die with "cudaErrorInsufficientDriver"); cupy-cuda102 is the only
+      # build whose runtime matches, and 12.3.0 is its last release.
+      # cupy dlopens the CUDA runtime from LD_LIBRARY_PATH (it bundles no CUDA
+      # libraries), which is why corex's lib64 must be on the path -- that is
+      # already arranged by set-env.sh / .venv/bin/activate.
+      uv pip install "cupy-cuda102==12.3.0" "numpy<2" \
+          --index-url https://mirrors.aliyun.com/pypi/simple || {
+            echo "::error title=iluvatar cupy install failed::uv pip install cupy-cuda102==12.3.0"
             exit 1
           }
     fi
@@ -117,10 +131,10 @@ case $VENDOR in
     fi
     echo "::warning title=iluvatar setup::testdeps installed"
 
-    # Sanity check: make sure torch comes from the corex build and that
-    # torch.cuda can actually initialize against the corex driver. cupy is
-    # optional here: the corex cupy is only available in the bundled python
-    # env, and the test suite falls back to the CPU reference without it.
+    # Sanity check: make sure torch comes from the corex build, that torch.cuda
+    # can actually initialize against the corex driver, and that cupy imports
+    # (the tests build their GPU reference through cupy, so a broken cupy must
+    # fail here with the real traceback instead of as a collection error).
     # One consolidated annotation (GitHub caps warnings per step) with the
     # facts needed to debug a missing corex runtime library.
     if [ -n "${GITHUB_ACTIONS:-}" ]; then
@@ -154,24 +168,23 @@ try:
           "| name:", torch.cuda.get_device_name(0))
     if torch.cuda.device_count() == 0:
         raise RuntimeError("no iluvatar device visible to torch")
-    try:
-        import cupy
-        print("cupy:", cupy.__version__)
-    except Exception as e:
-        print("cupy not importable (expected without the bundled corex env):", e)
+    import cupy
+    print("cupy:", cupy.__version__)
+    from cupy_backends.cuda.libs import cublas
+    print("cublas wrapper OK:", cublas is not None)
 except Exception:
     tb = traceback.format_exc()
     print(tb)
-    print("::error title=iluvatar torch sanity check failed::" + tb.replace("%", "%25").replace("\n", "%0A"))
+    print("::error title=iluvatar torch/cupy sanity check failed::" + tb.replace("%", "%25").replace("\n", "%0A"))
     sys.exit(1)
 PYEOF
     SANITY_RC=$?
     set -e
     if [ $SANITY_RC -ne 0 ]; then
-      echo "::error title=iluvatar setup::torch sanity check failed with rc=${SANITY_RC}"
+      echo "::error title=iluvatar setup::torch/cupy sanity check failed with rc=${SANITY_RC}"
       exit 1
     fi
-    echo "::warning title=iluvatar setup::torch sanity check passed"
+    echo "::warning title=iluvatar setup::torch/cupy sanity check passed"
 
     # Mirror FlagGems: bake the corex/CUDA-10.2 runtime env into
     # .venv/bin/activate so any later `source .venv/bin/activate` (the CI
