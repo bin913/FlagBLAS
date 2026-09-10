@@ -70,7 +70,9 @@ def _hgemm_kernel(
         pid_m = group_id * GROUP_M + (pid % group_size)
         pid_n = (pid % width) // group_size
 
-    if SKIP_FULL and pid_m < FULL_GRID_M and pid_n < FULL_GRID_N:
+    # The iluvatar Triton frontend rejects boolean chains of more than two
+    # operands, so keep this as nested (equivalent) binary forms.
+    if (SKIP_FULL and pid_m < FULL_GRID_M) and pid_n < FULL_GRID_N:
         return
 
     offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
@@ -297,7 +299,7 @@ def _hgemm_nn_persistent_kernel(
                 a = tl.load(a_ptrs, cache_modifier=".cg")
                 b = tl.load(b_ptrs, cache_modifier=".cg")
             acc = tl.dot(a, b, acc, out_dtype=tl.float32, allow_tf32=False)
-        if BLOCK_M == 256 and BLOCK_N == 256 and TWO_STEP:
+        if (BLOCK_M == 256 and BLOCK_N == 256) and TWO_STEP:
             # Two-step store for 256x256 tiles (mirrors the bfgemm fix):
             # chaining the RNE fp16 conversion inside tl.store inflates the
             # register peak on this backend; a separate value keeps the
@@ -370,7 +372,7 @@ def _hgemm_nt_native_persistent_kernel(
                 a = tl.load(a_ptrs, cache_modifier=".cg")
                 b = tl.load(b_ptrs, cache_modifier=".cg")
             acc = tl.dot(a, b, acc, out_dtype=tl.float32, allow_tf32=False)
-        if BLOCK_M == 256 and BLOCK_N == 256 and TWO_STEP:
+        if (BLOCK_M == 256 and BLOCK_N == 256) and TWO_STEP:
             # Two-step store: same register-lean epilogue as the NN 256x256 path.
             out = (alpha * acc).to(tl.float16)
             tl.store(c_ptr + offs_m[:, None] * ldc + offs_n[None, :], out)
@@ -513,7 +515,7 @@ def _hgemm_nn_pipe_kernel(
                 a = tl.load(a_ptrs, cache_modifier=".cg")
                 b = tl.load(b_ptrs, cache_modifier=".cg")
             acc = tl.dot(a, b, acc, out_dtype=tl.float32, allow_tf32=False)
-        if BLOCK_M == 256 and BLOCK_N == 256 and TWO_STEP:
+        if (BLOCK_M == 256 and BLOCK_N == 256) and TWO_STEP:
             # Two-step store for 256x256 tiles (mirrors the bfgemm fix):
             # chaining the RNE fp16 conversion inside tl.store inflates the
             # register peak on this backend; a separate value keeps the

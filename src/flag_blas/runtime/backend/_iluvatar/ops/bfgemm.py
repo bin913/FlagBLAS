@@ -70,7 +70,9 @@ def _bfgemm_kernel(
         pid_m = group_id * GROUP_M + (pid % group_size)
         pid_n = (pid % width) // group_size
 
-    if SKIP_FULL and pid_m < FULL_GRID_M and pid_n < FULL_GRID_N:
+    # The iluvatar Triton frontend rejects boolean chains of more than two
+    # operands, so keep this as nested (equivalent) binary forms.
+    if (SKIP_FULL and pid_m < FULL_GRID_M) and pid_n < FULL_GRID_N:
         return
 
     offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
