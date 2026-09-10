@@ -180,7 +180,11 @@ PYEOF
       echo "Baked corex runtime env into .venv/bin/activate: ${COREX_ROOT}"
     fi
     ;;
-
+    RES="--index-url=https://resource.flagos.net/repository/flagos-pypi-hosted/simple"
+    python3.12 -m pip install flagtree===0.6.2a3+iluvatar3.6 $RES
+    uv pip install -e .
+    uv pip install ".[test,iluvatar]"
+    ;;
   ascend)
     # Install PyTorch (CPU build) and torch-npu for Ascend NPU
     uv pip install torch==2.10.0+cpu torch-npu==2.10.0 \
