@@ -120,6 +120,29 @@ case $VENDOR in
     fi
     echo "FlagTree source: ${FLAGTREE_SRC} @ $(git -C "${FLAGTREE_SRC}" rev-parse --short HEAD)"
 
+    # setup.py fetches the iluvatar LLVM toolchain (~1.5 GiB) with urllib while
+    # generating package metadata. On this runner that fails immediately --
+    # "The download failed, probably due to network problems!"
+    # (setup_tools/utils/tools.py, 4 retries, no backoff) -- which aborts the
+    # build before it starts. Fetch the tarball with curl into the directory
+    # FlagTree's cache looks for, so check_file() finds it and the build skips
+    # its own download. Override FLAGTREE_LLVM_URL to use a reachable mirror.
+    FLAGTREE_LLVM_URL=${FLAGTREE_LLVM_URL:-https://baai-cp-web.ks3-cn-beijing.ksyuncs.com/trans/iluvatar-llvm22-x86_64_v0.6.1.tar.gz}
+    LLVM_DIR="${HOME}/.flagtree/iluvatar/iluvatar-llvm22-x86_64"
+    if [ ! -d "${LLVM_DIR}" ]; then
+      mkdir -p "$(dirname "${LLVM_DIR}")"
+      if ! curl -fSL --retry 5 --retry-delay 5 --connect-timeout 30 -C - \
+           -o /tmp/iluvatar-llvm22.tar.gz "${FLAGTREE_LLVM_URL}" \
+           > /tmp/flagtree-llvm-fetch.log 2>&1; then
+        echo "::error title=iluvatar LLVM download failed::curl ${FLAGTREE_LLVM_URL} failed -> $(tail -3 /tmp/flagtree-llvm-fetch.log | tr '\n' ' ' | tail -c 900)"
+        exit 1
+      fi
+      mkdir -p "${LLVM_DIR}"
+      tar xzf /tmp/iluvatar-llvm22.tar.gz -C "${LLVM_DIR}" --strip-components=1
+      rm -f /tmp/iluvatar-llvm22.tar.gz
+    fi
+    echo "iluvatar LLVM: ${LLVM_DIR} ($(du -sh "${LLVM_DIR}" 2>/dev/null | cut -f1))"
+
     # FLAGTREE_BACKEND selects the iluvatar backend, MAX_JOBS the native build
     # parallelism (FlagTree's setup.py reads both). The verbose build output
     # goes to a log file (it is huge) and its tail is echoed verbatim on
