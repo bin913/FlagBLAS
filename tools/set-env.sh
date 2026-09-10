@@ -110,15 +110,21 @@ case $VENDOR in
       done
     done
     # Sweep /usr/local and /opt for any other dir shipping a CUDA-10.2
-    # libcudart (SONAME libcudart.so.10), in case corex lives elsewhere.
+    # libcudart (SONAME libcudart.so.10) or the corex runtime loader lib
+    # (libixthunk.so, a NEEDED entry of libtorch_python.so), in case corex
+    # lives somewhere other than the handful of dirs probed above.
+    _found="$(find /usr/local /opt -maxdepth 5 \
+                \( -name 'libcudart.so.10*' -o -name 'libixthunk.so*' \) \( -type f -o -type l \) 2>/dev/null \
+              | sed 's#/[^/]*$##' | sort -u)"
     while IFS= read -r _cd; do
       [ -n "$_cd" ] || continue
       case ":$_good:" in *":$_cd:"*) ;; *) _good="$_good$_cd:" ;; esac
-    done < <(find /usr/local /opt -maxdepth 5 -name 'libcudart.so.10*' -type f 2>/dev/null | sed 's#/[^/]*$##' | sort -u)
+    done <<< "$_found"
     # Demote (not drop) dirs whose libcudart.so.10 misses the symbol: some
     # corex versions ship a trimmed cudart that keeps the SONAME but drops the
     # deprecated profiler entry point.
     _checked=""
+    _demoted=""
     _rest="$_good"
     while [ -n "$_rest" ]; do
       case "$_rest" in
@@ -139,7 +145,7 @@ case $VENDOR in
         _checked="$_checked$_cd:"
       else
         case ":$_late:" in *":$_cd:"*) ;; *) _late="$_late$_cd:" ;; esac
-        echo "::warning title=iluvatar env::demote lib dir (libcudart.so.10 lacks cudaProfilerInitialize): ${_cd}"
+        _demoted="${_demoted}${_cd} "
       fi
     done
     _good="$_checked"
@@ -165,11 +171,12 @@ case $VENDOR in
     if [ -d /usr/local/cuda-10.2/include ]; then
       export CPATH=/usr/local/cuda-10.2/include
     fi
-    # Emit the resolved env as a workflow annotation so a CI failure can be
-    # diagnosed from the annotations alone (plain stdout of self-hosted runs
-    # is not fetchable without authentication).
+    # Emit the resolved env as a single workflow annotation so a CI failure can
+    # be diagnosed from the annotations alone (plain stdout of self-hosted runs
+    # is not fetchable without authentication). Keep it to ONE line: GitHub
+    # keeps at most 10 warning annotations per step.
     if [ -n "${GITHUB_ACTIONS:-}" ]; then
-      echo "::warning title=iluvatar env::COREX_ROOT=${COREX_ROOT:-<none>}; LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-<empty>}"
+      echo "::warning title=iluvatar env::COREX_ROOT=${COREX_ROOT:-<none>}; demoted=[${_demoted:-none}]; libdirs=${_libdirs:-<empty>}"
     fi
     echo "COREX_ROOT=${COREX_ROOT:-<none>}"
     echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-<empty>}"

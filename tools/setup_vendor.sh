@@ -121,10 +121,19 @@ case $VENDOR in
     # torch.cuda can actually initialize against the corex driver. cupy is
     # optional here: the corex cupy is only available in the bundled python
     # env, and the test suite falls back to the CPU reference without it.
+    # One consolidated annotation (GitHub caps warnings per step) with the
+    # facts needed to debug a missing corex runtime library.
+    if [ -n "${GITHUB_ACTIONS:-}" ]; then
+      _diag="corex=$(ls -d /usr/local/corex* /opt/corex* 2>/dev/null | tr '\n' ',')"
+      _diag="${_diag} pydirs=$(ls -d /usr/local/corex-*/lib*/python3*/dist-packages 2>/dev/null | tr '\n' ',')"
+      _diag="${_diag} ixthunk=$(find /usr/local /opt -maxdepth 6 -name 'libixthunk.so*' 2>/dev/null | tr '\n' ',')"
+      _diag="${_diag} unresolved=$(ldd .venv/lib/python*/site-packages/torch/lib/libtorch_python.so 2>/dev/null | grep 'not found' | tr '\n' ',')"
+      _diag="${_diag} ldpath=$(printf '%s' "${LD_LIBRARY_PATH:-}" | head -c 1200)"
+      echo "::warning title=iluvatar diag::${_diag}"
+    fi
     set +e
     python - <<'PYEOF'
 import sys, os, importlib.metadata, traceback
-print("::warning title=iluvatar env::LD_LIBRARY_PATH=" + os.environ.get("LD_LIBRARY_PATH", "<empty>")[:2000])
 try:
     import torch
     tdir = os.path.dirname(torch.__file__)
