@@ -296,7 +296,13 @@ PYEOF
       # to check when the cupy import below fails.
       _diag="${_diag} pydirs=$(ls -d /usr/local/corex-*/lib*/python3*/{dist,site}-packages 2>/dev/null | tr '\n' ',' || true)"
       _diag="${_diag} cupyenvs=$(find /usr/local /opt -maxdepth 8 -type d -name cupy 2>/dev/null | head -4 | tr '\n' ',' || true)"
-      _diag="${_diag} ixthunk=$(find /usr/local /opt -maxdepth 6 -name 'libixthunk.so*' 2>/dev/null | tr '\n' ',' || true)"
+      # libixthunk.so (the driver thunk behind corex's libcuda.so.1) is what
+      # `import torch` trips over when a corex/driver reinstall left that one
+      # file behind: the rest of the dir still resolves, so it is worth knowing
+      # whether the lib exists anywhere else on the machine, and which
+      # libcuda.so.1 the loader would end up using.
+      _diag="${_diag} ixthunk=$(find /usr /opt /lib -maxdepth 6 -name 'libixthunk.so*' 2>/dev/null | head -3 | tr '\n' ',' || true)"
+      _diag="${_diag} cuda1=$(ldconfig -p 2>/dev/null | grep 'libcuda\.so\.1 ' | tr -s ' ' | cut -d' ' -f4 | tr '\n' ',' || true)"
       _diag="${_diag} unresolved=$(ldd .venv/lib/python*/site-packages/torch/lib/libtorch_python.so 2>/dev/null | grep 'not found' | tr '\n' ',' || true)"
       _diag="${_diag} cudartshim=$(ls .venv/lib/cudart-shim/libcudart.so.10.2 2>/dev/null || echo none)"
       _diag="${_diag} ldpath=$(printf '%s' "${LD_LIBRARY_PATH:-}" | head -c 1200 || true)"
