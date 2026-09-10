@@ -134,6 +134,18 @@ case $VENDOR in
     # be told from here, so try the alternatives in turn and keep the whole log
     # for the failure annotation.
     FLAGTREE_LLVM_URL=${FLAGTREE_LLVM_URL:-https://baai-cp-web.ks3-cn-beijing.ksyuncs.com/trans/iluvatar-llvm22-x86_64_v0.6.1.tar.gz}
+
+    # The proxy replies "Tunnel connection failed: 500 Internal Server Error"
+    # for the hosts below even though they are reachable directly (the KS3
+    # fetch works with --noproxy, and so does the CUDA toolchain URL). FlagTree
+    # downloads with urllib, which honours no_proxy, so exempting these hosts
+    # here covers both this script's curl and the build's own downloads --
+    # without it build_ext dies with "<urlopen error Tunnel connection failed:
+    # 500 Internal Server Error>" while fetching cuda_nvcc.
+    no_proxy="${no_proxy:+${no_proxy},}baai-cp-web.ks3-cn-beijing.ksyuncs.com,developer.download.nvidia.com"
+    export no_proxy
+    export NO_PROXY="${no_proxy}"
+
     LLVM_DIR="${HOME}/.flagtree/iluvatar/iluvatar-llvm22-x86_64"
     # bin/clang rather than a bare -d: FlagTree's check_file() only tests for
     # the directory, so a half-extracted cache from an aborted run would be
