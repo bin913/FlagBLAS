@@ -126,9 +126,12 @@ import sys, os, importlib.metadata, traceback
 try:
     import torch
     tdir = os.path.dirname(torch.__file__)
-    is_corex = "/corex" in tdir
-    print("torch dir:", tdir, "| corex:", is_corex)
     dist = importlib.metadata.version("torch")
+    # Corex builds are tagged +corex (mirror install lands in the plain venv
+    # site-packages, so a path check alone would falsely flag it as vanilla;
+    # the bundled env under /usr/local/corex-* is covered by the dist tag too).
+    is_corex = "+corex" in dist or "/corex" in tdir
+    print("torch dir:", tdir, "| corex:", is_corex)
     print("torch dist:", dist)
     if not is_corex:
         raise RuntimeError(f"vanilla torch in venv, expected corex build (dist={dist})")
