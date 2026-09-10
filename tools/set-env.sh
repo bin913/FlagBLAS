@@ -113,9 +113,10 @@ case $VENDOR in
     # libcudart (SONAME libcudart.so.10) or the corex runtime loader lib
     # (libixthunk.so, a NEEDED entry of libtorch_python.so), in case corex
     # lives somewhere other than the handful of dirs probed above.
+    # `pipefail` + `set -e` would abort here when find hits an unreadable dir.
     _found="$(find /usr/local /opt -maxdepth 5 \
                 \( -name 'libcudart.so.10*' -o -name 'libixthunk.so*' \) \( -type f -o -type l \) 2>/dev/null \
-              | sed 's#/[^/]*$##' | sort -u)"
+              | sed 's#/[^/]*$##' | sort -u || true)"
     while IFS= read -r _cd; do
       [ -n "$_cd" ] || continue
       case ":$_good:" in *":$_cd:"*) ;; *) _good="$_good$_cd:" ;; esac

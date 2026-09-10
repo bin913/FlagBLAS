@@ -124,11 +124,13 @@ case $VENDOR in
     # One consolidated annotation (GitHub caps warnings per step) with the
     # facts needed to debug a missing corex runtime library.
     if [ -n "${GITHUB_ACTIONS:-}" ]; then
-      _diag="corex=$(ls -d /usr/local/corex* /opt/corex* 2>/dev/null | tr '\n' ',')"
-      _diag="${_diag} pydirs=$(ls -d /usr/local/corex-*/lib*/python3*/dist-packages 2>/dev/null | tr '\n' ',')"
-      _diag="${_diag} ixthunk=$(find /usr/local /opt -maxdepth 6 -name 'libixthunk.so*' 2>/dev/null | tr '\n' ',')"
-      _diag="${_diag} unresolved=$(ldd .venv/lib/python*/site-packages/torch/lib/libtorch_python.so 2>/dev/null | grep 'not found' | tr '\n' ',')"
-      _diag="${_diag} ldpath=$(printf '%s' "${LD_LIBRARY_PATH:-}" | head -c 1200)"
+      # `|| true` everywhere: pipefail + set -e would abort on a non-matching
+      # grep or an unreadable dir.
+      _diag="corex=$(ls -d /usr/local/corex* /opt/corex* 2>/dev/null | tr '\n' ',' || true)"
+      _diag="${_diag} pydirs=$(ls -d /usr/local/corex-*/lib*/python3*/dist-packages 2>/dev/null | tr '\n' ',' || true)"
+      _diag="${_diag} ixthunk=$(find /usr/local /opt -maxdepth 6 -name 'libixthunk.so*' 2>/dev/null | tr '\n' ',' || true)"
+      _diag="${_diag} unresolved=$(ldd .venv/lib/python*/site-packages/torch/lib/libtorch_python.so 2>/dev/null | grep 'not found' | tr '\n' ',' || true)"
+      _diag="${_diag} ldpath=$(printf '%s' "${LD_LIBRARY_PATH:-}" | head -c 1200 || true)"
       echo "::warning title=iluvatar diag::${_diag}"
     fi
     set +e
