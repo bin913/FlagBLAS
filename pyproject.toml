@@ -53,6 +53,17 @@ hygon = [
     #"torch==2.4.1+das.opt2.dtk2604",
 	"numpy==1.26.4",
 ]
+
+iluvatar = [
+    "torch==2.7.1+corex.4.4.0",
+    "torchaudio==2.7.1+corex.4.4.0",
+    "torchvision==0.22.1+corex.4.4.0",
+    "numpy<2",
+    # The corex driver reports CUDA 10.2, so the cuda12x/cuda11x cupy builds
+    # abort with "cudaErrorInsufficientDriver"; cuda102 is the only match.
+    "cupy-cuda102",
+]
+
 test = [
     "pytest>=7.1.0",
     "numpy>=1.26",
